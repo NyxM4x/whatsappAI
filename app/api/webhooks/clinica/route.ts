@@ -67,7 +67,12 @@ export async function POST(request: Request) {
     return new Response("invalid json", { status: 400 });
   }
 
+  // DEBUG TEMPORAL — ver estructura del payload de Kapso
+  console.log("KAPSO_PAYLOAD", JSON.stringify(payload).slice(0, 2000));
+
   const incomingMessages = await normalizeIncomingMessages(payload, request);
+
+  console.log("INCOMING_COUNT", incomingMessages.length);
 
   if (incomingMessages.length === 0) {
     return new Response("ignored", { status: 200 });
