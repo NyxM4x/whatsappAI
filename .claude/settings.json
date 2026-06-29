@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(npx vercel *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Read(//c/Users/HP/.claude/projects/c--Users-HP-Desktop-reino-del-bebe-kapso-vercel-main-reino-del-bebe-kapso-vercel-main/memory/**)",
+      "Bash(node -e \"const k = require\\('@kapso/whatsapp-cloud-api'\\); const c = new k.WhatsAppClient\\({baseUrl:'x',kapsoApiKey:'x'}\\); console.log\\(Object.getOwnPropertyNames\\(c.messages\\)\\)\")",
+      "Bash(node -e \"const k = require\\('@kapso/whatsapp-cloud-api'\\); const c = new k.WhatsAppClient\\({baseUrl:'x',kapsoApiKey:'x'}\\); const proto = Object.getPrototypeOf\\(c.messages\\); console.log\\(Object.getOwnPropertyNames\\(proto\\)\\)\")",
+      "Bash(node -e \"const k = require\\('@kapso/whatsapp-cloud-api'\\); const c = new k.WhatsAppClient\\({baseUrl:'x',kapsoApiKey:'x'}\\); console.log\\(c.messages.sendImage.toString\\(\\).slice\\(0,300\\)\\)\")",
+      "Bash(npx tsc *)"
     ]
   }
 }
