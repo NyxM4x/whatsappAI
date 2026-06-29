@@ -67,12 +67,7 @@ export async function POST(request: Request) {
     return new Response("invalid json", { status: 400 });
   }
 
-  // DEBUG TEMPORAL — ver estructura del payload de Kapso
-  console.log("KAPSO_PAYLOAD", JSON.stringify(payload).slice(0, 2000));
-
   const incomingMessages = await normalizeIncomingMessages(payload, request);
-
-  console.log("INCOMING_COUNT", incomingMessages.length);
 
   if (incomingMessages.length === 0) {
     return new Response("ignored", { status: 200 });
@@ -81,13 +76,10 @@ export async function POST(request: Request) {
   const firstMessage = incomingMessages[0];
   const lastMessage = incomingMessages[incomingMessages.length - 1];
 
-  console.log("DEBUG_LAST_MSG", { from: lastMessage.from, text: lastMessage.text, messageId: lastMessage.messageId, conversationId: lastMessage.conversationId });
-
   // Modo test: solo responder al número de prueba si está configurado.
   const testPhone = process.env.TEST_PHONE?.replace(/\D/g, "");
   const incomingPhone = lastMessage.from?.replace(/\D/g, "");
   if (testPhone && incomingPhone !== testPhone) {
-    console.log("DEBUG_TEST_PHONE_FILTERED", { testPhone, incomingPhone });
     return new Response("test mode ignored", { status: 200 });
   }
 
@@ -109,7 +101,6 @@ export async function POST(request: Request) {
   for (const msg of incomingMessages) {
     try {
       const saved = await saveInboundMessage(msg as any);
-      console.log("DEBUG_SAVE_INBOUND", { saved: !!saved, messageId: msg.messageId });
       if (saved) newMessages.push(msg);
     } catch (err) {
       console.error("saveInboundMessage threw", err);
@@ -117,12 +108,10 @@ export async function POST(request: Request) {
   }
 
   if (newMessages.length === 0) {
-    console.log("DEBUG_DUPLICATE_IGNORED");
     return new Response("duplicate ignored", { status: 200 });
   }
 
   // ── Lock anti-duplicado ───────────────────────────────────────────────────
-  console.log("DEBUG_ACQUIRING_LOCK", { conversationId: lastMessage.conversationId, messageId: lastMessage.messageId });
   const canReply = await acquireReplyLock({
     conversationId: lastMessage.conversationId,
     lastMessageId: lastMessage.messageId,
@@ -130,7 +119,6 @@ export async function POST(request: Request) {
     batchSize: incomingMessages.length,
   });
 
-  console.log("DEBUG_CAN_REPLY", canReply);
   if (!canReply) return new Response("reply already processed", { status: 200 });
 
   // ── Pausa del bot ─────────────────────────────────────────────────────────
