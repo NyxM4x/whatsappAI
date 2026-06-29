@@ -190,24 +190,30 @@ export async function POST(request: Request) {
     return new Response("ok", { status: 200 });
   }
 
-  // ── 4a. awaiting_proof + texto (sin media) → Q&A + recordatorio ──────────
+  // ── 4a. awaiting_proof + texto (sin media) → reenviar QR o Q&A ───────────
   if (session.step === "awaiting_proof" && !hasMedia && newText.trim()) {
-    try {
-      const history = await getRecentConversationHistory(conversationId, 8);
-      const { text } = await generateText({
-        model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
-        system: buildClinicSystemPrompt(),
-        messages: [
-          ...history.map((h) => ({ role: h.role as "user" | "assistant", content: h.content })),
-          { role: "user", content: newText },
-        ],
-      });
-      replyText = (text.trim() || clinic.replies.welcome) +
-        "\n\n_Recuerde que para confirmar su cita debe enviarnos el comprobante de pago (foto o PDF) 😊_";
-    } catch {
-      replyText = "Estamos esperando el *comprobante de pago* (imagen o PDF) para confirmar su cita 😊";
+    const asksForQr = /qr|pago|código|codigo|envía|envia|manda|pásame|pasame|comparte/i.test(newText);
+    if (asksForQr && clinic.qrImageUrl) {
+      replyText = "Aquí le reenvío el QR de pago 😊 Una vez realizado el pago, envíe el comprobante (foto o PDF) y lo validamos. ¡Gracias! 🙏";
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "send_qr", lastMessage });
+    } else {
+      try {
+        const history = await getRecentConversationHistory(conversationId, 8);
+        const { text } = await generateText({
+          model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+          system: buildClinicSystemPrompt(),
+          messages: [
+            ...history.map((h) => ({ role: h.role as "user" | "assistant", content: h.content })),
+            { role: "user", content: newText },
+          ],
+        });
+        replyText = (text.trim() || clinic.replies.welcome) +
+          "\n\n_Recuerde que para confirmar su cita debe enviarnos el comprobante de pago (foto o PDF) 😊_";
+      } catch {
+        replyText = "Estamos esperando el *comprobante de pago* (imagen o PDF) para confirmar su cita 😊";
+      }
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
     }
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
     return new Response("ok", { status: 200 });
   }
 

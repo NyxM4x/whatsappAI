@@ -7,6 +7,40 @@
 
 import { autoPauseBotFromBusinessApp } from "@/lib/engine/data";
 
+// Transcribe un audio usando OpenAI Whisper. Descarga el archivo desde la URL
+// (con la API key de Kapso si es necesario) y lo envía a la API de Whisper.
+async function transcribeAudio(audioUrl: string): Promise<string | null> {
+  if (!process.env.OPENAI_API_KEY) return null;
+  try {
+    const audioRes = await fetch(audioUrl, {
+      headers: process.env.KAPSO_API_KEY
+        ? { "X-API-Key": process.env.KAPSO_API_KEY }
+        : {},
+    });
+    if (!audioRes.ok) return null;
+
+    const buffer = await audioRes.arrayBuffer();
+    const blob = new Blob([buffer], { type: "audio/ogg" });
+
+    const form = new FormData();
+    form.append("file", blob, "audio.ogg");
+    form.append("model", "whisper-1");
+    form.append("language", "es");
+
+    const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      body: form,
+    });
+
+    if (!res.ok) return null;
+    const json = await res.json() as { text?: string };
+    return typeof json.text === "string" && json.text.trim() ? json.text.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 export type MediaType = "image" | "document" | "audio" | null;
 
 export type IncomingMessage = {
@@ -159,19 +193,29 @@ async function extractIncomingFromEvent(
   const contactName = event.conversation?.contact_name ?? null;
   const messageTimestamp = parseKapsoTimestamp(event.message?.timestamp);
 
-  // Audio sin texto → conservamos el evento para respuesta fija, pero sin texto útil.
+  // Audio sin texto → intentar transcripción con Whisper.
   const isAudio = messageType === "audio" || Boolean(event.message?.audio);
-  const audioWithoutTranscript = isAudio && !audioTranscriptText(event.message, event.conversation);
+  let audioWithoutTranscript = isAudio && !audioTranscriptText(event.message, event.conversation);
 
   // Media adjunta (imagen/documento/audio).
   const { url: mediaUrl, type: mediaType } = extractMediaUrl(event.message);
 
+  // Transcripción con Whisper si el audio no trae texto de Kapso.
+  let finalText = text;
+  if (audioWithoutTranscript && mediaUrl) {
+    const transcript = await transcribeAudio(mediaUrl);
+    if (transcript) {
+      finalText = `🎙️ _Audio:_ ${transcript}`;
+      audioWithoutTranscript = false;
+    }
+  }
+
   // Eventos sin remitente ni texto (y sin media) no son mensajes procesables.
-  if (!from || (!text && !mediaUrl)) return null;
+  if (!from || (!finalText && !mediaUrl)) return null;
 
   return {
     from,
-    text: text || "",
+    text: finalText || "",
     messageId,
     conversationId,
     contactName,
