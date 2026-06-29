@@ -23,10 +23,8 @@ export const clinic = {
   welcomeMessage:
     "Bienvenido a Clínica San Martín de Porres 😊 ¿En qué podemos ayudarle?",
 
-  // ⚠️ TODO: subir el QR BNB real a un lugar público y pegar la URL aquí.
-  qrImageUrl: "https://tudominio.com/qr-bnb.png",
+  qrImageUrl: "https://whatsapp-ai-chi.vercel.app/qr-bnb.jpg",
   paymentMethods: ["QR BNB", "Efectivo"],
-
   // Catálogos (se muestran cuando el paciente pregunta por exámenes/medicamentos).
   labs: [
     { name: "Hemograma Completo", price: 80 },
