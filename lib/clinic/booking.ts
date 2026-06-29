@@ -16,6 +16,9 @@
 // Efectivo: se crea el evento en Google Calendar de inmediato.
 // ============================================================================
 
+import { openai } from "@ai-sdk/openai";
+import { generateText } from "ai";
+
 import {
   getBusyIntervals,
   computeAvailableSlots,
@@ -80,6 +83,26 @@ function parseNumberChoice(text: string): number | null {
     cinco: 5, "5to": 5, quinto: 5,
   };
   return words[clean.toLowerCase()] ?? null;
+}
+
+// Usa OpenAI para resolver lenguaje natural a un índice de lista cuando
+// parseNumberChoice no pudo hacerlo.
+async function resolveChoiceWithAI(userText: string, options: string[]): Promise<number | null> {
+  if (!options.length) return null;
+  const list = options.map((o, i) => `${i + 1}. ${o}`).join("\n");
+  try {
+    const { text } = await generateText({
+      model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+      system: "El usuario está eligiendo una opción de una lista. Responde SOLO con el número de la opción que mejor coincide con lo que escribió. Si no coincide con ninguna, responde 0.",
+      prompt: `Lista:\n${list}\n\nEl usuario escribió: "${userText}"\n\n¿Con qué número coincide?`,
+      temperature: 0,
+    });
+    const n = parseInt(text.trim(), 10);
+    if (!isNaN(n) && n >= 1 && n <= options.length) return n;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function emptyHold(): BookingHold {
@@ -167,11 +190,11 @@ export async function advanceBooking(params: {
   // ── choosing_specialty ────────────────────────────────────────────────────
   if (step === "choosing_specialty") {
     const specialties = await getSpecialties(business);
-    const idx = parseNumberChoice(text);
+    const idx = parseNumberChoice(text) ?? await resolveChoiceWithAI(text, specialties.map(s => s.name));
 
     if (!idx || idx < 1 || idx > specialties.length) {
       const lines = specialties.map((s, i) => `  ${i + 1}. ${s.name}`).join("\n");
-      return reply(`No entendí 😊 Por favor elija un número del 1 al ${specialties.length}:\n\n${lines}`, "none", session);
+      return reply(`No entendí 😊 Por favor elija una especialidad:\n\n${lines}`, "none", session);
     }
 
     const specialty = specialties[idx - 1];
@@ -206,11 +229,11 @@ export async function advanceBooking(params: {
   // ── choosing_doctor ───────────────────────────────────────────────────────
   if (step === "choosing_doctor") {
     const doctors = draft.specialtyId ? await getDoctorsBySpecialty(business, draft.specialtyId) : [];
-    const idx = parseNumberChoice(text);
+    const idx = parseNumberChoice(text) ?? await resolveChoiceWithAI(text, doctors.map(d => d.name));
 
     if (!idx || !doctors[idx - 1]) {
       const lines = doctors.map((d, i) => `  ${i + 1}. ${d.name}`).join("\n");
-      return reply(`No entendí. Elija un número:\n\n${lines}`, "none", session);
+      return reply(`No entendí 😊 Elija un médico:\n\n${lines}`, "none", session);
     }
 
     const doctor = doctors[idx - 1];
@@ -230,10 +253,11 @@ export async function advanceBooking(params: {
   // ── choosing_slot ─────────────────────────────────────────────────────────
   if (step === "choosing_slot") {
     const slots = draft.offeredSlots ?? [];
-    const idx = parseNumberChoice(text);
+    const slotLabels = slots.map(s => formatSlotLocal(s.start, clinic.timezone));
+    const idx = parseNumberChoice(text) ?? await resolveChoiceWithAI(text, slotLabels);
 
     if (!idx || !slots[idx - 1]) {
-      return reply(`No entendí 😊 Por favor elija un número del 1 al ${slots.length}.`, "none", session);
+      return reply(`No entendí 😊 Por favor elija un horario del 1 al ${slots.length}.`, "none", session);
     }
 
     const chosen = slots[idx - 1];
