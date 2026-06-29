@@ -311,11 +311,13 @@ async function sendAndPersist(params: {
   // Enviar QR si se solicitó.
   if (action === "send_qr" && clinic.qrImageUrl) {
     try {
-      await (kapso.messages as any).sendImage?.({
+      await kapso.messages.sendImage({
         phoneNumberId,
         to: contactPhone,
-        imageUrl: clinic.qrImageUrl,
-        caption: "Escanee este QR para realizar el pago 😊",
+        image: {
+          link: clinic.qrImageUrl,
+          caption: "Escanee este QR para realizar el pago 😊",
+        },
       });
     } catch (err) {
       console.error("kapso sendImage (QR) failed", err);
