@@ -82,6 +82,18 @@ export async function getSpecialties(business: string): Promise<Specialty[]> {
   return (data ?? []).map(mapSpecialty);
 }
 
+export async function getSpecialtyById(id: string): Promise<Specialty | null> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clinic_specialties")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return mapSpecialty(data);
+}
+
 export async function getDoctorsBySpecialty(
   business: string,
   specialtyId: string,

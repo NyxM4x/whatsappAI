@@ -408,7 +408,14 @@ export async function advanceBooking(params: {
             startIso: draft.slotStart,
             endIso: draft.slotEnd,
             summary: `Cita: ${draft.patientName}`,
-            description: `Paciente: ${draft.patientName}\nCI: ${draft.patientCi ?? "—"}\nMotivo: ${draft.reason ?? "—"}\nPago: Efectivo`,
+            description: [
+              `Paciente: ${draft.patientName}`,
+              `CI: ${draft.patientCi ?? "—"}`,
+              `Tel: ${contactPhone}`,
+              `Especialidad: ${draft.specialtyName ?? "—"}`,
+              `Motivo: ${draft.reason ?? "—"}`,
+              `Pago: Efectivo`,
+            ].join("\n"),
           });
           if (appointmentId && eventId) {
             await updateAppointment(appointmentId, { googleEventId: eventId });

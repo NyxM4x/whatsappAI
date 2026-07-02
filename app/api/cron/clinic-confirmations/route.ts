@@ -20,6 +20,7 @@ import {
   getConfirmedAppointmentsWithoutEvent,
   getCanceledAppointmentsWithEvent,
   getDoctorById,
+  getSpecialtyById,
   updateAppointment,
 } from "@/lib/clinic/data";
 import {
@@ -69,18 +70,21 @@ export async function GET(request: Request) {
         continue;
       }
 
+      const specialty = appt.specialtyId ? await getSpecialtyById(appt.specialtyId) : null;
+
       const eventId = await createAppointmentEvent({
         calendarId: doctor.googleCalendarId,
         timezone: doctor.timezone,
         startIso: appt.scheduledStart,
         endIso: appt.scheduledEnd,
-        summary: `Cita: ${appt.patientName ?? "Paciente"}`,
+        summary: `Cita: ${appt.patientName ?? "Paciente"} — ${doctor.name}`,
         description: [
           `Paciente: ${appt.patientName ?? "—"}`,
           `CI: ${appt.patientCi ?? "—"}`,
+          `Tel: ${appt.contactPhone}`,
+          `Especialidad: ${specialty?.name ?? "—"}`,
           `Motivo: ${appt.reason ?? "—"}`,
           `Pago: ${appt.paymentMethod === "qr" ? "QR BNB" : "Efectivo"}`,
-          `Tel: ${appt.contactPhone}`,
         ].join("\n"),
       });
 
