@@ -1,12 +1,1 @@
-{
-  "crons": [
-    {
-      "path": "/api/cron/clinic-confirmations",
-      "schedule": "*/15 * * * *"
-    },
-    {
-      "path": "/api/cron/clinic-reminders",
-      "schedule": "0 * * * *"
-    }
-  ]
-}
+{}
