@@ -155,7 +155,7 @@ async function getAvailableSlots(doctor: Doctor, conversationId: string): Promis
 
 function slotsMessage(slots: TimeSlot[], tz: string): string {
   const lines = slots.map((s, i) => `  ${i + 1}. ${formatSlotLocal(s.start, tz)}`);
-  return `Estos son los horarios disponibles:\n\n${lines.join("\n")}\n\n¿Cuál prefiere? (responda con el número)`;
+  return `Estos son los horarios disponibles:\n\n${lines.join("\n")}\n\n¿Cuál le viene bien?`;
 }
 
 // ─── Avanzar la máquina de pasos ─────────────────────────────────────────────
@@ -184,7 +184,7 @@ export async function advanceBooking(params: {
     const lines = specialties.map((s, i) => `  ${i + 1}. ${s.name}`).join("\n");
     draft = {};
     const newSession = await saveAndReturn(conversationId, business, "choosing_specialty", draft, emptyHold());
-    return reply(`Perfecto 😊 ¿Qué especialidad necesita?\n\n${lines}\n\nResponda con el número de su elección.`, "none", newSession);
+    return reply(`Perfecto 😊 ¿Qué especialidad necesita?\n\n${lines}\n\n¿Cuál necesita?`, "none", newSession);
   }
 
   // ── choosing_specialty ────────────────────────────────────────────────────
@@ -194,7 +194,7 @@ export async function advanceBooking(params: {
 
     if (!idx || idx < 1 || idx > specialties.length) {
       const lines = specialties.map((s, i) => `  ${i + 1}. ${s.name}`).join("\n");
-      return reply(`No entendí 😊 Por favor elija una especialidad:\n\n${lines}`, "none", session);
+      return reply(`No entendí bien 😊 ¿Cuál de estas especialidades necesita?\n\n${lines}`, "none", session);
     }
 
     const specialty = specialties[idx - 1];
@@ -223,7 +223,7 @@ export async function advanceBooking(params: {
 
     const lines = doctors.map((d, i) => `  ${i + 1}. ${d.name}${d.consultationPrice ? ` — ${d.consultationPrice} Bs` : ""}`).join("\n");
     const newSession = await saveAndReturn(conversationId, business, "choosing_doctor", draft, emptyHold());
-    return reply(`Médicos disponibles en ${specialty.name}:\n\n${lines}\n\n¿Con quién prefiere? (número)`, "none", newSession);
+    return reply(`Médicos disponibles en ${specialty.name}:\n\n${lines}\n\n¿Con quién prefiere?`, "none", newSession);
   }
 
   // ── choosing_doctor ───────────────────────────────────────────────────────
@@ -233,7 +233,7 @@ export async function advanceBooking(params: {
 
     if (!idx || !doctors[idx - 1]) {
       const lines = doctors.map((d, i) => `  ${i + 1}. ${d.name}`).join("\n");
-      return reply(`No entendí 😊 Elija un médico:\n\n${lines}`, "none", session);
+      return reply(`No entendí bien 😊 ¿Con cuál de estos médicos prefiere?\n\n${lines}`, "none", session);
     }
 
     const doctor = doctors[idx - 1];
@@ -257,7 +257,7 @@ export async function advanceBooking(params: {
     const idx = parseNumberChoice(text) ?? await resolveChoiceWithAI(text, slotLabels);
 
     if (!idx || !slots[idx - 1]) {
-      return reply(`No entendí 😊 Por favor elija un horario del 1 al ${slots.length}.`, "none", session);
+      return reply(`No entendí bien 😊 ¿Cuál de estos horarios le viene bien?\n\n${slotsMessage(slots, clinic.timezone)}`, "none", session);
     }
 
     const chosen = slots[idx - 1];
