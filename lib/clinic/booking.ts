@@ -295,14 +295,8 @@ export async function advanceBooking(params: {
       return reply("No pude verificar la disponibilidad. Intente de nuevo.", "none", await resetAndReturn(conversationId, business));
     }
 
-    // Re-verificar disponibilidad justo antes de escribir el hold.
+    // Re-verificar disponibilidad con timeout de 5s para no exceder el límite de Vercel.
     const nowIso = new Date().toISOString();
-    const [busyNow, holdsNow, activeAppts] = await Promise.all([
-      getBusyIntervals(doctor.googleCalendarId, nowIso, chosen.end),
-      getActiveHoldsForDoctor(doctor.id, conversationId),
-      getActiveAppointmentSlotsForDoctor(doctor.id, nowIso, chosen.end),
-    ]);
-
     const chosenStart = new Date(chosen.start).getTime();
     const chosenEnd = new Date(chosen.end).getTime();
 
@@ -310,15 +304,32 @@ export async function advanceBooking(params: {
       return new Date(b.start).getTime() < chosenEnd && new Date(b.end).getTime() > chosenStart;
     }
 
-    if (busyNow.some(slotOverlaps) || holdsNow.some(slotOverlaps) || activeAppts.some(slotOverlaps)) {
-      const freshSlots = await getAvailableSlots(doctor, conversationId);
-      if (!freshSlots.length) {
-        const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
-        return reply("Ese horario ya no está disponible y no quedan turnos libres. ¿Le puedo ayudar en otra cosa?", "none", newSession);
+    try {
+      const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000));
+      const verification = Promise.all([
+        getBusyIntervals(doctor.googleCalendarId, nowIso, chosen.end),
+        getActiveHoldsForDoctor(doctor.id, conversationId),
+        getActiveAppointmentSlotsForDoctor(doctor.id, nowIso, chosen.end),
+      ]);
+
+      const result = await Promise.race([verification, timeout]);
+
+      if (result !== null) {
+        const [busyNow, holdsNow, activeAppts] = result;
+        if (busyNow.some(slotOverlaps) || holdsNow.some(slotOverlaps) || activeAppts.some(slotOverlaps)) {
+          const freshSlots = await getAvailableSlots(doctor, conversationId);
+          if (!freshSlots.length) {
+            const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+            return reply("Ese horario ya no está disponible y no quedan turnos libres. ¿Le puedo ayudar en otra cosa?", "none", newSession);
+          }
+          draft = { ...draft, offeredSlots: freshSlots };
+          const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+          return reply(`Ese horario acaba de ser tomado 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
+        }
       }
-      draft = { ...draft, offeredSlots: freshSlots };
-      const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
-      return reply(`Ese horario acaba de ser tomado 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
+      // Si timeout → continuar optimistamente (el slot fue validado al mostrarse).
+    } catch (err) {
+      console.error("slot re-verification failed, proceeding optimistically", err);
     }
 
     // Slot libre → escribir hold de 30 minutos.
