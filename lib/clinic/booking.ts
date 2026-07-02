@@ -105,6 +105,30 @@ async function resolveChoiceWithAI(userText: string, options: string[]): Promise
   }
 }
 
+// Responde una pregunta del cliente dentro del flujo de reserva sin perder el paso actual.
+async function replyInContext(
+  userText: string,
+  contextHint: string,
+  followUp: string,
+  session: BookingSession,
+): Promise<BookingResult> {
+  try {
+    const { text } = await generateText({
+      model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+      system: `Eres la recepcionista virtual de la Clínica San Martín de Porres (Bolivia).
+Estás ayudando a un paciente a agendar una cita y está en el paso: ${contextHint}.
+Responde su pregunta de forma breve y cálida, como una recepcionista boliviana empática.
+Al final de tu respuesta, invítalo suavemente a continuar con el agendamiento.
+No inventes horarios, precios ni doctores. Si no sabes algo, dile que puede llamar al +591 75681881.`,
+      prompt: userText,
+      temperature: 0.7,
+    });
+    return { reply: `${text.trim()}\n\n${followUp}`, action: "none", session };
+  } catch {
+    return { reply: `${followUp}`, action: "none", session };
+  }
+}
+
 function emptyHold(): BookingHold {
   return { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null };
 }
@@ -194,7 +218,7 @@ export async function advanceBooking(params: {
 
     if (!idx || idx < 1 || idx > specialties.length) {
       const lines = specialties.map((s, i) => `  ${i + 1}. ${s.name}`).join("\n");
-      return reply(`No entendí bien 😊 ¿Cuál de estas especialidades necesita?\n\n${lines}`, "none", session);
+      return replyInContext(text, "eligiendo especialidad", `¿Cuál de estas especialidades necesita?\n\n${lines}`, session);
     }
 
     const specialty = specialties[idx - 1];
@@ -233,7 +257,7 @@ export async function advanceBooking(params: {
 
     if (!idx || !doctors[idx - 1]) {
       const lines = doctors.map((d, i) => `  ${i + 1}. ${d.name}`).join("\n");
-      return reply(`No entendí bien 😊 ¿Con cuál de estos médicos prefiere?\n\n${lines}`, "none", session);
+      return replyInContext(text, "eligiendo médico", `¿Con cuál de estos médicos prefiere?\n\n${lines}`, session);
     }
 
     const doctor = doctors[idx - 1];
@@ -257,7 +281,7 @@ export async function advanceBooking(params: {
     const idx = parseNumberChoice(text) ?? await resolveChoiceWithAI(text, slotLabels);
 
     if (!idx || !slots[idx - 1]) {
-      return reply(`No entendí bien 😊 ¿Cuál de estos horarios le viene bien?\n\n${slotsMessage(slots, clinic.timezone)}`, "none", session);
+      return replyInContext(text, "eligiendo horario", slotsMessage(slots, clinic.timezone), session);
     }
 
     const chosen = slots[idx - 1];
