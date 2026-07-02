@@ -477,11 +477,78 @@ export async function handlePaymentProof(params: {
     return reply(clinic.replies.proofButNoBooking, "none", newSession);
   }
 
-  await updateAppointment(draft.appointmentId, {
-    paymentProofUrl: mediaUrl,
-    status: "payment_review",
-  });
+  // Guardar URL del comprobante primero (independientemente del resultado).
+  await updateAppointment(draft.appointmentId, { paymentProofUrl: mediaUrl });
 
+  // AUTO-VALIDACIÓN: desactivada hasta verificar flujos en producción.
+  // Para activar: cambiar PAYMENT_AUTO_VALIDATE=true en las env vars.
+  const autoValidateEnabled = process.env.PAYMENT_AUTO_VALIDATE === "true";
+
+  // Obtener precio esperado del doctor.
+  let expectedPrice: number | null = null;
+  if (autoValidateEnabled && draft.doctorId) {
+    const doctor = await getDoctorById(draft.doctorId);
+    expectedPrice = doctor?.consultationPrice ?? null;
+  }
+
+  // Intentar validación automática con GPT-4o-mini vision.
+  if (autoValidateEnabled && expectedPrice !== null) {
+    try {
+      // Descargar imagen con header de autenticación Kapso si está disponible.
+      const imgRes = await fetch(mediaUrl, {
+        headers: process.env.KAPSO_API_KEY ? { "X-API-Key": process.env.KAPSO_API_KEY } : {},
+      });
+
+      if (imgRes.ok) {
+        const imgBuffer = await imgRes.arrayBuffer();
+        const imgUint8 = new Uint8Array(imgBuffer);
+
+        const { text: rawAmount } = await generateText({
+          model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "image", image: imgUint8 },
+                {
+                  type: "text",
+                  text: `Este es un comprobante de transferencia/pago QR boliviano. Extrae ÚNICAMENTE el monto total pagado en bolivianos (Bs). Responde solo con el número (ej: "150" o "85.50"). Si no puedes leerlo o no es un comprobante de pago, responde "N/A".`,
+                },
+              ],
+            },
+          ],
+        });
+
+        const cleaned = rawAmount.trim().replace(/[^0-9.]/g, "");
+        const amount = parseFloat(cleaned);
+
+        if (!isNaN(amount) && amount >= expectedPrice) {
+          await updateAppointment(draft.appointmentId, { status: "confirmed" });
+          const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+          return reply(
+            `✅ ¡Pago verificado! Su cita quedó *confirmada* 😊\n\nLe esperamos en la Clínica San Martín de Porres. Cualquier consulta llámenos al +591 75681881. ¡Hasta pronto! 🙏`,
+            "none",
+            newSession,
+          );
+        }
+
+        if (!isNaN(amount) && amount < expectedPrice) {
+          await updateAppointment(draft.appointmentId, { status: "payment_review" });
+          const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+          return reply(
+            `Recibimos su comprobante, pero el monto detectado (*${amount} Bs*) no coincide con el precio de consulta (*${expectedPrice} Bs*) 🤔\n\nPor favor verifique el pago y reenvíe el comprobante correcto. Si tiene dudas llámenos al +591 75681881 😊`,
+            "none",
+            newSession,
+          );
+        }
+      }
+    } catch (err) {
+      console.error("GPT vision payment validation failed", err);
+    }
+  }
+
+  // Fallback: guardar en revisión y notificar al cliente.
+  await updateAppointment(draft.appointmentId, { status: "payment_review" });
   const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
   return reply(clinic.replies.proofReceived, "none", newSession);
 }

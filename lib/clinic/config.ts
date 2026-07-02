@@ -69,7 +69,7 @@ export const clinic = {
     welcome:
       "Bienvenido a Clínica San Martín de Porres 😊 Puedo ayudarle a *agendar una cita* o darle información (especialidades, precios, dirección, horarios). ¿Qué necesita?",
     proofReceived:
-      "¡Recibí su comprobante! 🙏 Nuestro equipo lo validará y le confirmaremos su cita en breve.",
+      "¡Recibí su comprobante! 🙏 No pudimos validarlo automáticamente; nuestro equipo lo revisará y le confirmaremos su cita en breve. Si tiene dudas llámenos al +591 75681881 😊",
     proofButNoBooking:
       "Gracias 😊 ¿Desea agendar una cita? Escríbame y empezamos.",
     noActiveAppointment:
