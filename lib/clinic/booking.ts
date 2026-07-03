@@ -367,33 +367,74 @@ export async function advanceBooking(params: {
 
     const friendlySlot = formatSlotLocal(chosen.start, clinic.timezone);
     return reply(
-      `¡Aparté su horario por 30 minutos! 🎉\n\n📅 *${friendlySlot}*\n👨‍⚕️ ${doctor.name}\n\nPara confirmar necesito algunos datos.\n\n¿Cuál es su *nombre completo*?`,
+      `¡Aparté su horario por 30 minutos! 🎉\n\n📅 *${friendlySlot}*\n👨‍⚕️ ${doctor.name}\n\nPara confirmar necesito algunos datos:\n\n👤 *Nombre completo*\n🪪 *Carnet de Identidad (CI)*\n💊 *Motivo de consulta*\n\nPuede respondernos todo en un mensaje o por separado 😊`,
       "none",
       { conversationId, step: "collecting_name", draft, hold: newHold },
     );
   }
 
-  // ── collecting_name ───────────────────────────────────────────────────────
-  if (step === "collecting_name") {
-    if (text.length < 3) return reply("Por favor ingrese su nombre completo.", "none", session);
-    draft = { ...draft, patientName: text };
-    const newSession = await saveAndReturn(conversationId, business, "collecting_ci", draft, hold);
-    return reply("Gracias 😊 ¿Cuál es su *número de Carnet de Identidad* (CI)?", "none", newSession);
-  }
+  // ── collecting_name / collecting_ci / collecting_reason ───────────────────
+  // Los tres pasos se preguntan juntos. Si el cliente responde todo en un
+  // mensaje, GPT extrae los tres campos. Si solo responde uno, avanzamos
+  // acumulando lo que falte.
+  if (step === "collecting_name" || step === "collecting_ci" || step === "collecting_reason") {
+    // Intentar extraer campos faltantes con GPT.
+    const missing = {
+      name: !draft.patientName,
+      ci: !draft.patientCi,
+      reason: !draft.reason,
+    };
 
-  // ── collecting_ci ─────────────────────────────────────────────────────────
-  if (step === "collecting_ci") {
-    const ci = text.replace(/\s+/g, "");
-    if (ci.length < 5) return reply("Por favor ingrese un número de CI válido.", "none", session);
-    draft = { ...draft, patientCi: ci };
-    const newSession = await saveAndReturn(conversationId, business, "collecting_reason", draft, hold);
-    return reply("Anotado ✅ ¿Cuál es el *motivo de consulta*? (puede ser breve, ej: 'dolor de cabeza', 'control general')", "none", newSession);
-  }
+    if (missing.name || missing.ci || missing.reason) {
+      try {
+        const fieldsNeeded = [
+          missing.name && "nombre completo del paciente",
+          missing.ci && "número de Carnet de Identidad (CI, solo dígitos)",
+          missing.reason && "motivo de consulta",
+        ].filter(Boolean).join(", ");
 
-  // ── collecting_reason ─────────────────────────────────────────────────────
-  if (step === "collecting_reason") {
-    if (text.length < 3) return reply("Por favor indique brevemente el motivo de su consulta.", "none", session);
-    draft = { ...draft, reason: text };
+        const { text: extracted } = await generateText({
+          model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+          system: `Extrae los siguientes campos del mensaje del usuario: ${fieldsNeeded}.
+Responde ÚNICAMENTE con un JSON con las claves: "name", "ci", "reason".
+Si un campo no está presente en el mensaje, usa null.
+Ejemplos:
+- "Me llamo Juan Pérez, CI 1234567, me duele la cabeza" → {"name":"Juan Pérez","ci":"1234567","reason":"dolor de cabeza"}
+- "Juan Pérez" → {"name":"Juan Pérez","ci":null,"reason":null}
+- "1234567" → {"name":null,"ci":"1234567","reason":null}`,
+          prompt: text,
+          temperature: 0,
+        });
+
+        const parsed = JSON.parse(extracted.trim().replace(/^```json|```$/g, "").trim());
+        if (parsed.name && missing.name) draft = { ...draft, patientName: String(parsed.name) };
+        if (parsed.ci && missing.ci) draft = { ...draft, patientCi: String(parsed.ci).replace(/\s+/g, "") };
+        if (parsed.reason && missing.reason) draft = { ...draft, reason: String(parsed.reason) };
+      } catch {
+        // Si GPT falla, tratar el texto como el campo que falta primero.
+        if (missing.name && text.length >= 3) draft = { ...draft, patientName: text };
+        else if (missing.ci) draft = { ...draft, patientCi: text.replace(/\s+/g, "") };
+        else if (missing.reason && text.length >= 3) draft = { ...draft, reason: text };
+      }
+    }
+
+    // Ver qué falta aún y pedir solo eso.
+    const stillMissingName = !draft.patientName;
+    const stillMissingCi = !draft.patientCi;
+    const stillMissingReason = !draft.reason;
+
+    if (stillMissingName || stillMissingCi || stillMissingReason) {
+      const pending = [
+        stillMissingName && "👤 *Nombre completo*",
+        stillMissingCi && "🪪 *Carnet de Identidad (CI)*",
+        stillMissingReason && "💊 *Motivo de consulta*",
+      ].filter(Boolean).join("\n");
+      const currentStep = stillMissingName ? "collecting_name" : stillMissingCi ? "collecting_ci" : "collecting_reason";
+      const newSession = await saveAndReturn(conversationId, business, currentStep, draft, hold);
+      return reply(`Gracias 😊 Aún me falta:\n\n${pending}`, "none", newSession);
+    }
+
+    // Todos los datos completos → ir a elegir pago.
     const newSession = await saveAndReturn(conversationId, business, "choosing_payment", draft, hold);
 
     let price = 150;
@@ -403,7 +444,7 @@ export async function advanceBooking(params: {
     }
 
     return reply(
-      `Perfecto 😊 ¿Cómo prefiere pagar la consulta? (${price} Bs)\n\n  1. QR BNB\n  2. Efectivo\n\n(responda 1 o 2)`,
+      `Perfecto 😊 ¿Cómo prefiere pagar la consulta? (*${price} Bs*)\n\n  1. QR BNB\n  2. Efectivo`,
       "none",
       newSession,
     );
@@ -454,12 +495,18 @@ export async function advanceBooking(params: {
 
       if (doctor.googleCalendarId) {
         try {
+          console.log("createAppointmentEvent starting", {
+            calendarId: doctor.googleCalendarId,
+            start: draft.slotStart,
+            end: draft.slotEnd,
+            patient: draft.patientName,
+          });
           const eventId = await createAppointmentEvent({
             calendarId: doctor.googleCalendarId,
             timezone: doctor.timezone,
             startIso: draft.slotStart,
             endIso: draft.slotEnd,
-            summary: `Cita: ${draft.patientName}`,
+            summary: `Cita: ${draft.patientName} — ${doctor.name}`,
             description: [
               `Paciente: ${draft.patientName}`,
               `CI: ${draft.patientCi ?? "—"}`,
@@ -469,12 +516,19 @@ export async function advanceBooking(params: {
               `Pago: Efectivo`,
             ].join("\n"),
           });
+          console.log("createAppointmentEvent result", { eventId });
           if (appointmentId && eventId) {
             await updateAppointment(appointmentId, { googleEventId: eventId });
           }
-        } catch (err) {
-          console.error("createAppointmentEvent (cash) failed", err);
+        } catch (err: any) {
+          console.error("createAppointmentEvent (cash) failed", {
+            message: err?.message,
+            status: err?.status ?? err?.code,
+            details: err?.errors ?? err?.response?.data,
+          });
         }
+      } else {
+        console.warn("doctor has no googleCalendarId, skipping event creation", { doctorId: doctor.id });
       }
 
       await resetBookingSession(conversationId, business);
