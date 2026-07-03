@@ -105,6 +105,44 @@ async function resolveChoiceWithAI(userText: string, options: string[]): Promise
   }
 }
 
+// Resuelve la elección de HORARIO desde lenguaje natural. A diferencia de
+// resolveChoiceWithAI, entiende horas informales ("las 5", "a las cinco de la
+// tarde", "el lunes tempranito") y, cuando la referencia es AMBIGUA (falta am/pm
+// o la hora coincide en varios días), devuelve una pregunta de aclaración en vez
+// de adivinar. Retorna { index } si hay coincidencia única, { clarify } si hay
+// que preguntar, o ambos null si no se refiere a ningún horario.
+async function resolveSlotChoiceWithAI(
+  userText: string,
+  slotLabels: string[],
+): Promise<{ index: number | null; clarify: string | null }> {
+  if (!slotLabels.length) return { index: null, clarify: null };
+  const list = slotLabels.map((o, i) => `${i + 1}. ${o}`).join("\n");
+  try {
+    const { text } = await generateText({
+      model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+      system: `El usuario elige un horario de una lista numerada de citas. Cada opción trae el día y la hora en formato 24h.
+El usuario suele escribir de forma informal e incompleta ("las 5", "a las cinco de la tarde", "el lunes a la mañana").
+Reglas:
+- Si el mensaje identifica SIN ambigüedad UNA sola opción de la lista, responde: {"index": N, "clarify": null}.
+- Si es AMBIGUO —por ejemplo dice "las 5" sin aclarar mañana/tarde (am/pm), o la hora que menciona existe en varios días distintos de la lista— responde: {"index": null, "clarify": "<pregunta breve y cálida, como recepcionista boliviana, pidiendo SOLO el dato que falta (mañana o tarde, y/o qué día)>"}.
+- Si el mensaje no se refiere a ningún horario de la lista, responde: {"index": null, "clarify": null}.
+Responde ÚNICAMENTE con el JSON.`,
+      prompt: `Lista de horarios:\n${list}\n\nEl usuario escribió: "${userText}"`,
+      temperature: 0,
+    });
+    const parsed = JSON.parse(text.trim().replace(/^```json|```$/g, "").trim());
+    const idx = Number(parsed.index);
+    if (Number.isInteger(idx) && idx >= 1 && idx <= slotLabels.length) {
+      return { index: idx, clarify: null };
+    }
+    const clarify =
+      typeof parsed.clarify === "string" && parsed.clarify.trim() ? parsed.clarify.trim() : null;
+    return { index: null, clarify };
+  } catch {
+    return { index: null, clarify: null };
+  }
+}
+
 // Responde una pregunta del cliente dentro del flujo de reserva sin perder el paso actual.
 async function replyInContext(
   userText: string,
@@ -295,7 +333,17 @@ export async function advanceBooking(params: {
     }
 
     const slotLabels = slots.map(s => formatSlotLocal(s.start, clinic.timezone));
-    const idx = parseNumberChoice(text) ?? await resolveChoiceWithAI(text, slotLabels);
+    let idx = parseNumberChoice(text);
+
+    if (!idx || !slots[idx - 1]) {
+      const resolved = await resolveSlotChoiceWithAI(text, slotLabels);
+      if (resolved.clarify) {
+        // Hora informal/ambigua ("las 5" sin am/pm ni día): pedir el dato que
+        // falta en vez de adivinar o cerrar el flujo. Seguimos en choosing_slot.
+        return reply(`${resolved.clarify}\n\n${slotsMessage(slots, clinic.timezone)}`, "none", session);
+      }
+      idx = resolved.index;
+    }
 
     if (!idx || !slots[idx - 1]) {
       return replyInContext(text, "eligiendo horario", slotsMessage(slots, clinic.timezone), session);

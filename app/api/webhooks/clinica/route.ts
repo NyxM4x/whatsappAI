@@ -220,7 +220,9 @@ export async function POST(request: Request) {
   // ── 4b. Sesión de reserva activa ──────────────────────────────────────────
   if (session.step !== "idle" && newText.trim()) {
     // Detectar si el cliente quiere salir del flujo o hacer otra cosa.
-    const wantsOut = /\b(no quiero|cancela|salir|déjalo|dejalo|olvida|para|stop|nada|no gracias)\b/i.test(newText);
+    // OJO: no incluir "para" ni "nada" sueltos aquí — son palabras comunes
+    // ("para las 5", "no es nada grave") y cerraban el flujo por error.
+    const wantsOut = /\b(no quiero|ya no quiero|cancela|cancelar|salir|déjalo|dejalo|olvíd\w+|olvida|olvidalo|mejor no|stop|no gracias)\b/i.test(newText);
     if (wantsOut) {
       const { saveBookingSession } = await import("@/lib/clinic/data");
       await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {}, hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null } });
