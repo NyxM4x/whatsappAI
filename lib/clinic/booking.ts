@@ -173,7 +173,7 @@ async function getAvailableSlots(doctor: Doctor, conversationId: string): Promis
     excludeSlots: [...holds, ...activeAppts],
     fromDate: now,
     daysAhead: 14,
-    maxSlots: 10,
+    maxSlots: 15,
   });
 }
 
@@ -276,7 +276,24 @@ export async function advanceBooking(params: {
 
   // ── choosing_slot ─────────────────────────────────────────────────────────
   if (step === "choosing_slot") {
-    const slots = draft.offeredSlots ?? [];
+    const nowMs = Date.now() + 60 * 60 * 1000; // 1h de margen
+    let slots = (draft.offeredSlots ?? []).filter(s => new Date(s.start).getTime() > nowMs);
+
+    // Si todos los slots guardados ya pasaron, regenerar desde el doctor actual.
+    if (slots.length === 0 && draft.doctorId) {
+      const freshDoctor = await getDoctorById(draft.doctorId);
+      if (freshDoctor) {
+        slots = await getAvailableSlots(freshDoctor, conversationId);
+        if (!slots.length) {
+          const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+          return reply("Los horarios que le habíamos mostrado ya no están disponibles y no hay nuevos turnos en los próximos días 😔 ¿Le puedo ayudar en algo más?", "none", newSession);
+        }
+        draft = { ...draft, offeredSlots: slots };
+        const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+        return reply(`Los horarios anteriores ya pasaron 😊 Aquí los próximos disponibles:\n\n${slotsMessage(slots, clinic.timezone)}`, "none", newSession);
+      }
+    }
+
     const slotLabels = slots.map(s => formatSlotLocal(s.start, clinic.timezone));
     const idx = parseNumberChoice(text) ?? await resolveChoiceWithAI(text, slotLabels);
 
