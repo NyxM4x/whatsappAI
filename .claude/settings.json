@@ -9,7 +9,8 @@
       "Bash(node -e \"const k = require\\('@kapso/whatsapp-cloud-api'\\); const c = new k.WhatsAppClient\\({baseUrl:'x',kapsoApiKey:'x'}\\); console.log\\(Object.getOwnPropertyNames\\(c.messages\\)\\)\")",
       "Bash(node -e \"const k = require\\('@kapso/whatsapp-cloud-api'\\); const c = new k.WhatsAppClient\\({baseUrl:'x',kapsoApiKey:'x'}\\); const proto = Object.getPrototypeOf\\(c.messages\\); console.log\\(Object.getOwnPropertyNames\\(proto\\)\\)\")",
       "Bash(node -e \"const k = require\\('@kapso/whatsapp-cloud-api'\\); const c = new k.WhatsAppClient\\({baseUrl:'x',kapsoApiKey:'x'}\\); console.log\\(c.messages.sendImage.toString\\(\\).slice\\(0,300\\)\\)\")",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(node -e ' *)"
     ]
   }
 }

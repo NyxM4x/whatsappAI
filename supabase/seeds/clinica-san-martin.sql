@@ -18,8 +18,14 @@ on conflict (business, slug)
   do update set name = excluded.name, sort_order = excluded.sort_order, is_active = true;
 
 -- 2) DOCTORES (recarga limpia para este negocio) ----------------------------
+-- Desreferenciar citas que apuntan a doctores de esta clínica antes de borrarlos.
+update public.clinic_appointments
+set doctor_id = null
+where business = 'clinica-san-martin';
+
 delete from public.clinic_doctors where business = 'clinica-san-martin';
 
+-- MEDICINA GENERAL ----------------------------------------------------------
 insert into public.clinic_doctors
   (business, specialty_id, name, consultation_price, slot_minutes,
    work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
@@ -32,12 +38,103 @@ where s.business = 'clinica-san-martin' and s.slug = 'medicina-general';
 insert into public.clinic_doctors
   (business, specialty_id, name, consultation_price, slot_minutes,
    work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dra. Carmen Quispe', 150, 30,
+       '{1,2,3,4,5}', '13:00', '19:00', 'America/La_Paz',
+       null, 2
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'medicina-general';
+
+-- PEDIATRÍA -----------------------------------------------------------------
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dra. Ana Condori', 160, 30,
+       '{1,2,3,4,5}', '08:00', '13:00', 'America/La_Paz',
+       null, 1
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'pediatria';
+
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dr. Luis Mamani', 160, 30,
+       '{1,2,3,4,6}', '14:00', '19:00', 'America/La_Paz',
+       null, 2
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'pediatria';
+
+-- DERMATOLOGÍA --------------------------------------------------------------
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dra. Patricia Torrez', 180, 30,
+       '{1,2,3,4,5}', '08:00', '13:00', 'America/La_Paz',
+       null, 1
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'dermatologia';
+
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dr. Miguel Vargas', 180, 30,
+       '{2,3,4,5,6}', '14:00', '19:00', 'America/La_Paz',
+       null, 2
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'dermatologia';
+
+-- GINECOLOGÍA ---------------------------------------------------------------
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dra. Rosa Apaza', 200, 30,
+       '{1,2,3,4,5}', '08:00', '13:00', 'America/La_Paz',
+       null, 1
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'ginecologia';
+
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dra. Mónica Flores', 200, 30,
+       '{1,3,4,5,6}', '14:00', '19:00', 'America/La_Paz',
+       null, 2
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'ginecologia';
+
+-- CARDIOLOGÍA ---------------------------------------------------------------
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
 select 'clinica-san-martin', s.id, 'Dra. Juana Pérez', 150, 30,
        '{1,2,3,4,5}', '13:00', '18:00', 'America/La_Paz',
        'd2d2427ffebc8d628f4f98c16d46f89d6e27cc123ac8c261448a56b8d4392dd5@group.calendar.google.com', 1
 from public.clinic_specialties s
 where s.business = 'clinica-san-martin' and s.slug = 'cardiologia';
 
--- NOTA: hay 6 especialidades pero solo 2 doctores cargados. Las otras 4
--- (Pediatría, Dermatología, Ginecología, Traumatología) aún no tienen doctor:
--- el bot las mostrará pero dirá que no hay disponibilidad hasta que cargues uno.
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dr. Roberto Choque', 150, 30,
+       '{1,2,3,4,5}', '07:00', '13:00', 'America/La_Paz',
+       null, 2
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'cardiologia';
+
+-- TRAUMATOLOGÍA -------------------------------------------------------------
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dr. Jorge Villca', 170, 30,
+       '{1,2,3,4,5}', '08:00', '13:00', 'America/La_Paz',
+       null, 1
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'traumatologia';
+
+insert into public.clinic_doctors
+  (business, specialty_id, name, consultation_price, slot_minutes,
+   work_days, work_start, work_end, timezone, google_calendar_id, sort_order)
+select 'clinica-san-martin', s.id, 'Dr. Eduardo Mendoza', 170, 30,
+       '{1,2,4,5,6}', '14:00', '19:00', 'America/La_Paz',
+       null, 2
+from public.clinic_specialties s
+where s.business = 'clinica-san-martin' and s.slug = 'traumatologia';
