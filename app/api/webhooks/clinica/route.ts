@@ -219,6 +219,16 @@ export async function POST(request: Request) {
 
   // ── 4b. Sesión de reserva activa ──────────────────────────────────────────
   if (session.step !== "idle" && newText.trim()) {
+    // Detectar si el cliente quiere salir del flujo o hacer otra cosa.
+    const wantsOut = /\b(no quiero|cancela|salir|déjalo|dejalo|olvida|para|stop|nada|no gracias)\b/i.test(newText);
+    if (wantsOut) {
+      const { saveBookingSession } = await import("@/lib/clinic/data");
+      await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {}, hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null } });
+      replyText = "Entendido 😊 Si en algún momento desea agendar una cita, con gusto le ayudo. ¿Puedo ayudarle en algo más?";
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
+      return new Response("ok", { status: 200 });
+    }
+
     const result = await advanceBooking({
       conversationId,
       business: clinic.slug,
@@ -248,8 +258,27 @@ export async function POST(request: Request) {
     return new Response("ok", { status: 200 });
   }
 
-  // ── 6. Intención de agendar → iniciar flujo ───────────────────────────────
-  if (clinic.bookingIntentPatterns.test(newText)) {
+  // ── 6. Intención de agendar — detección con GPT ───────────────────────────
+  // El patrón rígido se usa como fast-path. Si no coincide, GPT decide.
+  let wantsBooking = clinic.bookingIntentPatterns.test(newText);
+
+  if (!wantsBooking) {
+    try {
+      const { generateText: gt } = await import("ai");
+      const { openai: oai } = await import("@ai-sdk/openai");
+      const { text: intent } = await gt({
+        model: oai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+        system: `Determina si el siguiente mensaje de WhatsApp expresa intención de agendar/reservar una cita médica, ver horarios disponibles, o hablar con un doctor. Responde SOLO "si" o "no".`,
+        prompt: newText,
+        temperature: 0,
+      });
+      wantsBooking = intent.trim().toLowerCase().startsWith("si");
+    } catch {
+      wantsBooking = false;
+    }
+  }
+
+  if (wantsBooking) {
     const result = await advanceBooking({
       conversationId,
       business: clinic.slug,
