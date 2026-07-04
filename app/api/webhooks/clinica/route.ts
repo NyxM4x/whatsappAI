@@ -27,6 +27,8 @@ import {
   getBotPauseState,
   resumeBotIfPauseExpired,
   getRecentConversationHistory,
+  isLatestInboundMessage,
+  getUnansweredInboundText,
 } from "@/lib/engine/data";
 import { normalizeIncomingMessages } from "@/lib/engine/messages";
 
@@ -38,6 +40,15 @@ import {
   rescheduleActiveAppointment,
 } from "@/lib/clinic/booking";
 import { getBookingSession } from "@/lib/clinic/data";
+
+// Node runtime y ventana amplia: el debounce duerme unos segundos dentro de la
+// invocación, así que subimos el límite por defecto de Vercel (10s).
+export const runtime = "nodejs";
+export const maxDuration = 30;
+
+// Ventana de debounce para agrupar mensajes seguidos del mismo cliente.
+const DEBOUNCE_MS = Number(process.env.MESSAGE_DEBOUNCE_MS ?? 6000);
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ─── GET: verificación del webhook de Kapso ───────────────────────────────────
 
@@ -148,14 +159,29 @@ export async function POST(request: Request) {
     }
   }
 
-  // ── Texto del mensaje consolidado ─────────────────────────────────────────
   const conversationId = lastMessage.conversationId ?? firstMessage.conversationId ?? lastMessage.from;
   const contactPhone = lastMessage.from;
 
-  const newText = newMessages
-    .map((m) => m.text ?? "")
-    .filter((t) => t.trim().length > 0)
-    .join("\n");
+  // ── Debounce: agrupar mensajes seguidos del mismo cliente ─────────────────
+  // Kapso entrega cada mensaje en un webhook aparte. Esperamos una ventana
+  // corta; si mientras tanto llega otro mensaje, esta invocación cede el turno
+  // a la más reciente (que ya verá el texto completo). Así respondemos UNA vez.
+  // Se omite para mensajes con media (comprobantes) para no demorar el pago.
+  if (DEBOUNCE_MS > 0 && lastMessage.messageId && !lastMessage.mediaUrl) {
+    await sleep(DEBOUNCE_MS);
+    const stillLatest = await isLatestInboundMessage(conversationId, lastMessage.messageId);
+    if (!stillLatest) {
+      return new Response("debounced: superseded by newer message", { status: 200 });
+    }
+  }
+
+  // ── Texto consolidado: todo lo que el cliente escribió sin respuesta ──────
+  const gathered = await getUnansweredInboundText(conversationId);
+  const newText = (
+    gathered.trim()
+      ? gathered
+      : newMessages.map((m) => m.text ?? "").filter((t) => t.trim().length > 0).join("\n")
+  ).trim();
 
   const textLc = newText.toLowerCase();
 

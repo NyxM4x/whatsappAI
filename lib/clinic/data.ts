@@ -131,13 +131,18 @@ export async function getDoctorById(id: string): Promise<Doctor | null> {
 
 // ─── Sesión de reserva ───────────────────────────────────────────────────────
 
+// TTL de la sesión de reserva: si el cliente abandona el flujo a medias y vuelve
+// después de este tiempo, se arranca de cero en vez de reanudar un paso viejo
+// (evita que un simple "hola" caiga en el paso de elegir horario abandonado).
+const BOOKING_SESSION_TTL_MS = Number(process.env.BOOKING_SESSION_TTL_MINUTES ?? 120) * 60 * 1000;
+
 export async function getBookingSession(
   conversationId: string,
 ): Promise<BookingSession> {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("clinic_booking_sessions")
-    .select("step, draft, held_doctor_id, held_slot_start, hold_expires_at")
+    .select("step, draft, held_doctor_id, held_slot_start, hold_expires_at, updated_at")
     .eq("kapso_conversation_id", conversationId)
     .maybeSingle();
 
@@ -145,14 +150,32 @@ export async function getBookingSession(
     console.error("getBookingSession failed", error);
   }
 
+  const idleSession: BookingSession = {
+    conversationId,
+    step: "idle",
+    draft: {},
+    hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
+  };
+
+  if (!data) return idleSession;
+
+  const step = (data.step as BookingStep) ?? "idle";
+
+  // Expirar sesión inactiva: si pasó el TTL desde la última actividad, tratarla
+  // como idle para no reanudar un flujo que el cliente ya abandonó.
+  if (step !== "idle" && data.updated_at) {
+    const age = Date.now() - new Date(data.updated_at).getTime();
+    if (age > BOOKING_SESSION_TTL_MS) return idleSession;
+  }
+
   return {
     conversationId,
-    step: (data?.step as BookingStep) ?? "idle",
-    draft: (data?.draft as BookingDraft) ?? {},
+    step,
+    draft: (data.draft as BookingDraft) ?? {},
     hold: {
-      heldDoctorId: data?.held_doctor_id ?? null,
-      heldSlotStart: data?.held_slot_start ?? null,
-      holdExpiresAt: data?.hold_expires_at ?? null,
+      heldDoctorId: data.held_doctor_id ?? null,
+      heldSlotStart: data.held_slot_start ?? null,
+      holdExpiresAt: data.hold_expires_at ?? null,
     },
   };
 }

@@ -276,6 +276,72 @@ export async function markReplyLockSent(params: {
   }
 }
 
+// ─── Debounce de mensajes entrantes ──────────────────────────────────────────
+
+// true si `messageId` sigue siendo el mensaje inbound MÁS reciente de la
+// conversación. Se usa para debounce: si llegó otro mensaje después de esperar
+// la ventana, esta invocación cede el turno a la más reciente. Ante error,
+// devuelve true (procesar) para no perder la respuesta.
+export async function isLatestInboundMessage(
+  conversationId: string,
+  messageId: string,
+): Promise<boolean> {
+  const supabase = getSupabaseClient();
+
+  const { data, error } = await supabase
+    .from("kapso_messages")
+    .select("kapso_message_id")
+    .eq("kapso_conversation_id", conversationId)
+    .eq("direction", "inbound")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("isLatestInboundMessage failed", error);
+    return true;
+  }
+  return !data || data.kapso_message_id === messageId;
+}
+
+// Texto consolidado de TODOS los mensajes inbound sin responder (los posteriores
+// al último outbound). Agrupa lo que el cliente escribió en mensajes seguidos
+// para poder responder una sola vez. Orden cronológico.
+export async function getUnansweredInboundText(conversationId: string): Promise<string> {
+  const supabase = getSupabaseClient();
+
+  const { data: lastOut } = await supabase
+    .from("kapso_messages")
+    .select("created_at")
+    .eq("kapso_conversation_id", conversationId)
+    .eq("direction", "outbound")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  let query = supabase
+    .from("kapso_messages")
+    .select("content, created_at")
+    .eq("kapso_conversation_id", conversationId)
+    .eq("direction", "inbound")
+    .order("created_at", { ascending: true });
+
+  if (lastOut?.created_at) {
+    query = query.gt("created_at", lastOut.created_at);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.error("getUnansweredInboundText failed", error);
+    return "";
+  }
+
+  return (data ?? [])
+    .map((m) => (m.content ?? "").trim())
+    .filter((t) => t.length > 0)
+    .join("\n");
+}
+
 export async function getBotPauseState(conversationId?: string): Promise<BotPauseState> {
   if (!conversationId) {
     return { paused: false, expired: false };
