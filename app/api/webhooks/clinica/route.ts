@@ -189,7 +189,12 @@ export async function POST(request: Request) {
   let action: "send_qr" | "none" = "none";
 
   // ── 1. Emergencias ────────────────────────────────────────────────────────
-  const isEmergency = clinic.emergencyKeywords.some((kw) => textLc.includes(kw.toLowerCase()));
+  // Desactivado por defecto (los clientes no lo quieren habilitado). Para
+  // reactivarlo en una clínica: CLINIC_EMERGENCY_DETECTION=true.
+  const emergencyDetectionEnabled = process.env.CLINIC_EMERGENCY_DETECTION === "true";
+  const isEmergency =
+    emergencyDetectionEnabled &&
+    clinic.emergencyKeywords.some((kw) => textLc.includes(kw.toLowerCase()));
 
   if (isEmergency) {
     replyText = clinic.emergencyResponse;

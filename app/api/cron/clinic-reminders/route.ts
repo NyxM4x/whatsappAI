@@ -13,6 +13,7 @@ import { getKapsoClient, getRequiredEnv } from "@/lib/engine/clients";
 import { getErrorMessage } from "@/lib/engine/logging";
 import { getDoctorById } from "@/lib/clinic/data";
 import { getSupabaseClient } from "@/lib/engine/clients";
+import { isWithinServiceWindow } from "@/lib/engine/data";
 import { clinic } from "@/lib/clinic/config";
 
 export const dynamic = "force-dynamic";
@@ -56,10 +57,19 @@ export async function GET(request: Request) {
     return Response.json({ ok: false, error: error.message }, { status: 500 });
   }
 
-  const results = { sent: 0, failed: 0 };
+  const results = { sent: 0, failed: 0, skipped_window_closed: 0 };
 
   for (const appt of appts ?? []) {
     try {
+      // WhatsApp solo permite texto libre dentro de la ventana de 24h desde el
+      // último mensaje del cliente. Si la ventana está cerrada, saltamos el envío
+      // (sin marcar reminder_sent) hasta tener plantillas aprobadas por Meta.
+      const windowOpen = await isWithinServiceWindow(appt.contact_phone);
+      if (!windowOpen) {
+        results.skipped_window_closed++;
+        continue;
+      }
+
       const doctor = appt.doctor_id ? await getDoctorById(appt.doctor_id) : null;
       const friendlySlot = appt.scheduled_start ? formatSlot(appt.scheduled_start) : "su cita";
 

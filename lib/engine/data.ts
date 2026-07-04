@@ -342,6 +342,38 @@ export async function getUnansweredInboundText(conversationId: string): Promise<
     .join("\n");
 }
 
+// ─── Ventana de servicio de WhatsApp (24h) ───────────────────────────────────
+
+// Fecha del último mensaje ENTRANTE del cliente (por teléfono). null si nunca
+// escribió. Se usa para saber si la ventana de servicio de 24h sigue abierta.
+export async function getLastInboundMessageAt(phone: string): Promise<Date | null> {
+  const supabase = getSupabaseClient();
+
+  const { data, error } = await supabase
+    .from("kapso_messages")
+    .select("message_timestamp, created_at")
+    .eq("contact_phone", phone)
+    .eq("direction", "inbound")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  const ts = data.message_timestamp ?? data.created_at;
+  return ts ? new Date(ts) : null;
+}
+
+// true si el cliente escribió dentro de la ventana (default 24h), es decir, si
+// WhatsApp permite enviarle texto libre sin plantilla aprobada.
+export async function isWithinServiceWindow(
+  phone: string,
+  windowMs: number = 24 * 60 * 60 * 1000,
+): Promise<boolean> {
+  const last = await getLastInboundMessageAt(phone);
+  if (!last) return false;
+  return Date.now() - last.getTime() < windowMs;
+}
+
 export async function getBotPauseState(conversationId?: string): Promise<BotPauseState> {
   if (!conversationId) {
     return { paused: false, expired: false };
