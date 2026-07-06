@@ -1,1 +1,8 @@
-{}
+{
+  "crons": [
+    {
+      "path": "/api/cron/clinic-reminders",
+      "schedule": "0 12 * * *"
+    }
+  ]
+}
