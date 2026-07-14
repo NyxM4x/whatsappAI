@@ -354,7 +354,7 @@ export async function updateAppointment(
     doctorId?: string;
     notes?: string;
   },
-) {
+): Promise<boolean> {
   const supabase = getSupabaseClient();
   const dbPatch: Record<string, any> = { updated_at: new Date().toISOString() };
   if (patch.status !== undefined) dbPatch.status = patch.status;
@@ -374,7 +374,11 @@ export async function updateAppointment(
     .update(dbPatch)
     .eq("id", id);
 
-  if (error) console.error("updateAppointment failed", error);
+  if (error) {
+    console.error("updateAppointment failed", error);
+    return false;
+  }
+  return true;
 }
 
 // Devuelve la cita activa más reciente del paciente (por teléfono).

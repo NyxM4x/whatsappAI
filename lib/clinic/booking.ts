@@ -649,7 +649,36 @@ export async function handlePaymentProof(params: {
     return reply(clinic.replies.proofButNoBooking, "none", newSession);
   }
 
-  await updateAppointment(draft.appointmentId, { paymentProofUrl: mediaUrl, status: "confirmed" });
+  // Escritura CRÍTICA: si esto no queda guardado, no hay que crear el evento de
+  // Calendar ni decirle al cliente "confirmada" — se vería confirmada en
+  // WhatsApp pero no en la BD, y los recordatorios/confirmaciones automáticas
+  // (que filtran por status='confirmed') nunca la tomarían. Un reintento cubre
+  // fallos transitorios; si vuelve a fallar, se deja para revisión manual.
+  let confirmed = await updateAppointment(draft.appointmentId, {
+    paymentProofUrl: mediaUrl,
+    status: "confirmed",
+  });
+  if (!confirmed) {
+    confirmed = await updateAppointment(draft.appointmentId, {
+      paymentProofUrl: mediaUrl,
+      status: "confirmed",
+    });
+  }
+
+  if (!confirmed) {
+    console.error("handlePaymentProof: no se pudo confirmar la cita tras reintento", {
+      appointmentId: draft.appointmentId,
+    });
+    await updateAppointment(draft.appointmentId, {
+      notes: "🚨 Error al confirmar automáticamente el pago (falló la escritura en BD). Revisar y confirmar o cancelar manualmente.",
+    });
+    const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+    return reply(
+      "¡Gracias por su comprobante! 🙏 Estamos terminando de procesar su confirmación, en unos minutos le avisamos. Si no recibe noticias, contáctenos al +591 75681881.",
+      "none",
+      newSession,
+    );
+  }
 
   const doctor = draft.doctorId ? await getDoctorById(draft.doctorId) : null;
 
