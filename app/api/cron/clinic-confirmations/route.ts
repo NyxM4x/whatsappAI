@@ -2,7 +2,7 @@
 // Cron — Confirmaciones de citas clínica
 // ----------------------------------------------------------------------------
 // Ruta: GET /api/cron/clinic-confirmations
-// Protegida por: Authorization: Bearer <CLINIC_CONFIRM_CRON_SECRET>
+// Protegida por: Authorization: Bearer <CRON_SECRET> (o <CLINIC_CONFIRM_CRON_SECRET>)
 //
 // Flujo:
 //   A) Citas `confirmed` sin google_event_id → crea evento en Calendar +
@@ -33,10 +33,14 @@ const BUSINESS = clinic.slug;
 
 export async function GET(request: Request) {
   // ── Autenticación ─────────────────────────────────────────────────────────
-  const secret = process.env.CLINIC_CONFIRM_CRON_SECRET;
+  // Acepta CRON_SECRET (la misma que ya usa el cron de recordatorios) para no
+  // requerir una env var aparte, y CLINIC_CONFIRM_CRON_SECRET si se prefiere
+  // una dedicada.
   const authHeader = request.headers.get("Authorization");
-
-  if (!secret || authHeader !== `Bearer ${secret}`) {
+  const validSecrets = [process.env.CRON_SECRET, process.env.CLINIC_CONFIRM_CRON_SECRET].filter(
+    (s): s is string => Boolean(s),
+  );
+  if (!validSecrets.length || !validSecrets.some((s) => authHeader === `Bearer ${s}`)) {
     return new Response("Unauthorized", { status: 401 });
   }
 
