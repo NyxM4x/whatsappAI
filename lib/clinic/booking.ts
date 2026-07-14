@@ -12,7 +12,8 @@
 //   Al confirmar slot → re-verificar disponibilidad → escribir hold en BD
 //   → pasar a collecting_name. Si el slot fue tomado → re-ofrecer.
 //
-// QR: la cita queda awaiting_payment; la secretaria confirma manualmente.
+// QR: al llegar el comprobante se confirma de inmediato (modelo de confianza,
+// ver handlePaymentProof); la secretaria solo cancela si detecta un pago inválido.
 // Efectivo: se crea el evento en Google Calendar de inmediato.
 // ============================================================================
 
@@ -624,13 +625,23 @@ Ejemplos:
 
 // ─── Comprobante recibido (media entrante) ────────────────────────────────────
 
+// Modelo de confianza: la mayoría de los pacientes son clientes recurrentes que
+// sí pagan, así que apenas llega el comprobante la cita queda CONFIRMADA de
+// inmediato (crea el evento en Calendar y avisa al paciente), igual que el pago
+// en efectivo. La secretaria ya NO aprueba cada comprobante uno por uno: la
+// verificación con GPT-vision corre en paralelo solo para DEJAR UNA NOTA en la
+// cita cuando el monto no cuadra o la imagen no parece un comprobante válido.
+// Si al revisar esa nota la secretaria confirma que el pago era inválido,
+// cancela la cita manualmente (status = 'canceled'), lo que dispara el borrado
+// automático del evento en Calendar.
 export async function handlePaymentProof(params: {
   conversationId: string;
   business: string;
+  contactPhone: string;
   mediaUrl: string;
   session: BookingSession;
 }): Promise<BookingResult> {
-  const { conversationId, business, session, mediaUrl } = params;
+  const { conversationId, business, contactPhone, session, mediaUrl } = params;
   const { draft } = session;
 
   if (!draft.appointmentId) {
@@ -638,24 +649,41 @@ export async function handlePaymentProof(params: {
     return reply(clinic.replies.proofButNoBooking, "none", newSession);
   }
 
-  // Guardar URL del comprobante primero (independientemente del resultado).
-  await updateAppointment(draft.appointmentId, { paymentProofUrl: mediaUrl });
+  await updateAppointment(draft.appointmentId, { paymentProofUrl: mediaUrl, status: "confirmed" });
 
-  // AUTO-VALIDACIÓN: desactivada hasta verificar flujos en producción.
-  // Para activar: cambiar PAYMENT_AUTO_VALIDATE=true en las env vars.
-  const autoValidateEnabled = process.env.PAYMENT_AUTO_VALIDATE === "true";
+  const doctor = draft.doctorId ? await getDoctorById(draft.doctorId) : null;
 
-  // Obtener precio esperado del doctor.
-  let expectedPrice: number | null = null;
-  if (autoValidateEnabled && draft.doctorId) {
-    const doctor = await getDoctorById(draft.doctorId);
-    expectedPrice = doctor?.consultationPrice ?? null;
+  // Crear el evento en Calendar de inmediato (mismo patrón que el pago en
+  // efectivo), sin depender del webhook de confirmaciones de Supabase.
+  if (doctor?.googleCalendarId && draft.slotStart && draft.slotEnd) {
+    try {
+      const eventId = await createAppointmentEvent({
+        calendarId: doctor.googleCalendarId,
+        timezone: doctor.timezone,
+        startIso: draft.slotStart,
+        endIso: draft.slotEnd,
+        summary: `Cita: ${draft.patientName ?? "Paciente"} — ${doctor.name}`,
+        description: [
+          `Paciente: ${draft.patientName ?? "—"}`,
+          `CI: ${draft.patientCi ?? "—"}`,
+          `Tel: ${contactPhone}`,
+          `Especialidad: ${draft.specialtyName ?? "—"}`,
+          `Motivo: ${draft.reason ?? "—"}`,
+          `Pago: QR BNB`,
+        ].join("\n"),
+      });
+      if (eventId) {
+        await updateAppointment(draft.appointmentId, { googleEventId: eventId });
+      }
+    } catch (err) {
+      console.error("createAppointmentEvent (qr) failed", err);
+    }
   }
 
-  // Intentar validación automática con GPT-4o-mini vision.
-  if (autoValidateEnabled && expectedPrice !== null) {
+  // Verificación best-effort del monto: NO bloquea la confirmación, solo deja
+  // una nota para revisión posterior de la secretaria si algo no cuadra.
+  if (doctor?.consultationPrice != null) {
     try {
-      // Descargar imagen con header de autenticación Kapso si está disponible.
       const imgRes = await fetch(mediaUrl, {
         headers: process.env.KAPSO_API_KEY ? { "X-API-Key": process.env.KAPSO_API_KEY } : {},
       });
@@ -682,36 +710,37 @@ export async function handlePaymentProof(params: {
 
         const cleaned = rawAmount.trim().replace(/[^0-9.]/g, "");
         const amount = parseFloat(cleaned);
+        const expectedPrice = doctor.consultationPrice;
 
-        if (!isNaN(amount) && amount >= expectedPrice) {
-          await updateAppointment(draft.appointmentId, { status: "confirmed" });
-          const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
-          return reply(
-            `✅ ¡Pago verificado! Su cita quedó *confirmada* 😊\n\nLe esperamos en la Clínica San Martín de Porres. Cualquier consulta llámenos al +591 75681881. ¡Hasta pronto! 🙏`,
-            "none",
-            newSession,
-          );
-        }
-
-        if (!isNaN(amount) && amount < expectedPrice) {
-          await updateAppointment(draft.appointmentId, { status: "payment_review" });
-          const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
-          return reply(
-            `Recibimos su comprobante, pero el monto detectado (*${amount} Bs*) no coincide con el precio de consulta (*${expectedPrice} Bs*) 🤔\n\nPor favor verifique el pago y reenvíe el comprobante correcto. Si tiene dudas llámenos al +591 75681881 😊`,
-            "none",
-            newSession,
-          );
+        if (isNaN(amount)) {
+          await updateAppointment(draft.appointmentId, {
+            notes: `⚠️ Revisar comprobante: no se pudo leer un monto. Verificar manualmente antes de la consulta.`,
+          });
+        } else if (amount < expectedPrice) {
+          await updateAppointment(draft.appointmentId, {
+            notes: `⚠️ Revisar pago: monto detectado ${amount} Bs, precio de consulta ${expectedPrice} Bs.`,
+          });
         }
       }
     } catch (err) {
-      console.error("GPT vision payment validation failed", err);
+      console.error("GPT vision payment check failed", err);
     }
   }
 
-  // Fallback: guardar en revisión y notificar al cliente.
-  await updateAppointment(draft.appointmentId, { status: "payment_review" });
   const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
-  return reply(clinic.replies.proofReceived, "none", newSession);
+  const friendlySlot = draft.slotStart ? formatSlotLocal(draft.slotStart, clinic.timezone) : null;
+  return reply(
+    [
+      `✅ ¡Recibimos su comprobante! Su cita quedó *confirmada* 😊`,
+      ``,
+      friendlySlot ? `📅 ${friendlySlot}` : null,
+      doctor ? `👨‍⚕️ ${doctor.name}` : null,
+      ``,
+      `Le esperamos en la Clínica San Martín de Porres. Cualquier consulta llámenos al +591 75681881. ¡Hasta pronto! 🙏`,
+    ].filter((l) => l !== null).join("\n"),
+    "none",
+    newSession,
+  );
 }
 
 // ─── Cancelar cita activa ─────────────────────────────────────────────────────

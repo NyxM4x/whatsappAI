@@ -212,6 +212,7 @@ export async function POST(request: Request) {
     const result = await handlePaymentProof({
       conversationId,
       business: clinic.slug,
+      contactPhone,
       mediaUrl: lastMessage.mediaUrl,
       session,
     });

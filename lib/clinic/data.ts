@@ -352,6 +352,7 @@ export async function updateAppointment(
     reason?: string;
     rescheduleCount?: number;
     doctorId?: string;
+    notes?: string;
   },
 ) {
   const supabase = getSupabaseClient();
@@ -366,6 +367,7 @@ export async function updateAppointment(
   if (patch.reason !== undefined) dbPatch.reason = patch.reason;
   if (patch.rescheduleCount !== undefined) dbPatch.reschedule_count = patch.rescheduleCount;
   if (patch.doctorId !== undefined) dbPatch.doctor_id = patch.doctorId;
+  if (patch.notes !== undefined) dbPatch.notes = patch.notes;
 
   const { error } = await supabase
     .from("clinic_appointments")
