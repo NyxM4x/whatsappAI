@@ -542,6 +542,21 @@ Ejemplos:
         paymentMethod: "cash",
       });
 
+      // createAppointment devuelve null si el INSERT falló — lo más probable,
+      // gracias al índice único de la BD, es que otro paciente tomó este mismo
+      // horario con este doctor mientras completábamos los datos. No mentirle
+      // "confirmada": ofrecer horarios frescos.
+      if (!appointmentId) {
+        const freshSlots = await getAvailableSlots(doctor, conversationId);
+        if (!freshSlots.length) {
+          const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+          return reply("Lo sentimos, justo se ocupó ese horario y no quedan más turnos libres para este médico 😔 ¿Le puedo ayudar en otra cosa?", "none", newSession);
+        }
+        draft = { ...draft, offeredSlots: freshSlots };
+        const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+        return reply(`Justo se ocupó ese horario 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
+      }
+
       if (doctor.googleCalendarId) {
         try {
           console.log("createAppointmentEvent starting", {
@@ -605,7 +620,20 @@ Ejemplos:
       paymentMethod: "qr",
     });
 
-    draft = { ...draft, appointmentId: appointmentId ?? undefined };
+    // Igual que en efectivo: null significa que el horario se ocupó justo
+    // antes de crear esta fila (protegido por el índice único de la BD).
+    if (!appointmentId) {
+      const freshSlots = await getAvailableSlots(doctor, conversationId);
+      if (!freshSlots.length) {
+        const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+        return reply("Lo sentimos, justo se ocupó ese horario y no quedan más turnos libres para este médico 😔 ¿Le puedo ayudar en otra cosa?", "none", newSession);
+      }
+      draft = { ...draft, offeredSlots: freshSlots };
+      const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+      return reply(`Justo se ocupó ese horario 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
+    }
+
+    draft = { ...draft, appointmentId };
     const newSession = await saveAndReturn(conversationId, business, "awaiting_proof", draft, hold);
     const friendlySlot = formatSlotLocal(draft.slotStart, clinic.timezone);
     return reply(
