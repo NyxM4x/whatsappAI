@@ -61,6 +61,7 @@ function mapAppointment(row: any): Appointment {
     paymentProofUrl: row.payment_proof_url ?? null,
     googleEventId: row.google_event_id ?? null,
     rescheduleCount: Number(row.reschedule_count ?? 0),
+    notes: row.notes ?? null,
   };
 }
 
@@ -352,7 +353,7 @@ export async function updateAppointment(
     reason?: string;
     rescheduleCount?: number;
     doctorId?: string;
-    notes?: string;
+    notes?: string | null;
   },
 ): Promise<boolean> {
   const supabase = getSupabaseClient();
@@ -379,6 +380,43 @@ export async function updateAppointment(
     return false;
   }
   return true;
+}
+
+// ─── Panel interno (secretaria) ───────────────────────────────────────────────
+
+export type AdminAppointmentFilter = "all" | "confirmed" | "pending" | "flagged" | "canceled";
+export type AdminAppointmentRow = Appointment & { doctorName: string | null };
+
+// Últimas 100 citas del negocio, con el nombre del doctor embebido en una sola
+// consulta (evita N+1). "flagged" = citas con una nota pendiente de revisión
+// (ver notes, escrita por handlePaymentProof cuando algo no cuadra).
+export async function listAppointmentsForAdmin(
+  business: string,
+  filter: AdminAppointmentFilter = "all",
+): Promise<AdminAppointmentRow[]> {
+  const supabase = getSupabaseClient();
+  let query = supabase
+    .from("clinic_appointments")
+    .select("*, doctor:clinic_doctors(name)")
+    .eq("business", business)
+    .order("scheduled_start", { ascending: false, nullsFirst: false })
+    .limit(100);
+
+  if (filter === "confirmed") query = query.eq("status", "confirmed");
+  else if (filter === "pending") query = query.in("status", ["awaiting_payment", "payment_review"]);
+  else if (filter === "canceled") query = query.eq("status", "canceled");
+  else if (filter === "flagged") query = query.not("notes", "is", null);
+
+  const { data, error } = await query;
+  if (error) {
+    console.error("listAppointmentsForAdmin failed", error);
+    return [];
+  }
+
+  return (data ?? []).map((row: any) => ({
+    ...mapAppointment(row),
+    doctorName: row.doctor?.name ?? null,
+  }));
 }
 
 // Devuelve la cita activa más reciente del paciente (por teléfono).

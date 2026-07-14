@@ -106,4 +106,5 @@ export type Appointment = {
   paymentProofUrl: string | null;
   googleEventId: string | null;
   rescheduleCount: number;
+  notes: string | null;
 };
