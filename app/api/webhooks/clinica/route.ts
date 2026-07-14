@@ -38,6 +38,7 @@ import {
   handlePaymentProof,
   cancelActiveAppointment,
   rescheduleActiveAppointment,
+  checkActiveAppointment,
 } from "@/lib/clinic/booking";
 import { getBookingSession } from "@/lib/clinic/data";
 
@@ -289,6 +290,14 @@ export async function POST(request: Request) {
     replyText = result.reply;
     action = result.action;
     await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session });
+    return new Response("ok", { status: 200 });
+  }
+
+  // ── 5b. Intención de consultar la cita ("¿cuándo es mi cita?") ───────────
+  if (clinic.checkAppointmentIntentPatterns.test(newText)) {
+    const result = await checkActiveAppointment({ business: clinic.slug, contactPhone, session });
+    replyText = result.reply;
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
     return new Response("ok", { status: 200 });
   }
 

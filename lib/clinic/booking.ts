@@ -800,6 +800,46 @@ export async function handlePaymentProof(params: {
   );
 }
 
+// ─── Consultar cita activa ("¿cuándo es mi cita?") ───────────────────────────
+// Solo informa, no cambia el estado de la sesión ni de la cita.
+
+export async function checkActiveAppointment(params: {
+  business: string;
+  contactPhone: string;
+  session: BookingSession;
+}): Promise<BookingResult> {
+  const { business, contactPhone, session } = params;
+
+  const appointment = await findActiveAppointmentByPhone(business, contactPhone);
+  if (!appointment) {
+    return reply(clinic.replies.noActiveAppointment, "none", session);
+  }
+
+  const doctor = appointment.doctorId ? await getDoctorById(appointment.doctorId) : null;
+  const friendlySlot = appointment.scheduledStart
+    ? formatSlotLocal(appointment.scheduledStart, clinic.timezone)
+    : null;
+
+  const statusNote =
+    appointment.status === "awaiting_payment"
+      ? "\n\n_Su cita está reservada, pero aún esperamos su comprobante de pago para confirmarla._"
+      : appointment.status === "payment_review"
+        ? "\n\n_Estamos terminando de verificar su comprobante de pago._"
+        : "";
+
+  return reply(
+    [
+      friendlySlot ? `📅 Su cita es el *${friendlySlot}*` : `📅 Su cita está registrada, pero aún no tiene horario asignado.`,
+      doctor ? `👨‍⚕️ ${doctor.name}` : null,
+      appointment.reason ? `💊 ${appointment.reason}` : null,
+      ``,
+      `📍 ${clinic.generalInfo.address}`,
+    ].filter((l) => l !== null).join("\n") + statusNote,
+    "none",
+    session,
+  );
+}
+
 // ─── Cancelar cita activa ─────────────────────────────────────────────────────
 
 export async function cancelActiveAppointment(params: {

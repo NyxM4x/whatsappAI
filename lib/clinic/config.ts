@@ -65,6 +65,10 @@ export const clinic = {
   cancelIntentPatterns: /\bcancelar|anular|cancela mi/i,
   rescheduleIntentPatterns: /\breprogramar|reprograma|cambiar (mi|la) cita|reagendar|mover (mi|la) cita/i,
 
+  // Dispara la consulta "¿cuándo es mi cita?" (solo informar, no agendar).
+  checkAppointmentIntentPatterns:
+    /cu[aá]ndo (es|ser[aá]|tengo) mi cita|a qu[eé] hora (es|tengo) mi cita|hora de mi cita|recu[eé]rdame mi cita|cu[aá]l es mi cita|tengo (una |)cita\?|mi cita es cu[aá]ndo/i,
+
   replies: {
     welcome:
       "Bienvenido a Clínica San Martín de Porres 😊 Puedo ayudarle a *agendar una cita* o darle información (especialidades, precios, dirección, horarios). ¿Qué necesita?",
