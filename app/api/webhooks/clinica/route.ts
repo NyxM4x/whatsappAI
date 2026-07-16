@@ -30,6 +30,7 @@ import {
   getRecentConversationHistory,
   isLatestInboundMessage,
   getUnansweredInboundText,
+  pauseBotForHumanHandoff,
 } from "@/lib/engine/data";
 import { normalizeIncomingMessages } from "@/lib/engine/messages";
 
@@ -236,6 +237,16 @@ export async function POST(request: Request) {
 
   if (isEmergency) {
     replyText = clinic.emergencyResponse;
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
+    return new Response("ok", { status: 200 });
+  }
+
+  // ── 1b. Derivación a humano (reclamos / "quiero hablar con una persona") ──
+  // Prioridad alta: corta cualquier flujo (incluso una reserva en curso) y
+  // pausa el bot para que el equipo retome la conversación manualmente.
+  if (clinic.humanHandoffIntentPatterns.test(newText)) {
+    await pauseBotForHumanHandoff(conversationId);
+    replyText = clinic.replies.humanHandoff;
     await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
     return new Response("ok", { status: 200 });
   }

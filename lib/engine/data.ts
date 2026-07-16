@@ -53,6 +53,34 @@ export async function autoPauseBotFromBusinessApp(conversationId: string) {
   }
 }
 
+// Pausa el bot cuando el propio paciente pide hablar con una persona (reclamos,
+// temas fuera de alcance, o simplemente no querer seguir con el bot). Sin
+// vencimiento automático: alguien del equipo la retoma manualmente (panel /
+// bot-control) cuando ya atendió al paciente.
+export async function pauseBotForHumanHandoff(conversationId: string) {
+  const supabase = getSupabaseClient();
+  const nowIso = new Date().toISOString();
+
+  const { error } = await supabase
+    .from("kapso_conversations")
+    .update({
+      bot_paused: true,
+      bot_paused_at: nowIso,
+      bot_pause_expires_at: null,
+      bot_paused_reason: "human_handoff_requested",
+      bot_pause_mode: "auto",
+      bot_pause_duration_minutes: null,
+      updated_at: nowIso,
+    })
+    .eq("kapso_conversation_id", conversationId);
+
+  if (error) {
+    console.error("pauseBotForHumanHandoff failed", error);
+  } else {
+    console.log("bot paused: human handoff requested", { conversationId });
+  }
+}
+
 export async function saveContactAndConversation(message: IncomingMessage) {
   const supabase = getSupabaseClient();
   const nowIso = new Date().toISOString();
