@@ -1,15 +1,28 @@
 // ============================================================================
-// CONFIGURACIÓN — Clínica San Martín de Porres
+// CONFIGURACIÓN — por clínica (multi-tenant, P2)
 // ----------------------------------------------------------------------------
-// Datos FIJOS del negocio. Las especialidades/doctores/precios viven en la BD
-// (clinic_specialties / clinic_doctors). Aquí: identidad, QR, emergencias,
-// catálogos de labs/medicamentos y el tono del bot para consultas generales.
+// Datos FIJOS del negocio. Las especialidades/doctores/precios de CONSULTA
+// viven en la BD (clinic_specialties / clinic_doctors). Aquí: identidad, QR,
+// emergencias, catálogos de labs/medicamentos y el tono del bot.
+//
+// getClinicConfig() es la ÚNICA puerta de entrada — nada más en el código debe
+// importar `defaultClinicConfig` directo. Hoy devuelve el objeto estático de
+// abajo (estamos migrando de "un archivo" a "una fila por clínica" de a
+// pasos); cuando se conecte a la tabla clinic_settings + caché, el cambio será
+// puramente interno a este archivo, sin tocar a quienes ya llaman
+// `await getClinicConfig(business)`.
 // ============================================================================
 
 export type CatalogItem = { name: string; price: number };
 
-export const clinic = {
-  slug: "clinica-san-martin",
+// Slug por defecto mientras no hay resolución de tenant por número de WhatsApp
+// entrante (siguiente paso de P2). Único valor síncrono expuesto a propósito,
+// para los pocos lugares que necesitan un fallback de negocio sin poder await
+// (ej. un valor por defecto de parámetro).
+export const DEFAULT_BUSINESS_SLUG = "clinica-san-martin";
+
+const defaultClinicConfig = {
+  slug: DEFAULT_BUSINESS_SLUG,
   clinicName: "Clínica San Martín de Porres",
   timezone: "America/La_Paz",
 
@@ -115,14 +128,41 @@ normalidad. Nunca menciones que era un audio ni comentes la transcripción.
 `,
 };
 
-export type ClinicConfig = typeof clinic;
+export type ClinicConfig = typeof defaultClinicConfig;
+
+// Caché en memoria del runtime (por instancia serverless), TTL corto. Hoy no
+// hace efecto real (getClinicConfig no pega a ninguna BD todavía), pero queda
+// lista para cuando este archivo pase a leer de clinic_settings — así ese
+// cambio no necesita tocar a los callers ni agregar otra capa después.
+const CONFIG_CACHE_TTL_MS = 45_000;
+const configCache = new Map<string, { value: ClinicConfig; expiresAt: number }>();
+
+export function invalidateClinicConfigCache(business?: string) {
+  if (business) configCache.delete(business);
+  else configCache.clear();
+}
+
+// Única puerta de entrada a la config de una clínica. Firma async a propósito
+// desde ya (aunque hoy resuelve en memoria) para que el futuro salto a
+// Supabase no obligue a tocar cada call site una segunda vez.
+export async function getClinicConfig(business: string = DEFAULT_BUSINESS_SLUG): Promise<ClinicConfig> {
+  const cached = configCache.get(business);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  // TODO (P2): reemplazar por una lectura a la tabla clinic_settings cuando
+  // exista más de una clínica. Por ahora, single-tenant: cualquier business
+  // devuelve la config estática de la Clínica San Martín.
+  const value = defaultClinicConfig;
+  configCache.set(business, { value, expiresAt: Date.now() + CONFIG_CACHE_TTL_MS });
+  return value;
+}
 
 // Arma el system prompt completo para Q&A general inyectando info y catálogos.
 // Las reglas críticas (no inventar datos, no diagnosticar, no revelar que es un bot)
 // se repiten al FINAL a propósito: los modelos priorizan más lo que leen último
 // ("recencia"), y acá van justo después de los catálogos que el modelo podría
 // verse tentado a completar o extrapolar.
-export function buildClinicSystemPrompt(): string {
+export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
   const labs = clinic.labs.map((l) => `- ${l.name}: ${l.price} Bs`).join("\n");
   const meds = clinic.medications.map((m) => `- ${m.name}: ${m.price} Bs`).join("\n");
 

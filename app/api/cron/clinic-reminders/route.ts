@@ -22,16 +22,16 @@ import { getErrorMessage } from "@/lib/engine/logging";
 import { getDoctorById } from "@/lib/clinic/data";
 import { getSupabaseClient } from "@/lib/engine/clients";
 import { isWithinServiceWindow } from "@/lib/engine/data";
-import { clinic } from "@/lib/clinic/config";
+import { getClinicConfig } from "@/lib/clinic/config";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 // Envía recordatorios en serie a varios pacientes; evita timeout a mitad del batch.
 export const maxDuration = 60;
 
-function formatSlot(isoUtc: string): string {
+function formatSlot(isoUtc: string, timezone: string): string {
   return new Intl.DateTimeFormat("es-BO", {
-    timeZone: clinic.timezone,
+    timeZone: timezone,
     weekday: "long",
     day: "numeric",
     month: "long",
@@ -86,6 +86,7 @@ export async function GET(request: Request) {
     return new Response("Unauthorized", { status: 401 });
   }
 
+  const clinic = await getClinicConfig();
   const supabase = getSupabaseClient();
 
   // Día calendario de "mañana" en la zona horaria de la clínica → rango UTC.
@@ -122,7 +123,7 @@ export async function GET(request: Request) {
       }
 
       const doctor = appt.doctor_id ? await getDoctorById(appt.doctor_id) : null;
-      const friendlySlot = appt.scheduled_start ? formatSlot(appt.scheduled_start) : "su cita";
+      const friendlySlot = appt.scheduled_start ? formatSlot(appt.scheduled_start, clinic.timezone) : "su cita";
 
       const kapso = getKapsoClient();
       const phoneNumberId = getRequiredEnv("KAPSO_PHONE_NUMBER_ID");

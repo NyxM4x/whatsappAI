@@ -1,5 +1,5 @@
 import { loginAction } from "@/app/admin/actions";
-import { clinic } from "@/lib/clinic/config";
+import { getClinicConfig } from "@/lib/clinic/config";
 
 export default async function LoginPage({
   searchParams,
@@ -7,6 +7,7 @@ export default async function LoginPage({
   searchParams: Promise<{ error?: string }>;
 }) {
   const { error } = await searchParams;
+  const clinic = await getClinicConfig();
 
   return (
     <main className="admin-login">

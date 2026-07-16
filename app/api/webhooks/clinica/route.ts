@@ -34,7 +34,7 @@ import {
 } from "@/lib/engine/data";
 import { normalizeIncomingMessages } from "@/lib/engine/messages";
 
-import { clinic, buildClinicSystemPrompt } from "@/lib/clinic/config";
+import { getClinicConfig, buildClinicSystemPrompt, type ClinicConfig } from "@/lib/clinic/config";
 import {
   advanceBooking,
   handlePaymentProof,
@@ -116,6 +116,12 @@ export async function POST(request: Request) {
   } catch {
     return new Response("invalid json", { status: 400 });
   }
+
+  // Config de la clínica: hoy siempre la misma (single-tenant), pero ya
+  // resuelta vía la única puerta de entrada (getClinicConfig) para que la
+  // futura resolución multi-tenant por número entrante no toque el resto de
+  // este handler.
+  const clinic = await getClinicConfig();
 
   const incomingMessages = await normalizeIncomingMessages(payload, request);
 
@@ -237,7 +243,7 @@ export async function POST(request: Request) {
 
   if (isEmergency) {
     replyText = clinic.emergencyResponse;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
     return new Response("ok", { status: 200 });
   }
 
@@ -247,7 +253,7 @@ export async function POST(request: Request) {
   if (clinic.humanHandoffIntentPatterns.test(newText)) {
     await pauseBotForHumanHandoff(conversationId);
     replyText = clinic.replies.humanHandoff;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
     return new Response("ok", { status: 200 });
   }
 
@@ -264,10 +270,11 @@ export async function POST(request: Request) {
       contactPhone,
       mediaUrl: lastMessage.mediaUrl,
       session,
+      clinic,
     });
     replyText = result.reply;
     action = result.action;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session });
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session, clinic });
     return new Response("ok", { status: 200 });
   }
 
@@ -276,24 +283,26 @@ export async function POST(request: Request) {
     const asksForQr = /qr|pago|código|codigo|envía|envia|manda|pásame|pasame|comparte/i.test(newText);
     if (asksForQr && clinic.qrImageUrl) {
       replyText = "Aquí le reenvío el QR de pago 😊 Una vez realizado el pago, envíe el comprobante (foto o PDF) y lo validamos. ¡Gracias! 🙏";
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "send_qr", lastMessage });
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "send_qr", lastMessage, clinic });
     } else {
       try {
         const history = await getRecentConversationHistory(conversationId, 8);
         const { text } = await generateText({
           model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
-          system: buildClinicSystemPrompt(),
+          system: buildClinicSystemPrompt(clinic),
           messages: [
             ...history.map((h) => ({ role: h.role as "user" | "assistant", content: h.content })),
             { role: "user", content: newText },
           ],
+          temperature: 0.35,
+          abortSignal: AbortSignal.timeout(15000),
         });
         replyText = (text.trim() || clinic.replies.welcome) +
           "\n\n_Recuerde que para confirmar su cita debe enviarnos el comprobante de pago (foto o PDF) 😊_";
       } catch {
         replyText = "Estamos esperando el *comprobante de pago* (imagen o PDF) para confirmar su cita 😊";
       }
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
     }
     return new Response("ok", { status: 200 });
   }
@@ -308,7 +317,7 @@ export async function POST(request: Request) {
       const { saveBookingSession } = await import("@/lib/clinic/data");
       await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {}, hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null } });
       replyText = "Entendido 😊 Si en algún momento desea agendar una cita, con gusto le ayudo. ¿Puedo ayudarle en algo más?";
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
       return new Response("ok", { status: 200 });
     }
 
@@ -318,34 +327,35 @@ export async function POST(request: Request) {
       contactPhone,
       incomingText: newText,
       session,
+      clinic,
     });
     replyText = result.reply;
     action = result.action;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session });
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session, clinic });
     return new Response("ok", { status: 200 });
   }
 
   // ── 5. Intenciones de cancelar / reprogramar ──────────────────────────────
   if (clinic.cancelIntentPatterns.test(newText)) {
-    const result = await cancelActiveAppointment({ conversationId, business: clinic.slug, contactPhone, session });
+    const result = await cancelActiveAppointment({ conversationId, business: clinic.slug, contactPhone, session, clinic });
     replyText = result.reply;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, updatedSession: result.session });
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, updatedSession: result.session, clinic });
     return new Response("ok", { status: 200 });
   }
 
   if (clinic.rescheduleIntentPatterns.test(newText)) {
-    const result = await rescheduleActiveAppointment({ conversationId, business: clinic.slug, contactPhone, session });
+    const result = await rescheduleActiveAppointment({ conversationId, business: clinic.slug, contactPhone, session, clinic });
     replyText = result.reply;
     action = result.action;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session });
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session, clinic });
     return new Response("ok", { status: 200 });
   }
 
   // ── 5b. Intención de consultar la cita ("¿cuándo es mi cita?") ───────────
   if (clinic.checkAppointmentIntentPatterns.test(newText)) {
-    const result = await checkActiveAppointment({ business: clinic.slug, contactPhone, session });
+    const result = await checkActiveAppointment({ business: clinic.slug, contactPhone, session, clinic });
     replyText = result.reply;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
     return new Response("ok", { status: 200 });
   }
 
@@ -377,10 +387,11 @@ export async function POST(request: Request) {
       contactPhone,
       incomingText: newText,
       session: { ...session, step: "idle" },
+      clinic,
     });
     replyText = result.reply;
     action = result.action;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session });
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session, clinic });
     return new Response("ok", { status: 200 });
   }
 
@@ -388,13 +399,13 @@ export async function POST(request: Request) {
   if (!newText.trim()) {
     // Media sin texto y sin flujo activo → respuesta de bienvenida.
     replyText = clinic.replies.welcome;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
     return new Response("ok", { status: 200 });
   }
 
   try {
     const history = await getRecentConversationHistory(conversationId, 10);
-    const systemPrompt = buildClinicSystemPrompt();
+    const systemPrompt = buildClinicSystemPrompt(clinic);
 
     const messages: { role: "user" | "assistant"; content: string }[] = [
       ...history.map((h) => ({ role: h.role as "user" | "assistant", content: h.content })),
@@ -422,7 +433,7 @@ export async function POST(request: Request) {
     replyText = "Lo sentimos, hubo un problema al procesar su consulta. Por favor intente nuevamente o llámenos al +591 75681881.";
   }
 
-  await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage });
+  await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
   return new Response("ok", { status: 200 });
 }
 
@@ -437,8 +448,9 @@ async function sendAndPersist(params: {
   action: "send_qr" | "none";
   lastMessage: Awaited<ReturnType<typeof normalizeIncomingMessages>>[number];
   updatedSession?: any;
+  clinic: ClinicConfig;
 }) {
-  const { kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage } = params;
+  const { kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, clinic } = params;
 
   try {
     await kapso.messages.sendText({

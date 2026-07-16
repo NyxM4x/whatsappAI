@@ -12,13 +12,14 @@ import {
   verifyStaffCredentials,
 } from "@/lib/admin/auth";
 import { updateAppointment, getAppointmentStatus, logAdminAudit } from "@/lib/clinic/data";
-import { clinic } from "@/lib/clinic/config";
+import { getClinicConfig } from "@/lib/clinic/config";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function loginAction(formData: FormData) {
   const email = String(formData.get("email") ?? "");
   const password = String(formData.get("password") ?? "");
+  const clinic = await getClinicConfig();
 
   if (await isLoginRateLimited(clinic.slug, email)) {
     redirect("/admin/login?error=rate_limited");

@@ -48,7 +48,7 @@ import type {
   TimeSlot,
   Doctor,
 } from "@/lib/clinic/types";
-import { clinic } from "@/lib/clinic/config";
+import type { ClinicConfig } from "@/lib/clinic/config";
 
 // ─── Tipos de resultado ──────────────────────────────────────────────────────
 
@@ -234,8 +234,9 @@ export async function advanceBooking(params: {
   contactPhone: string;
   incomingText: string;
   session: BookingSession;
+  clinic: ClinicConfig;
 }): Promise<BookingResult> {
-  const { conversationId, business, contactPhone, incomingText, session } = params;
+  const { conversationId, business, contactPhone, incomingText, session, clinic } = params;
   const text = incomingText.trim();
   let { step, draft, hold } = session;
 
@@ -698,8 +699,9 @@ export async function handlePaymentProof(params: {
   contactPhone: string;
   mediaUrl: string;
   session: BookingSession;
+  clinic: ClinicConfig;
 }): Promise<BookingResult> {
-  const { conversationId, business, contactPhone, session, mediaUrl } = params;
+  const { conversationId, business, contactPhone, session, mediaUrl, clinic } = params;
   const { draft } = session;
 
   if (!draft.appointmentId) {
@@ -863,8 +865,9 @@ export async function checkActiveAppointment(params: {
   business: string;
   contactPhone: string;
   session: BookingSession;
+  clinic: ClinicConfig;
 }): Promise<BookingResult> {
-  const { business, contactPhone, session } = params;
+  const { business, contactPhone, session, clinic } = params;
 
   const appointment = await findActiveAppointmentByPhone(business, contactPhone);
   if (!appointment) {
@@ -903,8 +906,9 @@ export async function cancelActiveAppointment(params: {
   business: string;
   contactPhone: string;
   session: BookingSession;
+  clinic: ClinicConfig;
 }): Promise<BookingResult> {
-  const { conversationId, business, contactPhone } = params;
+  const { conversationId, business, contactPhone, clinic } = params;
 
   // Resetear sesión PRIMERO para que la máquina no quede colgada.
   await resetBookingSession(conversationId, business);
@@ -946,8 +950,9 @@ export async function rescheduleActiveAppointment(params: {
   business: string;
   contactPhone: string;
   session: BookingSession;
+  clinic: ClinicConfig;
 }): Promise<BookingResult> {
-  const { conversationId, business, contactPhone } = params;
+  const { conversationId, business, contactPhone, clinic } = params;
 
   const appointment = await findActiveAppointmentByPhone(business, contactPhone);
   if (!appointment) {

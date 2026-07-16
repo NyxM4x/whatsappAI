@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { requireStaff } from "@/lib/admin/auth";
 import { listAppointmentsForAdmin, type AdminAppointmentFilter } from "@/lib/clinic/data";
-import { clinic } from "@/lib/clinic/config";
+import { getClinicConfig } from "@/lib/clinic/config";
 import { cancelAppointmentAction, confirmAppointmentAction, logoutAction } from "./actions";
 
 const FILTERS: { value: AdminAppointmentFilter; label: string }[] = [
@@ -21,10 +21,10 @@ const STATUS_LABEL: Record<string, string> = {
   canceled: "Cancelada",
 };
 
-function formatDate(iso: string | null): string {
+function formatDate(iso: string | null, timezone: string): string {
   if (!iso) return "—";
   return new Intl.DateTimeFormat("es-BO", {
-    timeZone: clinic.timezone,
+    timeZone: timezone,
     weekday: "short",
     day: "numeric",
     month: "short",
@@ -40,6 +40,7 @@ export default async function AdminDashboardPage({
   searchParams: Promise<{ filter?: string }>;
 }) {
   const staff = await requireStaff();
+  const clinic = await getClinicConfig();
   const { filter } = await searchParams;
   const validFilters = FILTERS.map((f) => f.value);
   const activeFilter = (validFilters.includes(filter as AdminAppointmentFilter)
@@ -96,7 +97,7 @@ export default async function AdminDashboardPage({
               <tr key={appt.id} className={appt.notes ? "flagged" : ""}>
                 <td>{appt.patientName ?? "—"}</td>
                 <td>{appt.contactPhone}</td>
-                <td>{formatDate(appt.scheduledStart)}</td>
+                <td>{formatDate(appt.scheduledStart, clinic.timezone)}</td>
                 <td>{appt.doctorName ?? "—"}</td>
                 <td>
                   <span className={`badge badge-${appt.status}`}>

@@ -11,7 +11,7 @@
 
 import { openai } from "@ai-sdk/openai";
 import { generateText } from "ai";
-import { buildClinicSystemPrompt } from "../lib/clinic/config";
+import { buildClinicSystemPrompt, getClinicConfig } from "../lib/clinic/config";
 
 type Case = {
   name: string;
@@ -109,7 +109,8 @@ async function main() {
     process.exit(1);
   }
 
-  const system = buildClinicSystemPrompt();
+  const clinic = await getClinicConfig();
+  const system = buildClinicSystemPrompt(clinic);
   let failures = 0;
 
   for (const c of CASES) {

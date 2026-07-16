@@ -29,14 +29,12 @@ import {
   createAppointmentEvent,
   deleteAppointmentEvent,
 } from "@/lib/clinic/googleCalendar";
-import { clinic } from "@/lib/clinic/config";
+import { getClinicConfig } from "@/lib/clinic/config";
 
 // Puede procesar varias citas en serie (crear/borrar eventos + enviar WhatsApp),
 // así que subimos el límite por defecto de Vercel para no cortar a mitad del batch.
 export const runtime = "nodejs";
 export const maxDuration = 60;
-
-const BUSINESS = clinic.slug;
 
 export async function GET(request: Request) {
   // ── Autenticación ─────────────────────────────────────────────────────────
@@ -50,6 +48,9 @@ export async function GET(request: Request) {
   if (!validSecrets.length || !validSecrets.some((s) => authHeader === `Bearer ${s}`)) {
     return new Response("Unauthorized", { status: 401 });
   }
+
+  const clinic = await getClinicConfig();
+  const BUSINESS = clinic.slug;
 
   const results = {
     confirmed: { processed: 0, failed: 0 },
