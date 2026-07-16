@@ -29,6 +29,11 @@ import {
 } from "@/lib/clinic/googleCalendar";
 import { clinic } from "@/lib/clinic/config";
 
+// Puede procesar varias citas en serie (crear/borrar eventos + enviar WhatsApp),
+// así que subimos el límite por defecto de Vercel para no cortar a mitad del batch.
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 const BUSINESS = clinic.slug;
 
 export async function GET(request: Request) {

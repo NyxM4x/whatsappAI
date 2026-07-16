@@ -314,6 +314,7 @@ export async function POST(request: Request) {
         system: `Determina si el siguiente mensaje de WhatsApp expresa intención de agendar/reservar una cita médica, ver horarios disponibles, o hablar con un doctor. Responde SOLO "si" o "no".`,
         prompt: newText,
         temperature: 0,
+        abortSignal: AbortSignal.timeout(8000),
       });
       wantsBooking = intent.trim().toLowerCase().startsWith("si");
     } catch {
@@ -356,6 +357,8 @@ export async function POST(request: Request) {
       model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
       system: systemPrompt,
       messages,
+      temperature: 0.35,
+      abortSignal: AbortSignal.timeout(15000),
     });
 
     replyText = text.trim() || clinic.replies.welcome;

@@ -97,6 +97,7 @@ async function resolveChoiceWithAI(userText: string, options: string[]): Promise
       system: "El usuario está eligiendo una opción de una lista. Responde SOLO con el número de la opción que mejor coincide con lo que escribió. Si no coincide con ninguna, responde 0.",
       prompt: `Lista:\n${list}\n\nEl usuario escribió: "${userText}"\n\n¿Con qué número coincide?`,
       temperature: 0,
+      abortSignal: AbortSignal.timeout(8000),
     });
     const n = parseInt(text.trim(), 10);
     if (!isNaN(n) && n >= 1 && n <= options.length) return n;
@@ -130,6 +131,7 @@ Reglas:
 Responde ÚNICAMENTE con el JSON.`,
       prompt: `Lista de horarios:\n${list}\n\nEl usuario escribió: "${userText}"`,
       temperature: 0,
+      abortSignal: AbortSignal.timeout(8000),
     });
     const parsed = JSON.parse(text.trim().replace(/^```json|```$/g, "").trim());
     const idx = Number(parsed.index);
@@ -160,7 +162,8 @@ Responde su pregunta de forma breve y cálida, como una recepcionista boliviana 
 Al final de tu respuesta, invítalo suavemente a continuar con el agendamiento.
 No inventes horarios, precios ni doctores. Si no sabes algo, dile que puede llamar al +591 75681881.`,
       prompt: userText,
-      temperature: 0.7,
+      temperature: 0.5,
+      abortSignal: AbortSignal.timeout(10000),
     });
     return { reply: `${text.trim()}\n\n${followUp}`, action: "none", session };
   } catch {
@@ -453,6 +456,7 @@ Ejemplos:
 - "1234567" → {"name":null,"ci":"1234567","reason":null}`,
           prompt: text,
           temperature: 0,
+          abortSignal: AbortSignal.timeout(8000),
         });
 
         const parsed = JSON.parse(extracted.trim().replace(/^```json|```$/g, "").trim());
@@ -763,9 +767,14 @@ export async function handlePaymentProof(params: {
     try {
       const imgRes = await fetch(mediaUrl, {
         headers: process.env.KAPSO_API_KEY ? { "X-API-Key": process.env.KAPSO_API_KEY } : {},
+        signal: AbortSignal.timeout(10000),
       });
 
-      if (imgRes.ok) {
+      // Límite de tamaño: no cargar comprobantes gigantes a memoria (la cita ya
+      // quedó confirmada; esta verificación es best-effort y puede saltarse).
+      const contentLength = Number(imgRes.headers.get("content-length") ?? 0);
+      const MAX_PROOF_BYTES = 8 * 1024 * 1024; // 8 MB
+      if (imgRes.ok && contentLength <= MAX_PROOF_BYTES) {
         const imgBuffer = await imgRes.arrayBuffer();
         const imgUint8 = new Uint8Array(imgBuffer);
 
@@ -783,6 +792,7 @@ export async function handlePaymentProof(params: {
               ],
             },
           ],
+          abortSignal: AbortSignal.timeout(15000),
         });
 
         const cleaned = rawAmount.trim().replace(/[^0-9.]/g, "");

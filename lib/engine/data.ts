@@ -206,6 +206,19 @@ export async function acquireReplyLock(params: {
 
   const supabase = getSupabaseClient();
 
+  // Limpieza de lock COLGADO: si una invocación previa del MISMO mensaje se cayó
+  // o hizo timeout entre adquirir el lock y responder, la fila queda 'processing'
+  // para siempre y el reintento de Kapso se descartaría sin responder nunca.
+  // Como el timeout máximo de la función es 30s, un lock 'processing' de más de
+  // 90s es seguro considerarlo muerto y borrarlo para permitir re-procesar.
+  const STALE_LOCK_MS = 90_000;
+  await supabase
+    .from("kapso_response_locks")
+    .delete()
+    .eq("last_kapso_message_id", params.lastMessageId)
+    .eq("status", "processing")
+    .lt("created_at", new Date(Date.now() - STALE_LOCK_MS).toISOString());
+
   const { error } = await supabase.from("kapso_response_locks").insert({
     kapso_conversation_id: params.conversationId,
     last_kapso_message_id: params.lastMessageId,
@@ -280,8 +293,17 @@ export async function markReplyLockSent(params: {
 
 // true si `messageId` sigue siendo el mensaje inbound MÁS reciente de la
 // conversación. Se usa para debounce: si llegó otro mensaje después de esperar
-// la ventana, esta invocación cede el turno a la más reciente. Ante error,
-// devuelve true (procesar) para no perder la respuesta.
+// la ventana, esta invocación cede el turno a la más reciente.
+//
+// Orden por message_timestamp (hora real de WhatsApp) y luego created_at, porque
+// created_at (inserción en BD) puede reordenarse bajo concurrencia y elegir mal
+// al "más reciente".
+//
+// Ante error de query devolvemos true (procesar). Es deliberado: el caso común es
+// UN solo mensaje, y ahí ceder por un error transitorio dejaría al paciente sin
+// respuesta (peor que una eventual respuesta doble, que solo ocurre si además hay
+// concurrencia — doble improbabilidad). El lock por messageId sigue evitando el
+// duplicado exacto por reintento.
 export async function isLatestInboundMessage(
   conversationId: string,
   messageId: string,
@@ -293,6 +315,7 @@ export async function isLatestInboundMessage(
     .select("kapso_message_id")
     .eq("kapso_conversation_id", conversationId)
     .eq("direction", "inbound")
+    .order("message_timestamp", { ascending: false, nullsFirst: false })
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();

@@ -26,6 +26,8 @@ import { clinic } from "@/lib/clinic/config";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+// Envía recordatorios en serie a varios pacientes; evita timeout a mitad del batch.
+export const maxDuration = 60;
 
 function formatSlot(isoUtc: string): string {
   return new Intl.DateTimeFormat("es-BO", {

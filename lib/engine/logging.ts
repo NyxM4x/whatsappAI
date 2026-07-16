@@ -4,7 +4,7 @@ import type { SystemLogLevel } from "@/lib/engine/types";
 // Slug por defecto para los logs. El webhook lo fija con el del negocio activo
 // (setDefaultBusiness) al inicio de cada request, así los módulos que loguean
 // errores sin conocer el negocio igual lo etiquetan correctamente.
-let defaultBusiness = "reino-del-bebe";
+let defaultBusiness = "clinica-san-martin";
 
 export function setDefaultBusiness(slug: string) {
   defaultBusiness = slug;
