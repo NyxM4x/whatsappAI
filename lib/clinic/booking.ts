@@ -590,9 +590,21 @@ Ejemplos:
             status: err?.status ?? err?.code,
             details: err?.errors ?? err?.response?.data,
           });
+          // La cita quedó confirmada pero SIN evento en el calendario. Dejar nota
+          // para que la secretaria lo revise (panel filtro "⚠️ Revisar").
+          if (appointmentId) {
+            await updateAppointment(appointmentId, {
+              notes: "⚠️ Cita confirmada pero falló crear el evento en Google Calendar. Verificar el calendario del doctor.",
+            });
+          }
         }
       } else {
         console.warn("doctor has no googleCalendarId, skipping event creation", { doctorId: doctor.id });
+        if (appointmentId) {
+          await updateAppointment(appointmentId, {
+            notes: "⚠️ El doctor no tiene calendario configurado: la cita no aparece en ningún Google Calendar.",
+          });
+        }
       }
 
       await resetBookingSession(conversationId, business);
@@ -734,7 +746,15 @@ export async function handlePaymentProof(params: {
       }
     } catch (err) {
       console.error("createAppointmentEvent (qr) failed", err);
+      // Confirmada pero sin evento: dejar nota para revisión de la secretaria.
+      await updateAppointment(draft.appointmentId, {
+        notes: "⚠️ Cita confirmada pero falló crear el evento en Google Calendar. Verificar el calendario del doctor.",
+      });
     }
+  } else if (draft.doctorId && !doctor?.googleCalendarId) {
+    await updateAppointment(draft.appointmentId, {
+      notes: "⚠️ El doctor no tiene calendario configurado: la cita no aparece en ningún Google Calendar.",
+    });
   }
 
   // Verificación best-effort del monto: NO bloquea la confirmación, solo deja
