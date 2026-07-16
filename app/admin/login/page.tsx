@@ -14,7 +14,10 @@ export default async function LoginPage({
         <h1>{clinic.clinicName}</h1>
         <p className="subtitle">Panel interno</p>
 
-        {error && <p className="error">Correo o contraseña incorrectos.</p>}
+        {error === "rate_limited" && (
+          <p className="error">Demasiados intentos fallidos. Espere unos minutos e intente de nuevo.</p>
+        )}
+        {error === "1" && <p className="error">Correo o contraseña incorrectos.</p>}
 
         <label>
           Correo

@@ -382,6 +382,81 @@ export async function updateAppointment(
   return true;
 }
 
+// ─── Idempotencia: claim atómico antes de crear el evento de Calendar ────────
+// Evita que dos procesos concurrentes (ej. handlePaymentProof y el trigger de
+// confirmaciones) creen dos eventos/notificaciones para la misma cita. Ver
+// migración 20260717000000_appointment_event_claim.sql.
+
+// Intenta "reservar" la creación del evento para esta cita. Devuelve true solo
+// si ESTA llamada ganó el claim (nadie más lo tiene y no hay evento todavía).
+export async function claimAppointmentForEventCreation(id: string): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clinic_appointments")
+    .update({ event_claimed_at: new Date().toISOString() })
+    .eq("id", id)
+    .is("google_event_id", null)
+    .is("event_claimed_at", null)
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    console.error("claimAppointmentForEventCreation failed", error);
+    return false;
+  }
+  return Boolean(data);
+}
+
+// Libera el claim si la creación del evento falló, para permitir reintentar
+// más tarde (otro mensaje del paciente, el panel, o el cron de confirmaciones).
+export async function releaseAppointmentEventClaim(id: string): Promise<void> {
+  const supabase = getSupabaseClient();
+  const { error } = await supabase
+    .from("clinic_appointments")
+    .update({ event_claimed_at: null })
+    .eq("id", id);
+
+  if (error) console.error("releaseAppointmentEventClaim failed", error);
+}
+
+// Lectura mínima para auditoría (before/after de una acción administrativa).
+export async function getAppointmentStatus(id: string): Promise<AppointmentStatus | null> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clinic_appointments")
+    .select("status")
+    .eq("id", id)
+    .maybeSingle();
+  if (error || !data) return null;
+  return data.status as AppointmentStatus;
+}
+
+// ─── Auditoría de acciones administrativas (P1.10) ───────────────────────────
+
+export async function logAdminAudit(params: {
+  business: string;
+  actorId: string;
+  actorName?: string | null;
+  action: string;
+  entity: string;
+  entityId: string;
+  before?: Record<string, any> | null;
+  after?: Record<string, any> | null;
+}): Promise<void> {
+  const supabase = getSupabaseClient();
+  const { error } = await supabase.from("clinic_admin_audit").insert({
+    business: params.business,
+    actor_id: params.actorId,
+    actor_name: params.actorName ?? null,
+    action: params.action,
+    entity: params.entity,
+    entity_id: params.entityId,
+    before: params.before ?? null,
+    after: params.after ?? null,
+  });
+  if (error) console.error("logAdminAudit failed", error);
+}
+
 // ─── Panel interno (secretaria) ───────────────────────────────────────────────
 
 export type AdminAppointmentFilter = "all" | "confirmed" | "pending" | "flagged" | "canceled";

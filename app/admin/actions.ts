@@ -6,18 +6,31 @@ import { revalidatePath } from "next/cache";
 import {
   ADMIN_COOKIE_NAME,
   createSessionToken,
+  isLoginRateLimited,
+  recordLoginAttempt,
   requireStaff,
   verifyStaffCredentials,
 } from "@/lib/admin/auth";
-import { updateAppointment } from "@/lib/clinic/data";
+import { updateAppointment, getAppointmentStatus, logAdminAudit } from "@/lib/clinic/data";
 import { clinic } from "@/lib/clinic/config";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function loginAction(formData: FormData) {
   const email = String(formData.get("email") ?? "");
   const password = String(formData.get("password") ?? "");
 
+  if (await isLoginRateLimited(clinic.slug, email)) {
+    redirect("/admin/login?error=rate_limited");
+  }
+
   const session = await verifyStaffCredentials(clinic.slug, email, password);
+  await recordLoginAttempt(clinic.slug, email, Boolean(session));
+
   if (!session) {
+    // Delay constante ante fallo: dificulta el fuerza-bruta aunque alguien
+    // evada el conteo (ej. probando muchos correos distintos).
+    await sleep(400);
     redirect("/admin/login?error=1");
   }
 
@@ -43,10 +56,21 @@ export async function logoutAction() {
 // cambio de status y automáticamente borra el evento del calendario del
 // doctor + no hace falta duplicar esa lógica acá.
 export async function cancelAppointmentAction(formData: FormData) {
-  await requireStaff();
+  const staff = await requireStaff();
   const id = String(formData.get("id") ?? "");
   if (id) {
+    const before = await getAppointmentStatus(id);
     await updateAppointment(id, { status: "canceled" });
+    await logAdminAudit({
+      business: staff.business,
+      actorId: staff.staffId,
+      actorName: staff.name,
+      action: "appointment.cancel",
+      entity: "appointment",
+      entityId: id,
+      before: { status: before },
+      after: { status: "canceled" },
+    });
   }
   revalidatePath("/admin");
 }
@@ -56,10 +80,21 @@ export async function cancelAppointmentAction(formData: FormData) {
 // Igual que arriba: el trigger crea el evento y avisa al paciente por
 // WhatsApp automáticamente al ver status='confirmed'.
 export async function confirmAppointmentAction(formData: FormData) {
-  await requireStaff();
+  const staff = await requireStaff();
   const id = String(formData.get("id") ?? "");
   if (id) {
+    const before = await getAppointmentStatus(id);
     await updateAppointment(id, { status: "confirmed", notes: null });
+    await logAdminAudit({
+      business: staff.business,
+      actorId: staff.staffId,
+      actorName: staff.name,
+      action: "appointment.confirm",
+      entity: "appointment",
+      entityId: id,
+      before: { status: before },
+      after: { status: "confirmed" },
+    });
   }
   revalidatePath("/admin");
 }

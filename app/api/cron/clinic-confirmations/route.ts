@@ -22,6 +22,8 @@ import {
   getDoctorById,
   getSpecialtyById,
   updateAppointment,
+  claimAppointmentForEventCreation,
+  releaseAppointmentEventClaim,
 } from "@/lib/clinic/data";
 import {
   createAppointmentEvent,
@@ -79,6 +81,13 @@ export async function GET(request: Request) {
         continue;
       }
 
+      // Claim atómico (P1.7): si handlePaymentProof ya está creando el evento
+      // para esta misma cita, no duplicamos.
+      const claimed = await claimAppointmentForEventCreation(appt.id);
+      if (!claimed) {
+        continue;
+      }
+
       const specialty = appt.specialtyId ? await getSpecialtyById(appt.specialtyId) : null;
 
       const eventId = await createAppointmentEvent({
@@ -99,6 +108,8 @@ export async function GET(request: Request) {
 
       if (eventId) {
         await updateAppointment(appt.id, { googleEventId: eventId });
+      } else {
+        await releaseAppointmentEventClaim(appt.id);
       }
 
       // Notificar al paciente por WhatsApp.
@@ -148,6 +159,7 @@ export async function GET(request: Request) {
         id: appt.id,
         error: getErrorMessage(err),
       });
+      await releaseAppointmentEventClaim(appt.id);
       results.confirmed.failed++;
     }
   }

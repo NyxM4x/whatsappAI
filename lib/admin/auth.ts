@@ -87,6 +87,49 @@ export async function verifyStaffCredentials(
   return { staffId: String(data.id), business, name: data.name, email: data.email };
 }
 
+// ─── Rate limiting del login (P1.8) ──────────────────────────────────────────
+// Sin memoria persistente entre invocaciones serverless, así que el conteo vive
+// en Supabase (tabla clinic_login_attempts, migración 20260717010000).
+
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 min
+
+// true si (business, email) superó el máximo de fallos en la ventana reciente.
+// Ante error de consulta, fail-open (no bloquear): una falla transitoria de BD
+// no debe dejar a la secretaria sin poder entrar.
+export async function isLoginRateLimited(business: string, email: string): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  const since = new Date(Date.now() - LOGIN_WINDOW_MS).toISOString();
+
+  const { count, error } = await supabase
+    .from("clinic_login_attempts")
+    .select("id", { count: "exact", head: true })
+    .eq("business", business)
+    .eq("email", email.trim().toLowerCase())
+    .eq("success", false)
+    .gte("created_at", since);
+
+  if (error) {
+    console.error("isLoginRateLimited failed", error);
+    return false;
+  }
+  return (count ?? 0) >= LOGIN_MAX_FAILURES;
+}
+
+export async function recordLoginAttempt(
+  business: string,
+  email: string,
+  success: boolean,
+): Promise<void> {
+  const supabase = getSupabaseClient();
+  const { error } = await supabase.from("clinic_login_attempts").insert({
+    business,
+    email: email.trim().toLowerCase(),
+    success,
+  });
+  if (error) console.error("recordLoginAttempt failed", error);
+}
+
 // Lee la sesión sin redirigir — para usar en Route Handlers (API), donde hay
 // que devolver 401 en vez de una redirección de página.
 export async function getStaffSession(): Promise<StaffSession | null> {

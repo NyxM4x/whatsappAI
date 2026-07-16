@@ -38,6 +38,8 @@ import {
   createAppointment,
   updateAppointment,
   findActiveAppointmentByPhone,
+  claimAppointmentForEventCreation,
+  releaseAppointmentEventClaim,
 } from "@/lib/clinic/data";
 import type {
   BookingSession,
@@ -561,7 +563,14 @@ Ejemplos:
         return reply(`Justo se ocupó ese horario 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
       }
 
-      if (doctor.googleCalendarId) {
+      // Claim atómico: si otro proceso (ej. el trigger de confirmaciones) ya está
+      // creando el evento de esta cita, no duplicamos (ver P1.7 / migración
+      // 20260717000000). Recién insertada, lo normal es ganar el claim siempre.
+      const claimedCash = doctor.googleCalendarId
+        ? await claimAppointmentForEventCreation(appointmentId)
+        : false;
+
+      if (doctor.googleCalendarId && claimedCash) {
         try {
           console.log("createAppointmentEvent starting", {
             calendarId: doctor.googleCalendarId,
@@ -587,6 +596,8 @@ Ejemplos:
           console.log("createAppointmentEvent result", { eventId });
           if (appointmentId && eventId) {
             await updateAppointment(appointmentId, { googleEventId: eventId });
+          } else {
+            await releaseAppointmentEventClaim(appointmentId);
           }
         } catch (err: any) {
           console.error("createAppointmentEvent (cash) failed", {
@@ -594,6 +605,7 @@ Ejemplos:
             status: err?.status ?? err?.code,
             details: err?.errors ?? err?.response?.data,
           });
+          await releaseAppointmentEventClaim(appointmentId);
           // La cita quedó confirmada pero SIN evento en el calendario. Dejar nota
           // para que la secretaria lo revise (panel filtro "⚠️ Revisar").
           if (appointmentId) {
@@ -602,7 +614,7 @@ Ejemplos:
             });
           }
         }
-      } else {
+      } else if (!doctor.googleCalendarId) {
         console.warn("doctor has no googleCalendarId, skipping event creation", { doctorId: doctor.id });
         if (appointmentId) {
           await updateAppointment(appointmentId, {
@@ -610,6 +622,8 @@ Ejemplos:
           });
         }
       }
+      // else: no se ganó el claim porque otro proceso ya está creando el evento
+      // para esta cita — no hay nada que hacer acá, ese proceso lo resuelve.
 
       await resetBookingSession(conversationId, business);
       const friendlySlot = formatSlotLocal(draft.slotStart, clinic.timezone);
@@ -727,8 +741,15 @@ export async function handlePaymentProof(params: {
   const doctor = draft.doctorId ? await getDoctorById(draft.doctorId) : null;
 
   // Crear el evento en Calendar de inmediato (mismo patrón que el pago en
-  // efectivo), sin depender del webhook de confirmaciones de Supabase.
-  if (doctor?.googleCalendarId && draft.slotStart && draft.slotEnd) {
+  // efectivo). El status ya se puso 'confirmed' arriba, lo que también puede
+  // disparar el trigger de confirmaciones de Supabase — el claim atómico evita
+  // que ambos caminos creen el evento dos veces (P1.7).
+  const claimedQr =
+    doctor?.googleCalendarId && draft.slotStart && draft.slotEnd
+      ? await claimAppointmentForEventCreation(draft.appointmentId)
+      : false;
+
+  if (doctor?.googleCalendarId && draft.slotStart && draft.slotEnd && claimedQr) {
     try {
       const eventId = await createAppointmentEvent({
         calendarId: doctor.googleCalendarId,
@@ -747,9 +768,12 @@ export async function handlePaymentProof(params: {
       });
       if (eventId) {
         await updateAppointment(draft.appointmentId, { googleEventId: eventId });
+      } else {
+        await releaseAppointmentEventClaim(draft.appointmentId);
       }
     } catch (err) {
       console.error("createAppointmentEvent (qr) failed", err);
+      await releaseAppointmentEventClaim(draft.appointmentId);
       // Confirmada pero sin evento: dejar nota para revisión de la secretaria.
       await updateAppointment(draft.appointmentId, {
         notes: "⚠️ Cita confirmada pero falló crear el evento en Google Calendar. Verificar el calendario del doctor.",
@@ -760,6 +784,8 @@ export async function handlePaymentProof(params: {
       notes: "⚠️ El doctor no tiene calendario configurado: la cita no aparece en ningún Google Calendar.",
     });
   }
+  // Si había calendarId/horario pero no se ganó el claim, otro proceso (el
+  // trigger de confirmaciones) ya está creando el evento — no hacemos nada más.
 
   // Verificación best-effort del monto: NO bloquea la confirmación, solo deja
   // una nota para revisión posterior de la secretaria si algo no cuadra.
