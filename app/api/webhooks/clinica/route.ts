@@ -15,6 +15,7 @@
 
 import { openai } from "@ai-sdk/openai";
 import { generateText } from "ai";
+import { verifySignature } from "@kapso/whatsapp-cloud-api/server";
 
 import { getKapsoClient, getRequiredEnv } from "@/lib/engine/clients";
 import { maskPhone, getErrorMessage, logSystemEvent } from "@/lib/engine/logging";
@@ -61,6 +62,12 @@ export async function GET(request: Request) {
 
   const verifyToken = process.env.KAPSO_VERIFY_TOKEN ?? process.env.KAPSO_API_KEY ?? "";
 
+  // Fail-closed: sin verify token configurado, no hay nada válido contra qué
+  // comparar (antes "" pasaba si el challenge también traía token vacío).
+  if (!verifyToken) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
   if (mode === "subscribe" && token === verifyToken) {
     return new Response(challenge ?? "", { status: 200 });
   }
@@ -71,10 +78,40 @@ export async function GET(request: Request) {
 // ─── POST: mensajes entrantes ─────────────────────────────────────────────────
 
 export async function POST(request: Request) {
+  let rawBody: string;
+
+  try {
+    rawBody = await request.text();
+  } catch {
+    return new Response("invalid body", { status: 400 });
+  }
+
+  // Verificación de firma (P1.1): Meta/Kapso firman el payload con
+  // X-Hub-Signature-256 (HMAC-SHA256 sobre el body crudo, con el App Secret de
+  // Meta). Sin esto, cualquiera en internet puede POSTear mensajes falsos.
+  //
+  // Rollout seguro: si META_APP_SECRET no está configurada, NO se bloquea (solo
+  // se avisa por log) para no tumbar el bot en producción antes de que se
+  // configure la env var. Una vez seteada, se exige siempre.
+  const appSecret = process.env.META_APP_SECRET;
+  if (appSecret) {
+    const ok = verifySignature({
+      appSecret,
+      rawBody,
+      signatureHeader: request.headers.get("x-hub-signature-256") ?? undefined,
+    });
+    if (!ok) {
+      console.error("clinica webhook: invalid X-Hub-Signature-256, rejecting");
+      return new Response("invalid signature", { status: 401 });
+    }
+  } else {
+    console.warn("clinica webhook: META_APP_SECRET not set, skipping signature verification");
+  }
+
   let payload: Record<string, any>;
 
   try {
-    payload = await request.json();
+    payload = JSON.parse(rawBody);
   } catch {
     return new Response("invalid json", { status: 400 });
   }
