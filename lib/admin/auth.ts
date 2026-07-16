@@ -66,16 +66,19 @@ export function verifySessionToken(token: string | undefined | null): StaffSessi
   }
 }
 
+// Multi-tenant (P2): el login es UNA sola pantalla compartida por todas las
+// clínicas — no hay forma de saber a qué clínica pertenece alguien antes de
+// que inicie sesión. Por eso el email es único GLOBALMENTE en clinic_staff
+// (migración 20260718000000) y la búsqueda ya no filtra por business: el
+// `business` de la sesión sale de la fila encontrada, no al revés.
 export async function verifyStaffCredentials(
-  business: string,
   email: string,
   password: string,
 ): Promise<StaffSession | null> {
   const supabase = getSupabaseClient();
   const { data, error } = await supabase
     .from("clinic_staff")
-    .select("id, name, email, password_hash, is_active")
-    .eq("business", business)
+    .select("id, business, name, email, password_hash, is_active")
     .eq("email", email.trim().toLowerCase())
     .maybeSingle();
 
@@ -84,27 +87,28 @@ export async function verifyStaffCredentials(
   const valid = await bcrypt.compare(password, data.password_hash);
   if (!valid) return null;
 
-  return { staffId: String(data.id), business, name: data.name, email: data.email };
+  return { staffId: String(data.id), business: String(data.business), name: data.name, email: data.email };
 }
 
 // ─── Rate limiting del login (P1.8) ──────────────────────────────────────────
 // Sin memoria persistente entre invocaciones serverless, así que el conteo vive
-// en Supabase (tabla clinic_login_attempts, migración 20260717010000).
+// en Supabase (tabla clinic_login_attempts, migración 20260717010000). Se
+// cuenta por CORREO solamente (no por business — no se sabe la clínica hasta
+// después de autenticar, y el email ya es único globalmente).
 
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 min
 
-// true si (business, email) superó el máximo de fallos en la ventana reciente.
-// Ante error de consulta, fail-open (no bloquear): una falla transitoria de BD
-// no debe dejar a la secretaria sin poder entrar.
-export async function isLoginRateLimited(business: string, email: string): Promise<boolean> {
+// true si el correo superó el máximo de fallos en la ventana reciente. Ante
+// error de consulta, fail-open (no bloquear): una falla transitoria de BD no
+// debe dejar a la secretaria sin poder entrar.
+export async function isLoginRateLimited(email: string): Promise<boolean> {
   const supabase = getSupabaseClient();
   const since = new Date(Date.now() - LOGIN_WINDOW_MS).toISOString();
 
   const { count, error } = await supabase
     .from("clinic_login_attempts")
     .select("id", { count: "exact", head: true })
-    .eq("business", business)
     .eq("email", email.trim().toLowerCase())
     .eq("success", false)
     .gte("created_at", since);
@@ -116,14 +120,9 @@ export async function isLoginRateLimited(business: string, email: string): Promi
   return (count ?? 0) >= LOGIN_MAX_FAILURES;
 }
 
-export async function recordLoginAttempt(
-  business: string,
-  email: string,
-  success: boolean,
-): Promise<void> {
+export async function recordLoginAttempt(email: string, success: boolean): Promise<void> {
   const supabase = getSupabaseClient();
   const { error } = await supabase.from("clinic_login_attempts").insert({
-    business,
     email: email.trim().toLowerCase(),
     success,
   });

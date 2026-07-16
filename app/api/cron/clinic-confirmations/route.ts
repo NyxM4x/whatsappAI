@@ -14,7 +14,7 @@
 // o → canceled). Este cron hace el resto automáticamente.
 // ============================================================================
 
-import { getKapsoClient, getRequiredEnv } from "@/lib/engine/clients";
+import { getKapsoClient } from "@/lib/engine/clients";
 import { getErrorMessage } from "@/lib/engine/logging";
 import {
   getConfirmedAppointmentsWithoutEvent,
@@ -24,6 +24,7 @@ import {
   updateAppointment,
   claimAppointmentForEventCreation,
   releaseAppointmentEventClaim,
+  listAllBusinessSlugs,
 } from "@/lib/clinic/data";
 import {
   createAppointmentEvent,
@@ -49,13 +50,20 @@ export async function GET(request: Request) {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  const clinic = await getClinicConfig();
-  const BUSINESS = clinic.slug;
+  // El trigger de Supabase (pg_net) llama a este endpoint sin decir qué
+  // clínica cambió — se procesan TODAS. Sigue siendo barato/idempotente
+  // porque cada clínica solo trae lo que le falta (sin evento / cancelada
+  // con evento todavía presente).
+  const businesses = await listAllBusinessSlugs();
 
   const results = {
     confirmed: { processed: 0, failed: 0 },
     canceled: { processed: 0, failed: 0 },
   };
+
+  for (const BUSINESS of businesses) {
+    const clinic = await getClinicConfig(BUSINESS);
+    const phoneNumberId = clinic.kapsoPhoneNumberId ?? process.env.KAPSO_PHONE_NUMBER_ID;
 
   // ── A) Confirmar citas: crear evento en Calendar + notificar ──────────────
   let confirmedAppts: Awaited<ReturnType<typeof getConfirmedAppointmentsWithoutEvent>>;
@@ -126,8 +134,8 @@ export async function GET(request: Request) {
         }).format(new Date(appt.scheduledStart));
 
         try {
+          if (!phoneNumberId) throw new Error(`no phoneNumberId configured for business=${BUSINESS}`);
           const kapso = getKapsoClient();
-          const phoneNumberId = getRequiredEnv("KAPSO_PHONE_NUMBER_ID");
 
           await kapso.messages.sendText({
             phoneNumberId,
@@ -201,6 +209,8 @@ export async function GET(request: Request) {
       results.canceled.failed++;
     }
   }
+
+  } // fin del loop por clínica
 
   console.log("clinic-confirmations cron done", results);
 

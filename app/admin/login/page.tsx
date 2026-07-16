@@ -1,19 +1,21 @@
 import { loginAction } from "@/app/admin/actions";
-import { getClinicConfig } from "@/lib/clinic/config";
 
+// Pantalla compartida por todas las clínicas (multi-tenant): antes de
+// iniciar sesión no se sabe a qué clínica pertenece la persona, así que no
+// muestra el nombre de ninguna en particular — eso aparece recién en el
+// dashboard, una vez resuelta la sesión.
 export default async function LoginPage({
   searchParams,
 }: {
   searchParams: Promise<{ error?: string }>;
 }) {
   const { error } = await searchParams;
-  const clinic = await getClinicConfig();
 
   return (
     <main className="admin-login">
       <form className="admin-login-card" action={loginAction}>
-        <h1>{clinic.clinicName}</h1>
-        <p className="subtitle">Panel interno</p>
+        <h1>Panel interno</h1>
+        <p className="subtitle">Ingresá con tu correo y contraseña</p>
 
         {error === "rate_limited" && (
           <p className="error">Demasiados intentos fallidos. Espere unos minutos e intente de nuevo.</p>

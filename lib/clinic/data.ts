@@ -16,6 +16,18 @@ import type {
 } from "@/lib/clinic/types";
 import { ACTIVE_APPOINTMENT_STATUSES } from "@/lib/clinic/types";
 
+// Multi-tenant (P2): todas las clínicas dadas de alta, para que los crons
+// (recordatorios, confirmaciones) procesen a cada una en vez de una sola fija.
+export async function listAllBusinessSlugs(): Promise<string[]> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase.from("clinic_settings").select("business");
+  if (error) {
+    console.error("listAllBusinessSlugs failed", error);
+    return [];
+  }
+  return (data ?? []).map((r) => String(r.business));
+}
+
 // ─── Mappers ────────────────────────────────────────────────────────────────
 
 function mapSpecialty(row: any): Specialty {

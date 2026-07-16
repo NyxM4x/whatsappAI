@@ -34,7 +34,13 @@ import {
 } from "@/lib/engine/data";
 import { normalizeIncomingMessages } from "@/lib/engine/messages";
 
-import { getClinicConfig, buildClinicSystemPrompt, type ClinicConfig } from "@/lib/clinic/config";
+import {
+  getClinicConfig,
+  buildClinicSystemPrompt,
+  getBusinessByPhoneNumberId,
+  DEFAULT_BUSINESS_SLUG,
+  type ClinicConfig,
+} from "@/lib/clinic/config";
 import {
   advanceBooking,
   handlePaymentProof,
@@ -117,12 +123,6 @@ export async function POST(request: Request) {
     return new Response("invalid json", { status: 400 });
   }
 
-  // Config de la clínica: hoy siempre la misma (single-tenant), pero ya
-  // resuelta vía la única puerta de entrada (getClinicConfig) para que la
-  // futura resolución multi-tenant por número entrante no toque el resto de
-  // este handler.
-  const clinic = await getClinicConfig();
-
   const incomingMessages = await normalizeIncomingMessages(payload, request);
 
   if (incomingMessages.length === 0) {
@@ -138,6 +138,14 @@ export async function POST(request: Request) {
   if (testPhone && incomingPhone !== testPhone) {
     return new Response("test mode ignored", { status: 200 });
   }
+
+  // Multi-tenant (P2): qué clínica es dueña del número que recibió el
+  // mensaje. Si no se pudo resolver (payload sin el campo esperado, o número
+  // no dado de alta todavía), cae a la clínica por defecto — no rompe el bot.
+  const business = lastMessage.phoneNumberId
+    ? (await getBusinessByPhoneNumberId(lastMessage.phoneNumberId)) ?? DEFAULT_BUSINESS_SLUG
+    : DEFAULT_BUSINESS_SLUG;
+  const clinic = await getClinicConfig(business);
 
   console.log("clinica webhook received", {
     phone: maskPhone(lastMessage.from),
@@ -190,7 +198,10 @@ export async function POST(request: Request) {
 
   // ── Marcar como leído ─────────────────────────────────────────────────────
   const kapso = getKapsoClient();
-  const phoneNumberId = getRequiredEnv("KAPSO_PHONE_NUMBER_ID");
+  // Responder desde el número PROPIO de la clínica resuelta; si todavía no
+  // tiene uno cargado en clinic_settings, cae al env var global (caso
+  // single-tenant / mientras se completa el alta de una clínica nueva).
+  const phoneNumberId = clinic.kapsoPhoneNumberId ?? getRequiredEnv("KAPSO_PHONE_NUMBER_ID");
 
   if (lastMessage.messageId) {
     try {

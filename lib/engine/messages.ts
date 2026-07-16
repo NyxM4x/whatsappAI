@@ -54,8 +54,31 @@ export type IncomingMessage = {
   audioWithoutTranscript?: boolean;
   mediaUrl?: string | null;
   mediaType?: MediaType;
+  // A qué número de WhatsApp (Kapso) le llegó el mensaje — usado para resolver
+  // a qué clínica pertenece (multi-tenant, P2). null si el payload no lo trae
+  // en ninguna de las rutas conocidas; el caller cae a la clínica por defecto.
+  phoneNumberId?: string | null;
   raw: Record<string, any>;
 };
+
+// Extrae el phone_number_id del número de WhatsApp que RECIBIÓ el mensaje.
+// Best-effort: prueba varias rutas plausibles del payload (no hay un único
+// formato documentado para el shape ya aplanado que entrega Kapso). Si ninguna
+// coincide, devuelve null y el caller usa la clínica por defecto — no rompe el
+// bot mientras se verifica el path real contra un payload en vivo.
+function extractPhoneNumberId(event: Record<string, any>): string | null {
+  const candidates = [
+    event?.phone_number_id,
+    event?.metadata?.phone_number_id,
+    event?.conversation?.phone_number_id,
+    event?.message?.metadata?.phone_number_id,
+    event?.message?.kapso?.phone_number_id,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+  }
+  return null;
+}
 
 // ─── Helpers internos ─────────────────────────────────────────────────────────
 
@@ -223,6 +246,7 @@ async function extractIncomingFromEvent(
     audioWithoutTranscript,
     mediaUrl: mediaUrl ?? null,
     mediaType,
+    phoneNumberId: extractPhoneNumberId(event),
     raw: event,
   };
 }

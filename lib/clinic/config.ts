@@ -6,12 +6,18 @@
 // emergencias, catálogos de labs/medicamentos y el tono del bot.
 //
 // getClinicConfig() es la ÚNICA puerta de entrada — nada más en el código debe
-// importar `defaultClinicConfig` directo. Hoy devuelve el objeto estático de
-// abajo (estamos migrando de "un archivo" a "una fila por clínica" de a
-// pasos); cuando se conecte a la tabla clinic_settings + caché, el cambio será
-// puramente interno a este archivo, sin tocar a quienes ya llaman
-// `await getClinicConfig(business)`.
+// leer datos de clínica de otro lado. Lee de la tabla clinic_settings (una
+// fila por clínica, migración 20260718000000) con una caché corta en memoria.
+// Los patrones de detección de intención (bookingIntentPatterns, etc.) NO
+// viven en la tabla — son lógica de código, iguales para todas las clínicas
+// por ahora; solo identidad/catálogos/textos son por-clínica.
+//
+// Fail-safe: si la fila no existe todavía o Supabase falla, devuelve la
+// config estática de abajo (la de la Clínica San Martín) en vez de romper el
+// bot — mismo criterio que el resto del proyecto (ej. debounce, locks).
 // ============================================================================
+
+import { getSupabaseClient } from "@/lib/engine/clients";
 
 export type CatalogItem = { name: string; price: number };
 
@@ -25,6 +31,11 @@ const defaultClinicConfig = {
   slug: DEFAULT_BUSINESS_SLUG,
   clinicName: "Clínica San Martín de Porres",
   timezone: "America/La_Paz",
+  // Número de WhatsApp propio de la clínica (Kapso). null = usar el env var
+  // global KAPSO_PHONE_NUMBER_ID (caso single-tenant / transición); con más de
+  // una clínica, cada una debe tener el suyo en clinic_settings para responder
+  // desde su propio número.
+  kapsoPhoneNumberId: null as string | null,
 
   generalInfo: {
     address: "Av. Moscú, a una cuadra del Mercado La Cuchilla",
@@ -130,10 +141,10 @@ normalidad. Nunca menciones que era un audio ni comentes la transcripción.
 
 export type ClinicConfig = typeof defaultClinicConfig;
 
-// Caché en memoria del runtime (por instancia serverless), TTL corto. Hoy no
-// hace efecto real (getClinicConfig no pega a ninguna BD todavía), pero queda
-// lista para cuando este archivo pase a leer de clinic_settings — así ese
-// cambio no necesita tocar a los callers ni agregar otra capa después.
+// Caché en memoria del runtime (por instancia serverless), TTL corto. En
+// serverless cada instancia tiene su propia caché — con un TTL de 45s el
+// "stale" máximo entre instancias es aceptable para datos de catálogo/textos
+// que cambian con poca frecuencia.
 const CONFIG_CACHE_TTL_MS = 45_000;
 const configCache = new Map<string, { value: ClinicConfig; expiresAt: number }>();
 
@@ -142,19 +153,92 @@ export function invalidateClinicConfigCache(business?: string) {
   else configCache.clear();
 }
 
-// Única puerta de entrada a la config de una clínica. Firma async a propósito
-// desde ya (aunque hoy resuelve en memoria) para que el futuro salto a
-// Supabase no obligue a tocar cada call site una segunda vez.
+function mapClinicSettingsRow(row: any): ClinicConfig {
+  const replies = row.replies ?? {};
+  return {
+    ...defaultClinicConfig, // conserva los patrones de intención (regex, iguales para todas)
+    slug: String(row.business),
+    kapsoPhoneNumberId: row.kapso_phone_number_id ?? null,
+    clinicName: String(row.clinic_name ?? defaultClinicConfig.clinicName),
+    timezone: String(row.timezone ?? defaultClinicConfig.timezone),
+    generalInfo: {
+      address: row.address ?? defaultClinicConfig.generalInfo.address,
+      phone: row.phone ?? defaultClinicConfig.generalInfo.phone,
+      mapsUrl: row.maps_url ?? defaultClinicConfig.generalInfo.mapsUrl,
+      hours: row.hours ?? defaultClinicConfig.generalInfo.hours,
+    },
+    welcomeMessage: row.welcome_message ?? defaultClinicConfig.welcomeMessage,
+    qrImageUrl: row.qr_image_url ?? defaultClinicConfig.qrImageUrl,
+    paymentMethods: Array.isArray(row.payment_methods) && row.payment_methods.length
+      ? row.payment_methods
+      : defaultClinicConfig.paymentMethods,
+    labs: Array.isArray(row.labs) && row.labs.length ? row.labs : defaultClinicConfig.labs,
+    medications: Array.isArray(row.medications) && row.medications.length
+      ? row.medications
+      : defaultClinicConfig.medications,
+    emergencyKeywords: Array.isArray(row.emergency_keywords) && row.emergency_keywords.length
+      ? row.emergency_keywords
+      : defaultClinicConfig.emergencyKeywords,
+    emergencyResponse: row.emergency_response ?? defaultClinicConfig.emergencyResponse,
+    systemPromptBase: row.system_prompt_base ?? defaultClinicConfig.systemPromptBase,
+    replies: {
+      welcome: replies.welcome ?? defaultClinicConfig.replies.welcome,
+      proofButNoBooking: replies.proofButNoBooking ?? defaultClinicConfig.replies.proofButNoBooking,
+      noActiveAppointment: replies.noActiveAppointment ?? defaultClinicConfig.replies.noActiveAppointment,
+      humanHandoff: replies.humanHandoff ?? defaultClinicConfig.replies.humanHandoff,
+    },
+  };
+}
+
+// Única puerta de entrada a la config de una clínica.
 export async function getClinicConfig(business: string = DEFAULT_BUSINESS_SLUG): Promise<ClinicConfig> {
   const cached = configCache.get(business);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
 
-  // TODO (P2): reemplazar por una lectura a la tabla clinic_settings cuando
-  // exista más de una clínica. Por ahora, single-tenant: cualquier business
-  // devuelve la config estática de la Clínica San Martín.
-  const value = defaultClinicConfig;
+  let value: ClinicConfig = defaultClinicConfig;
+  try {
+    const supabase = getSupabaseClient();
+    const { data, error } = await supabase
+      .from("clinic_settings")
+      .select("*")
+      .eq("business", business)
+      .maybeSingle();
+
+    if (error) {
+      console.error("getClinicConfig: query failed, using static fallback", error);
+    } else if (data) {
+      value = mapClinicSettingsRow(data);
+    } else {
+      console.warn(`getClinicConfig: no clinic_settings row for business="${business}", using static fallback`);
+    }
+  } catch (err) {
+    console.error("getClinicConfig threw, using static fallback", err);
+  }
+
   configCache.set(business, { value, expiresAt: Date.now() + CONFIG_CACHE_TTL_MS });
   return value;
+}
+
+// Resuelve qué clínica es dueña de un número de WhatsApp (Kapso
+// phone_number_id) — usado por el webhook para saber a quién le escribieron.
+// null si no hay ninguna fila con ese número (fallback: DEFAULT_BUSINESS_SLUG
+// en el caller, para no romper el bot mientras se completa el alta de una
+// clínica nueva).
+export async function getBusinessByPhoneNumberId(phoneNumberId: string): Promise<string | null> {
+  try {
+    const supabase = getSupabaseClient();
+    const { data, error } = await supabase
+      .from("clinic_settings")
+      .select("business")
+      .eq("kapso_phone_number_id", phoneNumberId)
+      .maybeSingle();
+
+    if (error || !data) return null;
+    return String(data.business);
+  } catch (err) {
+    console.error("getBusinessByPhoneNumberId threw", err);
+    return null;
+  }
 }
 
 // Arma el system prompt completo para Q&A general inyectando info y catálogos.

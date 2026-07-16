@@ -12,21 +12,19 @@ import {
   verifyStaffCredentials,
 } from "@/lib/admin/auth";
 import { updateAppointment, getAppointmentStatus, logAdminAudit } from "@/lib/clinic/data";
-import { getClinicConfig } from "@/lib/clinic/config";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function loginAction(formData: FormData) {
   const email = String(formData.get("email") ?? "");
   const password = String(formData.get("password") ?? "");
-  const clinic = await getClinicConfig();
 
-  if (await isLoginRateLimited(clinic.slug, email)) {
+  if (await isLoginRateLimited(email)) {
     redirect("/admin/login?error=rate_limited");
   }
 
-  const session = await verifyStaffCredentials(clinic.slug, email, password);
-  await recordLoginAttempt(clinic.slug, email, Boolean(session));
+  const session = await verifyStaffCredentials(email, password);
+  await recordLoginAttempt(email, Boolean(session));
 
   if (!session) {
     // Delay constante ante fallo: dificulta el fuerza-bruta aunque alguien

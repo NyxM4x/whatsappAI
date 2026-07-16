@@ -17,9 +17,9 @@
 // que existan plantillas aprobadas por Meta.
 // ============================================================================
 
-import { getKapsoClient, getRequiredEnv } from "@/lib/engine/clients";
+import { getKapsoClient } from "@/lib/engine/clients";
 import { getErrorMessage } from "@/lib/engine/logging";
-import { getDoctorById } from "@/lib/clinic/data";
+import { getDoctorById, listAllBusinessSlugs } from "@/lib/clinic/data";
 import { getSupabaseClient } from "@/lib/engine/clients";
 import { isWithinServiceWindow } from "@/lib/engine/data";
 import { getClinicConfig } from "@/lib/clinic/config";
@@ -86,76 +86,86 @@ export async function GET(request: Request) {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  const clinic = await getClinicConfig();
   const supabase = getSupabaseClient();
+  const businesses = await listAllBusinessSlugs();
 
-  // Día calendario de "mañana" en la zona horaria de la clínica → rango UTC.
-  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  const { year, month, day } = dateParts(clinic.timezone, tomorrow);
-  const windowStart = zonedWallTimeToUtc(clinic.timezone, year, month, day, 0, 0).toISOString();
-  const windowEnd = zonedWallTimeToUtc(clinic.timezone, year, month, day, 23, 59).toISOString();
+  const results = { sent: 0, failed: 0, skipped_window_closed: 0, clinics: 0 };
 
-  const { data: appts, error } = await supabase
-    .from("clinic_appointments")
-    .select("*")
-    .eq("business", clinic.slug)
-    .eq("status", "confirmed")
-    .eq("reminder_sent", false)
-    .gte("scheduled_start", windowStart)
-    .lte("scheduled_start", windowEnd);
+  for (const business of businesses) {
+    const clinic = await getClinicConfig(business);
+    results.clinics++;
 
-  if (error) {
-    console.error("clinic-reminders query failed", error);
-    return Response.json({ ok: false, error: error.message }, { status: 500 });
-  }
+    // Día calendario de "mañana" en la zona horaria de ESTA clínica → rango UTC.
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const { year, month, day } = dateParts(clinic.timezone, tomorrow);
+    const windowStart = zonedWallTimeToUtc(clinic.timezone, year, month, day, 0, 0).toISOString();
+    const windowEnd = zonedWallTimeToUtc(clinic.timezone, year, month, day, 23, 59).toISOString();
 
-  const results = { sent: 0, failed: 0, skipped_window_closed: 0 };
+    const { data: appts, error } = await supabase
+      .from("clinic_appointments")
+      .select("*")
+      .eq("business", clinic.slug)
+      .eq("status", "confirmed")
+      .eq("reminder_sent", false)
+      .gte("scheduled_start", windowStart)
+      .lte("scheduled_start", windowEnd);
 
-  for (const appt of appts ?? []) {
-    try {
-      // WhatsApp solo permite texto libre dentro de la ventana de 24h desde el
-      // último mensaje del cliente. Si la ventana está cerrada, saltamos el envío
-      // (sin marcar reminder_sent) hasta tener plantillas aprobadas por Meta.
-      const windowOpen = await isWithinServiceWindow(appt.contact_phone);
-      if (!windowOpen) {
-        results.skipped_window_closed++;
-        continue;
+    if (error) {
+      console.error("clinic-reminders query failed", { business, error });
+      continue;
+    }
+
+    const phoneNumberId = clinic.kapsoPhoneNumberId ?? process.env.KAPSO_PHONE_NUMBER_ID;
+    if (!phoneNumberId) {
+      console.warn("clinic-reminders: no phoneNumberId for business, skipping", { business });
+      continue;
+    }
+
+    for (const appt of appts ?? []) {
+      try {
+        // WhatsApp solo permite texto libre dentro de la ventana de 24h desde el
+        // último mensaje del cliente. Si la ventana está cerrada, saltamos el envío
+        // (sin marcar reminder_sent) hasta tener plantillas aprobadas por Meta.
+        const windowOpen = await isWithinServiceWindow(appt.contact_phone);
+        if (!windowOpen) {
+          results.skipped_window_closed++;
+          continue;
+        }
+
+        const doctor = appt.doctor_id ? await getDoctorById(appt.doctor_id) : null;
+        const friendlySlot = appt.scheduled_start ? formatSlot(appt.scheduled_start, clinic.timezone) : "su cita";
+
+        const kapso = getKapsoClient();
+
+        await kapso.messages.sendText({
+          phoneNumberId,
+          to: appt.contact_phone,
+          body: [
+            `📅 *Recordatorio de cita — ${clinic.clinicName}*`,
+            ``,
+            `Hola ${appt.patient_name ?? ""}! Le recordamos su cita de mañana:`,
+            ``,
+            `📅 ${friendlySlot}`,
+            doctor ? `👨‍⚕️ ${doctor.name}` : "",
+            `💊 ${appt.reason ?? "—"}`,
+            ``,
+            `📍 ${clinic.generalInfo.address}`,
+            `🗺️ ${clinic.generalInfo.mapsUrl}`,
+            ``,
+            `Si necesita cancelar o reprogramar, escríbanos con anticipación 😊`,
+          ].filter(Boolean).join("\n"),
+        });
+
+        await supabase
+          .from("clinic_appointments")
+          .update({ reminder_sent: true })
+          .eq("id", appt.id);
+
+        results.sent++;
+      } catch (err) {
+        console.error("clinic reminder send failed", { business, id: appt.id, error: getErrorMessage(err) });
+        results.failed++;
       }
-
-      const doctor = appt.doctor_id ? await getDoctorById(appt.doctor_id) : null;
-      const friendlySlot = appt.scheduled_start ? formatSlot(appt.scheduled_start, clinic.timezone) : "su cita";
-
-      const kapso = getKapsoClient();
-      const phoneNumberId = getRequiredEnv("KAPSO_PHONE_NUMBER_ID");
-
-      await kapso.messages.sendText({
-        phoneNumberId,
-        to: appt.contact_phone,
-        body: [
-          `📅 *Recordatorio de cita — Clínica San Martín de Porres*`,
-          ``,
-          `Hola ${appt.patient_name ?? ""}! Le recordamos su cita de mañana:`,
-          ``,
-          `📅 ${friendlySlot}`,
-          doctor ? `👨‍⚕️ ${doctor.name}` : "",
-          `💊 ${appt.reason ?? "—"}`,
-          ``,
-          `📍 ${clinic.generalInfo.address}`,
-          `🗺️ ${clinic.generalInfo.mapsUrl}`,
-          ``,
-          `Si necesita cancelar o reprogramar, escríbanos con anticipación 😊`,
-        ].filter(Boolean).join("\n"),
-      });
-
-      await supabase
-        .from("clinic_appointments")
-        .update({ reminder_sent: true })
-        .eq("id", appt.id);
-
-      results.sent++;
-    } catch (err) {
-      console.error("clinic reminder send failed", { id: appt.id, error: getErrorMessage(err) });
-      results.failed++;
     }
   }
 

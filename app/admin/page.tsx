@@ -40,14 +40,15 @@ export default async function AdminDashboardPage({
   searchParams: Promise<{ filter?: string }>;
 }) {
   const staff = await requireStaff();
-  const clinic = await getClinicConfig();
+  // La clínica de la que este staff es dueño de datos — nunca la default.
+  const clinic = await getClinicConfig(staff.business);
   const { filter } = await searchParams;
   const validFilters = FILTERS.map((f) => f.value);
   const activeFilter = (validFilters.includes(filter as AdminAppointmentFilter)
     ? filter
     : "all") as AdminAppointmentFilter;
 
-  const appointments = await listAppointmentsForAdmin(clinic.slug, activeFilter);
+  const appointments = await listAppointmentsForAdmin(staff.business, activeFilter);
 
   return (
     <main className="admin-dashboard">
