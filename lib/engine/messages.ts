@@ -1,7 +1,7 @@
 // ============================================================================
 // Normalización genérica de eventos Kapso (WhatsApp Cloud API).
 // ----------------------------------------------------------------------------
-// Reutilizable por cualquier webhook (clínica, Reino del Bebé, etc.).
+// Reutilizable por cualquier webhook del rubro (hoy: clínica).
 // No contiene lógica de negocio: solo extrae y tipifica los campos del evento.
 // ============================================================================
 

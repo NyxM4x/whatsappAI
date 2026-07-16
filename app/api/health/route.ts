@@ -115,7 +115,7 @@ export async function GET() {
 
   const body = {
     status,
-    service: "reino-del-bebe-kapso-vercel",
+    service: "clinica-san-martin-kapso-vercel",
     timestamp: new Date().toISOString(),
     deployment: {
       commit: process.env.VERCEL_GIT_COMMIT_SHA ?? null,

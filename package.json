@@ -1,8 +1,7 @@
 {
-  "name": "reino-del-bebe-kapso-vercel",
+  "name": "clinica-san-martin-kapso-vercel",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Bot de WhatsApp (Kapso + Vercel + Supabase) para agendamiento de citas de Clínica San Martín de Porres.",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "next dev",
