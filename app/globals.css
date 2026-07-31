@@ -241,3 +241,107 @@ a {
 .btn-primary:hover {
   background: #bfdbfe;
 }
+
+/* ── Buscador ─────────────────────────────────────────────────────────────── */
+.admin-search {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.admin-search input[type="search"] {
+  flex: 1;
+  min-width: 220px;
+  padding: 8px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 0.85rem;
+}
+
+.admin-search-clear {
+  font-size: 0.85rem;
+  color: #6b7280;
+  text-decoration: none;
+}
+
+.admin-search-clear:hover {
+  text-decoration: underline;
+}
+
+/* ── Paginación ───────────────────────────────────────────────────────────── */
+.admin-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
+.admin-pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-pagination-controls a {
+  color: #2563eb;
+  text-decoration: none;
+  padding: 6px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.admin-pagination-controls a:hover {
+  background: #f3f4f6;
+}
+
+.admin-pagination-controls .disabled {
+  color: #cbd5e1;
+  padding: 6px 12px;
+  border: 1px solid #f0f1f3;
+  border-radius: 8px;
+}
+
+/* ── Edición inline de una cita ───────────────────────────────────────────── */
+.admin-edit summary {
+  list-style: none;
+  display: inline-block;
+}
+
+.admin-edit summary::-webkit-details-marker {
+  display: none;
+}
+
+.admin-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 12px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  min-width: 220px;
+  white-space: normal;
+}
+
+.admin-edit-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.admin-edit-form input {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}

@@ -366,6 +366,7 @@ export async function updateAppointment(
     rescheduleCount?: number;
     doctorId?: string;
     notes?: string | null;
+    cancelReason?: string | null;
   },
 ): Promise<boolean> {
   const supabase = getSupabaseClient();
@@ -381,6 +382,7 @@ export async function updateAppointment(
   if (patch.rescheduleCount !== undefined) dbPatch.reschedule_count = patch.rescheduleCount;
   if (patch.doctorId !== undefined) dbPatch.doctor_id = patch.doctorId;
   if (patch.notes !== undefined) dbPatch.notes = patch.notes;
+  if (patch.cancelReason !== undefined) dbPatch.cancel_reason = patch.cancelReason;
 
   const { error } = await supabase
     .from("clinic_appointments")
@@ -431,6 +433,22 @@ export async function releaseAppointmentEventClaim(id: string): Promise<void> {
   if (error) console.error("releaseAppointmentEventClaim failed", error);
 }
 
+// Lectura completa de una cita por id (para el before/after de la edición
+// desde el panel). null si no existe.
+export async function getAppointmentById(id: string): Promise<Appointment | null> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clinic_appointments")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error || !data) {
+    if (error) console.error("getAppointmentById failed", error);
+    return null;
+  }
+  return mapAppointment(data);
+}
+
 // Lectura mínima para auditoría (before/after de una acción administrativa).
 export async function getAppointmentStatus(id: string): Promise<AppointmentStatus | null> {
   const supabase = getSupabaseClient();
@@ -474,36 +492,64 @@ export async function logAdminAudit(params: {
 export type AdminAppointmentFilter = "all" | "confirmed" | "pending" | "flagged" | "canceled";
 export type AdminAppointmentRow = Appointment & { doctorName: string | null };
 
-// Últimas 100 citas del negocio, con el nombre del doctor embebido en una sola
-// consulta (evita N+1). "flagged" = citas con una nota pendiente de revisión
-// (ver notes, escrita por handlePaymentProof cuando algo no cuadra).
+// Citas del negocio con el nombre del doctor embebido en una sola consulta
+// (evita N+1), paginadas y con búsqueda opcional. "flagged" = citas con una
+// nota pendiente de revisión (ver notes, escrita por handlePaymentProof cuando
+// algo no cuadra). Devuelve también el total (`count: exact`) para paginar.
+export const ADMIN_PAGE_SIZE = 25;
+
 export async function listAppointmentsForAdmin(
   business: string,
-  filter: AdminAppointmentFilter = "all",
-): Promise<AdminAppointmentRow[]> {
+  opts: {
+    filter?: AdminAppointmentFilter;
+    search?: string;
+    page?: number;
+  } = {},
+): Promise<{ rows: AdminAppointmentRow[]; total: number }> {
   const supabase = getSupabaseClient();
+  const filter = opts.filter ?? "all";
+  const page = Math.max(1, opts.page ?? 1);
+  const from = (page - 1) * ADMIN_PAGE_SIZE;
+  const to = from + ADMIN_PAGE_SIZE - 1;
+
   let query = supabase
     .from("clinic_appointments")
-    .select("*, doctor:clinic_doctors(name)")
+    .select("*, doctor:clinic_doctors(name)", { count: "exact" })
     .eq("business", business)
     .order("scheduled_start", { ascending: false, nullsFirst: false })
-    .limit(100);
+    .range(from, to);
 
   if (filter === "confirmed") query = query.eq("status", "confirmed");
   else if (filter === "pending") query = query.in("status", ["awaiting_payment", "payment_review"]);
   else if (filter === "canceled") query = query.eq("status", "canceled");
   else if (filter === "flagged") query = query.not("notes", "is", null);
 
-  const { data, error } = await query;
-  if (error) {
-    console.error("listAppointmentsForAdmin failed", error);
-    return [];
+  const search = opts.search?.trim();
+  if (search) {
+    // Coincidencia parcial (case-insensitive) por nombre, teléfono o CI. El
+    // patrón se escapa para que %, _ o , del input no rompan el filtro `.or`.
+    const term = search.replace(/[%_,()]/g, " ").trim();
+    if (term) {
+      const like = `%${term}%`;
+      query = query.or(
+        `patient_name.ilike.${like},contact_phone.ilike.${like},patient_ci.ilike.${like}`,
+      );
+    }
   }
 
-  return (data ?? []).map((row: any) => ({
-    ...mapAppointment(row),
-    doctorName: row.doctor?.name ?? null,
-  }));
+  const { data, error, count } = await query;
+  if (error) {
+    console.error("listAppointmentsForAdmin failed", error);
+    return { rows: [], total: 0 };
+  }
+
+  return {
+    rows: (data ?? []).map((row: any) => ({
+      ...mapAppointment(row),
+      doctorName: row.doctor?.name ?? null,
+    })),
+    total: count ?? 0,
+  };
 }
 
 // Devuelve la cita activa más reciente del paciente (por teléfono).
