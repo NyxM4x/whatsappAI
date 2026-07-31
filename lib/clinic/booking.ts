@@ -15,6 +15,11 @@
 // QR: al llegar el comprobante se confirma de inmediato (modelo de confianza,
 // ver handlePaymentProof); la secretaria solo cancela si detecta un pago inválido.
 // Efectivo: se crea el evento en Google Calendar de inmediato.
+//
+// Reagendamiento (ver rescheduleActiveAppointment): si la cita original ya
+// estaba `confirmed`, en choosing_slot se salta collecting_*/choosing_payment
+// y se confirma directo con los datos y el método de pago ya guardados —
+// no se le vuelve a cobrar ni a pedir sus datos.
 // ============================================================================
 
 import { openai } from "@ai-sdk/openai";
@@ -47,6 +52,7 @@ import type {
   BookingHold,
   TimeSlot,
   Doctor,
+  PaymentMethod,
 } from "@/lib/clinic/types";
 import type { ClinicConfig } from "@/lib/clinic/config";
 
@@ -411,6 +417,94 @@ export async function advanceBooking(params: {
       heldSlotStart: chosen.start,
       holdExpiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
     };
+    // Reagendamiento de una cita que ya estaba confirmada (pagada por QR con
+    // comprobante validado, o efectivo ya dado por confirmado): no volvemos a
+    // pedir datos ni pago, reutilizamos lo que ya teníamos y confirmamos directo.
+    if (
+      draft.reschedulingAppointmentId &&
+      draft.rescheduleConfirmed &&
+      draft.patientName &&
+      draft.patientCi &&
+      draft.paymentMethod
+    ) {
+      const friendlySlot = formatSlotLocal(chosen.start, clinic.timezone);
+      const appointmentId = await createAppointment({
+        business,
+        conversationId,
+        contactPhone,
+        patientName: draft.patientName,
+        patientCi: draft.patientCi,
+        reason: draft.reason,
+        specialtyId: draft.specialtyId,
+        doctorId: draft.doctorId,
+        scheduledStart: chosen.start,
+        scheduledEnd: chosen.end,
+        status: "confirmed",
+        paymentMethod: draft.paymentMethod,
+      });
+
+      if (!appointmentId) {
+        const freshSlots = await getAvailableSlots(doctor, conversationId);
+        if (!freshSlots.length) {
+          const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+          return reply("Lo sentimos, justo se ocupó ese horario y no quedan más turnos libres para este médico 😔 ¿Le puedo ayudar en otra cosa?", "none", newSession);
+        }
+        draft = { ...draft, offeredSlots: freshSlots };
+        const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+        return reply(`Justo se ocupó ese horario 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
+      }
+
+      if (draft.paymentProofUrl) {
+        await updateAppointment(appointmentId, { paymentProofUrl: draft.paymentProofUrl });
+      }
+
+      const claimedReschedule = doctor.googleCalendarId
+        ? await claimAppointmentForEventCreation(appointmentId)
+        : false;
+
+      if (doctor.googleCalendarId && claimedReschedule) {
+        try {
+          const eventId = await createAppointmentEvent({
+            calendarId: doctor.googleCalendarId,
+            timezone: doctor.timezone,
+            startIso: chosen.start,
+            endIso: chosen.end,
+            summary: `Cita: ${draft.patientName} — ${doctor.name}`,
+            description: [
+              `Paciente: ${draft.patientName}`,
+              `CI: ${draft.patientCi ?? "—"}`,
+              `Tel: ${contactPhone}`,
+              `Especialidad: ${draft.specialtyName ?? "—"}`,
+              `Motivo: ${draft.reason ?? "—"}`,
+              `Pago: ${draft.paymentMethod === "qr" ? "QR BNB" : "Efectivo"} (reagendado)`,
+            ].join("\n"),
+          });
+          if (eventId) {
+            await updateAppointment(appointmentId, { googleEventId: eventId });
+          } else {
+            await releaseAppointmentEventClaim(appointmentId);
+          }
+        } catch (err) {
+          console.error("createAppointmentEvent (reschedule confirmed) failed", err);
+          await releaseAppointmentEventClaim(appointmentId);
+          await updateAppointment(appointmentId, {
+            notes: "⚠️ Cita confirmada pero falló crear el evento en Google Calendar. Verificar el calendario del doctor.",
+          });
+        }
+      } else if (!doctor.googleCalendarId) {
+        await updateAppointment(appointmentId, {
+          notes: "⚠️ El doctor no tiene calendario configurado: la cita no aparece en ningún Google Calendar.",
+        });
+      }
+
+      await resetBookingSession(conversationId, business);
+      return reply(
+        `✅ *¡Cita reprogramada!*\n\n📅 ${friendlySlot}\n👨‍⚕️ ${doctor.name}\n👤 ${draft.patientName}\n💊 ${draft.reason ?? "—"}\n\nNo necesita volver a pagar, su cita ya está confirmada. 😊`,
+        "none",
+        { conversationId, step: "done", draft: {}, hold: emptyHold() },
+      );
+    }
+
     await writeHold({
       conversationId,
       business,
@@ -998,13 +1092,23 @@ export async function rescheduleActiveAppointment(params: {
     return reply("No hay horarios disponibles para los próximos días. ¿Desea agendar con otra especialidad?", "none", { conversationId, step: "idle", draft: {}, hold: emptyHold() });
   }
 
+  const rescheduleConfirmed = appointment.status === "confirmed";
   const draft: BookingDraft = {
     specialtyId: appointment.specialtyId ?? undefined,
     doctorId: appointment.doctorId,
     doctorName: doctor.name,
     offeredSlots: slots,
     reschedulingAppointmentId: appointment.id,
+    patientName: appointment.patientName ?? undefined,
+    patientCi: appointment.patientCi ?? undefined,
+    reason: appointment.reason ?? undefined,
+    paymentMethod: (appointment.paymentMethod as PaymentMethod | undefined) ?? undefined,
+    paymentProofUrl: appointment.paymentProofUrl ?? undefined,
+    rescheduleConfirmed,
   };
   const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
-  return reply(`Anulé su cita anterior 😊 Elija el nuevo horario:\n\n${slotsMessage(slots, clinic.timezone)}`, "none", newSession);
+  const intro = rescheduleConfirmed
+    ? "Anulé su cita anterior 😊 Elija el nuevo horario (no necesita volver a pagar):"
+    : "Anulé su cita anterior 😊 Elija el nuevo horario:";
+  return reply(`${intro}\n\n${slotsMessage(slots, clinic.timezone)}`, "none", newSession);
 }

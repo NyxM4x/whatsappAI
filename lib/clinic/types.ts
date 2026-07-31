@@ -57,6 +57,8 @@ export type BookingDraft = {
   offeredSlots?: TimeSlot[];
   appointmentId?: string;
   reschedulingAppointmentId?: string;
+  paymentProofUrl?: string;
+  rescheduleConfirmed?: boolean; // true si la cita original ya estaba `confirmed`
 };
 
 // Estado del bloqueo temporal de 30 min sobre el slot elegido.
