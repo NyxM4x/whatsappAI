@@ -45,6 +45,7 @@ import {
   findActiveAppointmentByPhone,
   claimAppointmentForEventCreation,
   releaseAppointmentEventClaim,
+  getAppointmentStatus,
 } from "@/lib/clinic/data";
 import type {
   BookingSession,
@@ -227,9 +228,99 @@ async function getAvailableSlots(doctor: Doctor, conversationId: string): Promis
   });
 }
 
+// Slots libres del doctor para UN día puntual (usado tanto para el día por
+// defecto como para un día que el paciente pidió explícitamente).
+async function getSlotsForDate(doctor: Doctor, conversationId: string, targetDate: Date): Promise<TimeSlot[]> {
+  if (!doctor.googleCalendarId) return [];
+
+  const now = new Date();
+  const timeMin = now.toISOString();
+  const timeMax = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString();
+
+  const [busy, holds, activeAppts] = await Promise.all([
+    getBusyIntervals(doctor.googleCalendarId, timeMin, timeMax),
+    getActiveHoldsForDoctor(doctor.id, conversationId),
+    getActiveAppointmentSlotsForDoctor(doctor.id, timeMin, timeMax),
+  ]);
+
+  return computeAvailableSlots({
+    doctor,
+    busy,
+    excludeSlots: [...holds, ...activeAppts],
+    fromDate: targetDate,
+    daysAhead: 0,
+    maxSlots: 30,
+  });
+}
+
+// Slots del día por defecto: hoy, o el próximo día hábil si ya pasó el
+// horario de atención de hoy (o hoy no es día laborable para el doctor).
+async function getSlotsForDefaultDay(doctor: Doctor, conversationId: string): Promise<TimeSlot[]> {
+  if (!doctor.googleCalendarId) return [];
+
+  const now = new Date();
+  const timeMin = now.toISOString();
+  const timeMax = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString();
+
+  const [busy, holds, activeAppts] = await Promise.all([
+    getBusyIntervals(doctor.googleCalendarId, timeMin, timeMax),
+    getActiveHoldsForDoctor(doctor.id, conversationId),
+    getActiveAppointmentSlotsForDoctor(doctor.id, timeMin, timeMax),
+  ]);
+
+  for (let dayOffset = 0; dayOffset < 14; dayOffset++) {
+    const dayFrom = new Date(now.getTime() + dayOffset * 24 * 60 * 60 * 1000);
+    const daySlots = computeAvailableSlots({
+      doctor,
+      busy,
+      excludeSlots: [...holds, ...activeAppts],
+      fromDate: dayFrom,
+      daysAhead: 0,
+      maxSlots: 30,
+      now,
+    });
+    if (daySlots.length) return daySlots;
+  }
+
+  return [];
+}
+
+// Detecta si el mensaje del paciente pide explícitamente OTRO día ("mañana",
+// "el lunes", "para el 5 de agosto") en vez de elegir un horario de la lista
+// actual. Devuelve la fecha (inicio del día, hora local de la clínica) o null.
+async function resolveDateRequestWithAI(userText: string, timezone: string): Promise<Date | null> {
+  const todayLabel = new Intl.DateTimeFormat("es-BO", {
+    timeZone: timezone,
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(new Date());
+
+  try {
+    const { text } = await generateText({
+      model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+      system: `Hoy es ${todayLabel} (zona horaria ${timezone}). El usuario está eligiendo un horario de cita de una lista que ya se le mostró.
+Si el mensaje pide EXPLÍCITAMENTE otro día distinto al que se le ofreció (ej: "mañana", "el lunes", "pasado mañana", "para el 5 de agosto", "el próximo martes"), responde SOLO con un JSON: {"date": "YYYY-MM-DD"}.
+Si el mensaje NO pide otro día (por ejemplo, está eligiendo un horario de la lista, o preguntando algo distinto), responde: {"date": null}.`,
+      prompt: userText,
+      temperature: 0,
+      abortSignal: AbortSignal.timeout(8000),
+    });
+    const parsed = JSON.parse(text.trim().replace(/^```json|```$/g, "").trim());
+    if (typeof parsed.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date)) {
+      const [y, m, d] = parsed.date.split("-").map(Number);
+      return new Date(Date.UTC(y, m - 1, d, 12)); // mediodía UTC: evita corrimientos de día por timezone
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function slotsMessage(slots: TimeSlot[], tz: string): string {
   const lines = slots.map((s, i) => `  ${i + 1}. ${formatSlotLocal(s.start, tz)}`);
-  return `Estos son los horarios disponibles:\n\n${lines.join("\n")}\n\n¿Cuál le viene bien?`;
+  return `Estos son los horarios disponibles:\n\n${lines.join("\n")}\n\n¿Cuál le viene bien?\n\n¿Prefiere otro día? Dígame la fecha (ej. "el lunes" o "para el 5 de agosto") 📅`;
 }
 
 // ─── Avanzar la máquina de pasos ─────────────────────────────────────────────
@@ -285,7 +376,7 @@ export async function advanceBooking(params: {
       const doctor = doctors[0];
       draft = { ...draft, doctorId: doctor.id, doctorName: doctor.name };
 
-      const slots = await getAvailableSlots(doctor, conversationId);
+      const slots = await getSlotsForDefaultDay(doctor, conversationId);
       if (!slots.length) {
         const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
         return reply(`No hay horarios disponibles para ${doctor.name} en los próximos días. ¿Puedo ayudarle en algo más?`, "none", newSession);
@@ -314,7 +405,7 @@ export async function advanceBooking(params: {
     const doctor = doctors[idx - 1];
     draft = { ...draft, doctorId: doctor.id, doctorName: doctor.name };
 
-    const slots = await getAvailableSlots(doctor, conversationId);
+    const slots = await getSlotsForDefaultDay(doctor, conversationId);
     if (!slots.length) {
       const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
       return reply(`No hay horarios disponibles para ${doctor.name}. ¿Desea elegir otro médico?`, "none", newSession);
@@ -334,7 +425,7 @@ export async function advanceBooking(params: {
     if (slots.length === 0 && draft.doctorId) {
       const freshDoctor = await getDoctorById(draft.doctorId);
       if (freshDoctor) {
-        slots = await getAvailableSlots(freshDoctor, conversationId);
+        slots = await getSlotsForDefaultDay(freshDoctor, conversationId);
         if (!slots.length) {
           const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
           return reply("Los horarios que le habíamos mostrado ya no están disponibles y no hay nuevos turnos en los próximos días 😔 ¿Le puedo ayudar en algo más?", "none", newSession);
@@ -342,6 +433,27 @@ export async function advanceBooking(params: {
         draft = { ...draft, offeredSlots: slots };
         const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
         return reply(`Los horarios anteriores ya pasaron 😊 Aquí los próximos disponibles:\n\n${slotsMessage(slots, clinic.timezone)}`, "none", newSession);
+      }
+    }
+
+    // ¿El paciente pide explícitamente otro día en vez de elegir de la lista actual?
+    if (draft.doctorId) {
+      const requestedDate = await resolveDateRequestWithAI(text, clinic.timezone);
+      if (requestedDate) {
+        const dayDoctor = await getDoctorById(draft.doctorId);
+        if (dayDoctor) {
+          const daySlots = await getSlotsForDate(dayDoctor, conversationId, requestedDate);
+          if (!daySlots.length) {
+            return reply(
+              `No hay horarios disponibles ese día 😔 Aquí los horarios que sí tenemos:\n\n${slotsMessage(slots, clinic.timezone)}`,
+              "none",
+              session,
+            );
+          }
+          draft = { ...draft, offeredSlots: daySlots };
+          const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+          return reply(slotsMessage(daySlots, clinic.timezone), "none", newSession);
+        }
       }
     }
 
@@ -480,7 +592,15 @@ export async function advanceBooking(params: {
             ].join("\n"),
           });
           if (eventId) {
-            await updateAppointment(appointmentId, { googleEventId: eventId });
+            const currentStatus = await getAppointmentStatus(appointmentId);
+            if (currentStatus === "canceled") {
+              // Se volvió a reagendar/cancelar mientras se creaba el evento: no
+              // dejar un evento huérfano en Calendar.
+              await deleteAppointmentEvent(doctor.googleCalendarId, eventId);
+              await releaseAppointmentEventClaim(appointmentId);
+            } else {
+              await updateAppointment(appointmentId, { googleEventId: eventId });
+            }
           } else {
             await releaseAppointmentEventClaim(appointmentId);
           }
@@ -690,7 +810,15 @@ Ejemplos:
           });
           console.log("createAppointmentEvent result", { eventId });
           if (appointmentId && eventId) {
-            await updateAppointment(appointmentId, { googleEventId: eventId });
+            const currentStatus = await getAppointmentStatus(appointmentId);
+            if (currentStatus === "canceled") {
+              // Se reagendó/canceló mientras se creaba el evento: no dejar un
+              // evento huérfano en Calendar.
+              await deleteAppointmentEvent(doctor.googleCalendarId, eventId);
+              await releaseAppointmentEventClaim(appointmentId);
+            } else {
+              await updateAppointment(appointmentId, { googleEventId: eventId });
+            }
           } else {
             await releaseAppointmentEventClaim(appointmentId);
           }
@@ -863,7 +991,15 @@ export async function handlePaymentProof(params: {
         ].join("\n"),
       });
       if (eventId) {
-        await updateAppointment(draft.appointmentId, { googleEventId: eventId });
+        const currentStatus = await getAppointmentStatus(draft.appointmentId);
+        if (currentStatus === "canceled") {
+          // Se reagendó/canceló mientras se creaba el evento: no dejar un
+          // evento huérfano en Calendar.
+          await deleteAppointmentEvent(doctor.googleCalendarId, eventId);
+          await releaseAppointmentEventClaim(draft.appointmentId);
+        } else {
+          await updateAppointment(draft.appointmentId, { googleEventId: eventId });
+        }
       } else {
         await releaseAppointmentEventClaim(draft.appointmentId);
       }
@@ -1086,7 +1222,7 @@ export async function rescheduleActiveAppointment(params: {
     return reply("No pude recuperar los datos del médico. Por favor inicie un nuevo agendamiento.", "none", { conversationId, step: "idle", draft: {}, hold: emptyHold() });
   }
 
-  const slots = await getAvailableSlots(doctor, conversationId);
+  const slots = await getSlotsForDefaultDay(doctor, conversationId);
   if (!slots.length) {
     await resetBookingSession(conversationId, business);
     return reply("No hay horarios disponibles para los próximos días. ¿Desea agendar con otra especialidad?", "none", { conversationId, step: "idle", draft: {}, hold: emptyHold() });

@@ -25,6 +25,7 @@ import {
   claimAppointmentForEventCreation,
   releaseAppointmentEventClaim,
   listAllBusinessSlugs,
+  getAppointmentStatus,
 } from "@/lib/clinic/data";
 import {
   createAppointmentEvent,
@@ -116,6 +117,14 @@ export async function GET(request: Request) {
       });
 
       if (eventId) {
+        const currentStatus = await getAppointmentStatus(appt.id);
+        if (currentStatus !== "confirmed") {
+          // La cita se reagendó/canceló mientras se creaba el evento: no dejar
+          // un evento huérfano en Calendar.
+          await deleteAppointmentEvent(doctor.googleCalendarId, eventId);
+          await releaseAppointmentEventClaim(appt.id);
+          continue;
+        }
         await updateAppointment(appt.id, { googleEventId: eventId });
       } else {
         await releaseAppointmentEventClaim(appt.id);
