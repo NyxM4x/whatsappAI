@@ -124,8 +124,19 @@ function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): b
 }
 
 // Calcula los huecos LIBRES de un doctor: recorre cada día laborable desde
-// `fromDate` hasta `daysAhead` días, genera slots de slotMinutes dentro de su
-// horario y descarta los que se solapan con lo ocupado o ya pasaron.
+// `fromDate` hasta `daysAhead` días, genera los slots del día y descarta los
+// que se solapan con lo ocupado o ya pasaron.
+//
+// Un doctor define su día de DOS formas posibles:
+//   - workHours: horas puntuales de atención ("07:00", "12:00", "19:00"). Es lo
+//     habitual en esta clínica — los médicos pasan consulta en bloques sueltos,
+//     no de corrido. Se genera UN slot por hora listada.
+//   - workStart/workEnd: franja continua troceada en slots de slotMinutes.
+//     Fallback para quien no tenga horas puntuales cargadas.
+// Cargar un médico de bloques sueltos como franja continua haría que el bot
+// ofreciera turnos en horas que no atiende (07:30, 08:00…), así que workHours
+// tiene prioridad siempre que esté definido.
+//
 // `excludeSlots`: slots ya reservados en BD (hold, awaiting_payment, payment_review,
 // confirmed) que aún no tienen evento en Calendar, para no ofrecerlos.
 export function computeAvailableSlots(params: {
@@ -152,6 +163,8 @@ export function computeAvailableSlots(params: {
 
   const { hour: startH, minute: startM } = parseHHMM(doctor.workStart);
   const { hour: endH, minute: endM } = parseHHMM(doctor.workEnd);
+  const stepMs = doctor.slotMinutes * 60 * 1000;
+  const useWorkHours = Boolean(doctor.workHours?.length);
 
   const slots: TimeSlot[] = [];
 
@@ -161,11 +174,24 @@ export function computeAvailableSlots(params: {
 
     if (!doctor.workDays.includes(weekday)) continue;
 
-    const dayStart = zonedWallTimeToUtc(tz, year, month, day, startH, startM).getTime();
-    const dayEnd = zonedWallTimeToUtc(tz, year, month, day, endH, endM).getTime();
-    const stepMs = doctor.slotMinutes * 60 * 1000;
+    // Inicios de slot del día, en orden cronológico.
+    let dayStarts: number[];
 
-    for (let slotStart = dayStart; slotStart + stepMs <= dayEnd; slotStart += stepMs) {
+    if (useWorkHours) {
+      dayStarts = doctor
+        .workHours!.map((hhmm) => {
+          const { hour, minute } = parseHHMM(hhmm);
+          return zonedWallTimeToUtc(tz, year, month, day, hour, minute).getTime();
+        })
+        .sort((a, b) => a - b);
+    } else {
+      const dayStart = zonedWallTimeToUtc(tz, year, month, day, startH, startM).getTime();
+      const dayEnd = zonedWallTimeToUtc(tz, year, month, day, endH, endM).getTime();
+      dayStarts = [];
+      for (let s = dayStart; s + stepMs <= dayEnd; s += stepMs) dayStarts.push(s);
+    }
+
+    for (const slotStart of dayStarts) {
       const slotEnd = slotStart + stepMs;
 
       // Descarta lo que ya pasó (con 1h de margen para coordinar).
