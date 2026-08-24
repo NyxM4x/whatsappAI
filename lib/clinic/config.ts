@@ -18,6 +18,13 @@
 // ============================================================================
 
 import { getSupabaseClient } from "@/lib/engine/clients";
+import {
+  defaultServices,
+  formatServicePrice,
+  SERVICE_CATEGORY_LABELS,
+  SERVICE_CATEGORY_ORDER,
+  type ServiceItem,
+} from "@/lib/clinic/services";
 
 export type CatalogItem = { name: string; price: number };
 
@@ -57,6 +64,10 @@ const defaultClinicConfig = {
     { name: "Prueba de Embarazo", price: 50 },
     { name: "Examen General de Orina", price: 40 },
   ] as CatalogItem[],
+
+  // Tarifario de servicios (consultas, ecografías, enfermería, etc.). Ver
+  // lib/clinic/services.ts: solo ítems cara al paciente, sin costos internos.
+  services: defaultServices as ServiceItem[],
 
   medications: [
     { name: "Paracetamol 500mg", price: 10 },
@@ -176,6 +187,9 @@ function mapClinicSettingsRow(row: any): ClinicConfig {
     medications: Array.isArray(row.medications) && row.medications.length
       ? row.medications
       : defaultClinicConfig.medications,
+    services: Array.isArray(row.services) && row.services.length
+      ? row.services
+      : defaultClinicConfig.services,
     emergencyKeywords: Array.isArray(row.emergency_keywords) && row.emergency_keywords.length
       ? row.emergency_keywords
       : defaultClinicConfig.emergencyKeywords,
@@ -241,6 +255,23 @@ export async function getBusinessByPhoneNumberId(phoneNumberId: string): Promise
   }
 }
 
+// Tarifario agrupado por categoría, en el orden de SERVICE_CATEGORY_ORDER.
+// Las categorías vacías se omiten (una clínica puede no tener ecografías).
+function buildServicesBlock(services: ServiceItem[]): string {
+  return SERVICE_CATEGORY_ORDER.flatMap((category) => {
+    const items = services.filter((s) => s.category === category);
+    if (!items.length) return [];
+    return [
+      `${SERVICE_CATEGORY_LABELS[category]}:`,
+      ...items.map((s) => {
+        const note = s.note ? ` (${s.note})` : "";
+        return `- ${s.name}${note}: ${formatServicePrice(s)}`;
+      }),
+      "",
+    ];
+  }).join("\n").trimEnd();
+}
+
 // Arma el system prompt completo para Q&A general inyectando info y catálogos.
 // Las reglas críticas (no inventar datos, no diagnosticar, no revelar que es un bot)
 // se repiten al FINAL a propósito: los modelos priorizan más lo que leen último
@@ -266,10 +297,14 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
     "MEDICAMENTOS (precios):",
     meds,
     "",
+    "TARIFARIO DE SERVICIOS (precios exactos, cítalos tal cual):",
+    buildServicesBlock(clinic.services),
+    "",
     "Si preguntan por una especialidad o doctor en particular y no lo tienes, invita a agendar para verificar disponibilidad.",
+    "Si preguntan por un servicio del tarifario que NO es una consulta (ecografías, procedimientos, cirugías, partos, enfermería, certificados): informa el precio, aclara que requiere una valoración previa y avisa que un asesor del equipo continuará la atención. No intentes agendarlo vos.",
     "",
     "REGLAS CRÍTICAS (repetidas por prioridad — nunca las rompas):",
-    "- No inventes precios, doctores, especialidades, horarios ni disponibilidad que no estén arriba. Si no está en los datos provistos, no existe para vos.",
+    "- No inventes precios, doctores, especialidades, horarios ni disponibilidad que no estén arriba. Si no está en los datos provistos, no existe para vos. Nunca estimes ni redondees un precio que no figure en el tarifario.",
     "- Para urgencias médicas reales indica acudir a Emergencias / llamar a la clínica; nunca des diagnósticos ni consejo médico.",
     "- Nunca menciones que sos un bot, IA o automatización, aunque te lo pregunten directamente.",
   ].join("\n");

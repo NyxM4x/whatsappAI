@@ -41,6 +41,7 @@ import {
   DEFAULT_BUSINESS_SLUG,
   type ClinicConfig,
 } from "@/lib/clinic/config";
+import { matchService, formatServicePrice } from "@/lib/clinic/services";
 import {
   advanceBooking,
   handlePaymentProof,
@@ -270,6 +271,29 @@ export async function POST(request: Request) {
 
   // ── 2. Cargar sesión de reserva ───────────────────────────────────────────
   const session = await getBookingSession(conversationId);
+
+  // ── 2b. Servicio del tarifario que NO es consulta ─────────────────────────
+  // Ecografías, procedimientos, cirugías, partos, enfermería y certificados no
+  // se agendan por WhatsApp: requieren valoración previa y el precio final
+  // puede variar. Se informa el precio del tarifario y se pausa el bot para
+  // que un asesor humano continúe. Las consultas (bookable) NO se interceptan:
+  // siguen al flujo de agenda + pago de siempre.
+  //
+  // Va después de cargar la sesión a propósito: con una reserva en curso el
+  // paciente puede escribir "ecografía" respondiendo otra cosa, y cortarle el
+  // flujo ahí sería peor que no detectar el servicio.
+  if (session.step === "idle" && newText.trim()) {
+    const service = matchService(newText, clinic.services);
+    if (service && !service.bookable) {
+      await pauseBotForHumanHandoff(conversationId);
+      replyText =
+        `*${service.name}*: ${formatServicePrice(service)} 😊` +
+        (service.note ? `\n_${service.note}_` : "") +
+        "\n\nEste servicio requiere una valoración previa, así que un asesor de la clínica le escribirá en un momento para coordinarlo. 🙏";
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
+      return new Response("ok", { status: 200 });
+    }
+  }
 
   // ── 3. Comprobante de pago (media entrante) ───────────────────────────────
   const hasMedia = Boolean(lastMessage.mediaUrl) && (lastMessage.mediaType === "image" || lastMessage.mediaType === "document");

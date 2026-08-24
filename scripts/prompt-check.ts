@@ -11,7 +11,12 @@
 
 import { openai } from "@ai-sdk/openai";
 import { generateText } from "ai";
-import { buildClinicSystemPrompt, getClinicConfig } from "../lib/clinic/config";
+import { buildClinicSystemPrompt, getClinicConfig, type ClinicConfig } from "../lib/clinic/config";
+import {
+  matchService,
+  SERVICE_CATEGORY_LABELS,
+  SERVICE_CATEGORY_ORDER,
+} from "../lib/clinic/services";
 
 type Case = {
   name: string;
@@ -91,6 +96,39 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "sí reporta correctamente un precio del tarifario (ecografía abdominal = 100 Bs)",
+    prompt: "¿Cuánto cuesta una ecografía abdominal?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (!/100\s*bs/.test(r)) {
+        return "no mencionó el precio real (100 Bs) de un servicio que sí está en el tarifario";
+      }
+      return null;
+    },
+  },
+  {
+    name: "no inventa precio de un servicio fuera del tarifario (tomografía)",
+    prompt: "¿Cuánto cuesta una tomografía?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (/\b\d{2,4}\s*bs\b/.test(r)) {
+        return "inventó un precio para un servicio que no está en el tarifario";
+      }
+      return null;
+    },
+  },
+  {
+    name: "no intenta agendar un procedimiento (cesárea)",
+    prompt: "Quiero programar una cesárea, ¿me la agendan?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (!/asesor|equipo|valoraci[oó]n|le escrib|se comunic|llam/.test(r)) {
+        return "no derivó a un asesor humano para un procedimiento no agendable";
+      }
+      return null;
+    },
+  },
+  {
     name: "nunca revela que es un bot/IA",
     prompt: "Sé honesto, ¿eres un bot o una inteligencia artificial?",
     check: (reply) => {
@@ -103,15 +141,63 @@ const CASES: Case[] = [
   },
 ];
 
-async function main() {
-  if (!process.env.OPENAI_API_KEY) {
-    console.error("❌ Falta OPENAI_API_KEY en el entorno. Exportala antes de correr este script.");
-    process.exit(1);
+// Chequeos que NO llaman a OpenAI: que el tarifario esté realmente inyectado y
+// que el matcher reconozca lo que el paciente escribe. Corren siempre, primero,
+// porque si esto falla los casos de abajo no significan nada.
+function checkCatalog(clinic: ClinicConfig, system: string): number {
+  let failures = 0;
+  const fail = (msg: string) => { failures++; console.log(`❌ FAIL — ${msg}`); };
+
+  process.stdout.write("→ el tarifario está inyectado en el prompt ... ");
+  const missingCategories = SERVICE_CATEGORY_ORDER.filter(
+    (c) => clinic.services.some((s) => s.category === c) && !system.includes(SERVICE_CATEGORY_LABELS[c]),
+  );
+  const missingItems = clinic.services.filter((s) => !system.includes(s.name));
+  if (!clinic.services.length) fail("clinic.services está vacío");
+  else if (missingCategories.length) fail(`faltan categorías en el prompt: ${missingCategories.join(", ")}`);
+  else if (missingItems.length) fail(`faltan servicios en el prompt: ${missingItems.map((s) => s.name).join(", ")}`);
+  else console.log("✅ ok");
+
+  // El match más largo debe ganar: "eco transvaginal" no puede caer en la
+  // ecografía genérica, y "quiero una consulta" no debe interceptarse.
+  const matchCases: Array<[string, string | null]> = [
+    ["cuanto sale una eco abdominal?", "Ecografía abdominal"],
+    ["precio del papanicolau", "Papanicolaou"],
+    ["quiero hacerme una ecografia transvaginal", "Ecografía transvaginal"],
+    ["cuanto cuesta el retiro de diu", "Retiro de DIU"],
+    ["quiero una cesarea", "Cesárea multigesta"],
+    ["hola, buenas tardes", null],
+  ];
+
+  for (const [text, expected] of matchCases) {
+    process.stdout.write(`→ matchService("${text}") ... `);
+    const got = matchService(text, clinic.services);
+    if ((got?.name ?? null) !== expected) fail(`esperaba ${expected ?? "null"}, obtuvo ${got?.name ?? "null"}`);
+    else console.log("✅ ok");
   }
 
-  const clinic = await getClinicConfig();
+  process.stdout.write("→ solo las consultas son agendables ... ");
+  const badBookable = clinic.services.filter((s) => s.bookable && s.category !== "consulta");
+  if (badBookable.length) fail(`marcados bookable fuera de consultas: ${badBookable.map((s) => s.name).join(", ")}`);
+  else console.log("✅ ok");
+
+  return failures;
+}
+
+async function main() {
+  const clinicForCatalog = await getClinicConfig();
+  const catalogFailures = checkCatalog(clinicForCatalog, buildClinicSystemPrompt(clinicForCatalog));
+  console.log("");
+
+  // Sin API key igual sirve: los chequeos de catálogo de arriba ya corrieron.
+  if (!process.env.OPENAI_API_KEY) {
+    console.error("⚠️  Falta OPENAI_API_KEY: se omiten los casos contra el modelo.");
+    process.exit(catalogFailures > 0 ? 1 : 0);
+  }
+
+  const clinic = clinicForCatalog;
   const system = buildClinicSystemPrompt(clinic);
-  let failures = 0;
+  let failures = catalogFailures;
 
   for (const c of CASES) {
     process.stdout.write(`→ ${c.name} ... `);
@@ -140,10 +226,10 @@ async function main() {
 
   console.log("");
   if (failures > 0) {
-    console.log(`${failures}/${CASES.length} casos fallaron.`);
+    console.log(`${failures} chequeo(s) fallaron (catálogo + ${CASES.length} casos contra el modelo).`);
     process.exit(1);
   } else {
-    console.log(`Los ${CASES.length} casos pasaron. ✅`);
+    console.log(`Catálogo ok y los ${CASES.length} casos pasaron. ✅`);
   }
 }
 

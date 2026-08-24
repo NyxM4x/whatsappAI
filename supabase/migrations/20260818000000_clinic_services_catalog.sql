@@ -1,0 +1,96 @@
+-- ============================================================================
+-- Tarifario de servicios (columna clinic_settings.services)
+-- ----------------------------------------------------------------------------
+-- Mismo patrón que labs / medications: un jsonb en clinic_settings, leído por
+-- getClinicConfig() con su caché de 45s y su fallback estático
+-- (lib/clinic/services.ts). Sin tabla nueva: el consumo siempre es "traer la
+-- lista completa para el system prompt", no hay joins ni FK contra servicios.
+--
+-- SOLO ítems cara al paciente. El tarifario del cliente incluye además costos
+-- internos (quirófano, honorarios de cirujano/ayudante, alquiler de
+-- consultorio) y el % que se lleva el médico: nada de eso entra acá, porque el
+-- bot no debe poder citarlo.
+--
+-- bookable=true solo en consultas: son las únicas que entran al flujo de
+-- agenda + pago. El resto → el webhook informa precio y deriva a un asesor.
+-- ============================================================================
+
+alter table public.clinic_settings
+  add column if not exists services jsonb not null default '[]'::jsonb;
+
+update public.clinic_settings
+set services = '[
+  {"name": "Consulta médica general", "price": 60, "category": "consulta", "bookable": true, "aliases": ["consulta general", "medicina general", "consulta medica"]},
+  {"name": "Consulta médica general de emergencia", "price": 80, "category": "consulta", "bookable": true, "aliases": ["consulta de emergencia", "emergencia general"]},
+  {"name": "Consulta de Ginecología o Pediatría", "price": 80, "category": "consulta", "bookable": true, "aliases": ["consulta ginecologia", "consulta pediatria", "ginecologo", "pediatra"]},
+  {"name": "Consulta de Pediatría", "price": 100, "category": "consulta", "bookable": true, "note": "sábado, domingo, feriado, tarde o noche", "aliases": ["pediatria fin de semana", "pediatra de noche"]},
+  {"name": "Consulta pediátrica de fin de semana", "price": 120, "category": "consulta", "bookable": true, "note": "sábado y domingo", "aliases": ["pediatria sabado", "pediatria domingo"]},
+  {"name": "Consulta de tránsito", "price": 150, "category": "consulta", "bookable": true, "aliases": ["transito", "certificado de transito", "examen de transito"]},
+  {"name": "Consulta ginecológica de emergencia a llamado", "price": 200, "category": "consulta", "bookable": true, "aliases": ["ginecologia de emergencia", "emergencia ginecologica"]},
+
+  {"name": "Papanicolaou", "price": 100, "category": "procedimiento", "aliases": ["papanicolau", "papanicolao", "pap", "citologia"]},
+  {"name": "Colocación de DIU", "price": 150, "category": "procedimiento", "aliases": ["poner diu", "colocacion diu", "diu"]},
+  {"name": "Retiro de DIU", "price": 100, "category": "procedimiento", "aliases": ["sacar diu", "quitar diu"]},
+  {"name": "Colocación de implante", "price": 480, "category": "procedimiento", "aliases": ["poner implante", "implante anticonceptivo", "implante"]},
+  {"name": "Retiro de implante", "price": 100, "category": "procedimiento", "aliases": ["sacar implante", "quitar implante"]},
+  {"name": "Cirugía menor", "price": 300, "category": "procedimiento", "aliases": ["cirugia pequeña", "operacion menor"]},
+  {"name": "Cirugía mediana", "price": 600, "category": "procedimiento", "aliases": ["operacion mediana"]},
+  {"name": "Cirugía mayor", "price": 800, "category": "procedimiento", "aliases": ["operacion mayor", "cirugia grande"]},
+
+  {"name": "Ecografía abdominal", "price": 100, "category": "ecografia", "aliases": ["eco abdominal", "ecografia de abdomen", "eco de abdomen"]},
+  {"name": "Ecografía renal", "price": 120, "category": "ecografia", "aliases": ["eco renal", "ecografia de riñon", "ecografia de riñones"]},
+  {"name": "Ecografía mamaria", "price": 150, "category": "ecografia", "aliases": ["eco mamaria", "ecografia de mama", "ecografia de mamas", "ecografia de senos"]},
+  {"name": "Ecografía de partes blandas", "price": 150, "category": "ecografia", "aliases": ["eco partes blandas"]},
+  {"name": "Ecografía prostática", "price": 150, "category": "ecografia", "aliases": ["eco prostatica", "ecografia de prostata"]},
+  {"name": "Ecografía abdominal de emergencia", "price": 200, "category": "ecografia", "aliases": ["eco abdominal de emergencia"]},
+  {"name": "Ecografía obstétrica", "price": 100, "category": "ecografia", "aliases": ["eco obstetrica", "ecografia de embarazo", "eco de embarazo", "eco del bebe"]},
+  {"name": "Ecografía ginecológica", "price": 100, "category": "ecografia", "aliases": ["eco ginecologica"]},
+  {"name": "Ecografía transvaginal", "price": 150, "category": "ecografia", "aliases": ["eco transvaginal", "transvaginal"]},
+  {"name": "Ecografía transvaginal, ginecológica u obstétrica de emergencia", "price": 200, "category": "ecografia", "aliases": ["eco de emergencia", "ecografia de emergencia"]},
+
+  {"name": "Absceso pequeño", "price": 80, "category": "enfermeria", "aliases": ["drenaje de absceso pequeño", "abceso pequeño"]},
+  {"name": "Absceso mediano", "price": 100, "category": "enfermeria", "aliases": ["abceso mediano"]},
+  {"name": "Absceso grande", "price": 120, "category": "enfermeria", "aliases": ["abceso grande"]},
+  {"name": "Retiro de uña", "price": 80, "category": "enfermeria", "note": "lunes a viernes", "aliases": ["sacar uña", "uña encarnada", "retiro de uña encarnada"]},
+  {"name": "Retiro de uña fin de semana", "price": 100, "category": "enfermeria", "note": "sábado y domingo", "aliases": ["retiro de uña sabado", "retiro de uña domingo"]},
+  {"name": "Extracción de cuerpo extraño pequeño", "price": 80, "category": "enfermeria", "aliases": ["cuerpo extraño pequeño", "sacar cuerpo extraño"]},
+  {"name": "Extracción de cuerpo extraño grande", "price": 150, "category": "enfermeria", "aliases": ["cuerpo extraño grande"]},
+  {"name": "Curación pequeña", "price": 60, "category": "enfermeria", "aliases": ["curacion pequeña", "curacion chica"]},
+  {"name": "Curación mediana", "price": 80, "category": "enfermeria", "aliases": ["curacion mediana"]},
+  {"name": "Curación grande", "price": 100, "category": "enfermeria", "aliases": ["curacion grande"]},
+  {"name": "Sutura por punto (enfermería)", "price": 15, "category": "enfermeria", "aliases": ["punto de sutura enfermeria", "sutura enfermeria"]},
+  {"name": "Sutura por punto (médico)", "price": 20, "category": "enfermeria", "aliases": ["punto de sutura medico", "sutura medico", "sutura", "suturar"]},
+  {"name": "Lavado de oído", "price": 80, "category": "enfermeria", "note": "lunes a viernes", "aliases": ["lavado de oido", "limpieza de oido", "destapar oido"]},
+  {"name": "Lavado de oído fin de semana", "price": 100, "category": "enfermeria", "note": "sábado y domingo", "aliases": ["lavado de oido sabado", "lavado de oido domingo"]},
+  {"name": "Retiro de puntos (1 a 10 puntos)", "price": 25, "category": "enfermeria", "aliases": ["sacar puntos", "retiro de puntos", "quitar puntos"]},
+  {"name": "Retiro de puntos (10 a 30 puntos)", "price": 40, "category": "enfermeria", "aliases": ["retiro de muchos puntos"]},
+
+  {"name": "Certificado médico", "price": 150, "category": "certificado", "aliases": ["certificado medico", "certificado"]},
+  {"name": "Certificado de seguro médico", "price": 50, "priceMax": 120, "category": "certificado", "aliases": ["seguro medico", "certificado de seguro"]},
+
+  {"name": "Parto normal", "price": 2200, "category": "obstetricia", "aliases": ["parto"]},
+  {"name": "Parto multigesta", "price": 2000, "category": "obstetricia", "aliases": ["parto multigesta"]},
+  {"name": "Cesárea primigesta", "price": 3600, "category": "obstetricia", "aliases": ["cesarea primigesta", "primera cesarea"]},
+  {"name": "Cesárea multigesta", "price": 3800, "priceMax": 4200, "category": "obstetricia", "aliases": ["cesarea multigesta", "cesarea", "cesaria"]},
+  {"name": "Ligadura", "price": 400, "category": "obstetricia", "aliases": ["ligadura de trompas", "ligarme"]}
+]'::jsonb,
+    updated_by = 'seed:services-catalog'
+where business = 'clinica-san-martin';
+
+-- ── Alineación de precios de consulta ───────────────────────────────────────
+-- El monto que el bot COBRA en el flujo de reserva sale de
+-- clinic_doctors.consultation_price, no del tarifario de arriba. Si no
+-- coinciden, el bot informa un precio y pide otro en el QR. Se alinean las
+-- especialidades que aparecen en el tarifario del cliente; las que no figuran
+-- (dermatología, cardiología, traumatología) quedan con su precio actual hasta
+-- que el cliente los confirme.
+update public.clinic_doctors d
+set consultation_price = case s.slug
+  when 'medicina-general' then 60
+  when 'pediatria'        then 80
+  when 'ginecologia'      then 80
+end
+from public.clinic_specialties s
+where s.id = d.specialty_id
+  and d.business = 'clinica-san-martin'
+  and s.slug in ('medicina-general', 'pediatria', 'ginecologia');

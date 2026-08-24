@@ -27,21 +27,37 @@ export type BotPauseState = {
   expiresAt?: string | null;
 };
 
+// Duración de las pausas automáticas (intervención humana). Vencen solas para
+// que ninguna conversación quede sin bot indefinidamente si nadie la retoma:
+// 12h cubre el resto de la jornada y al día siguiente el bot vuelve solo.
+//
+// OJO: bot_pause_duration_minutes es `int not null` en la tabla (ver migración
+// 20260620000000_create_core_tables.sql). Escribir null ahí revienta con 23502
+// y la pausa NO se aplica — el error solo se loguea y el bot sigue respondiendo.
+const AUTO_PAUSE_MINUTES = 720;
+
+function autoPauseFields(nowMs: number) {
+  return {
+    bot_pause_expires_at: new Date(nowMs + AUTO_PAUSE_MINUTES * 60_000).toISOString(),
+    bot_pause_duration_minutes: AUTO_PAUSE_MINUTES,
+  };
+}
+
 // Auto-pausa el bot cuando un humano responde desde la app de WhatsApp Business
 // (origin=business_app). Llamado desde la normalización del evento saliente.
 export async function autoPauseBotFromBusinessApp(conversationId: string) {
   const supabase = getSupabaseClient();
-  const nowIso = new Date().toISOString();
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
 
   const { error } = await supabase
     .from("kapso_conversations")
     .update({
       bot_paused: true,
       bot_paused_at: nowIso,
-      bot_pause_expires_at: null,
       bot_paused_reason: "human_whatsapp_business_app",
       bot_pause_mode: "auto",
-      bot_pause_duration_minutes: null,
+      ...autoPauseFields(now),
       updated_at: nowIso,
     })
     .eq("kapso_conversation_id", conversationId);
@@ -54,22 +70,22 @@ export async function autoPauseBotFromBusinessApp(conversationId: string) {
 }
 
 // Pausa el bot cuando el propio paciente pide hablar con una persona (reclamos,
-// temas fuera de alcance, o simplemente no querer seguir con el bot). Sin
-// vencimiento automático: alguien del equipo la retoma manualmente (panel /
-// bot-control) cuando ya atendió al paciente.
+// temas fuera de alcance, o simplemente no querer seguir con el bot). Vence a
+// las 12h (AUTO_PAUSE_MINUTES); antes de eso el equipo puede retomarla a mano
+// desde el panel / bot-control cuando ya atendió al paciente.
 export async function pauseBotForHumanHandoff(conversationId: string) {
   const supabase = getSupabaseClient();
-  const nowIso = new Date().toISOString();
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
 
   const { error } = await supabase
     .from("kapso_conversations")
     .update({
       bot_paused: true,
       bot_paused_at: nowIso,
-      bot_pause_expires_at: null,
       bot_paused_reason: "human_handoff_requested",
       bot_pause_mode: "auto",
-      bot_pause_duration_minutes: null,
+      ...autoPauseFields(now),
       updated_at: nowIso,
     })
     .eq("kapso_conversation_id", conversationId);
