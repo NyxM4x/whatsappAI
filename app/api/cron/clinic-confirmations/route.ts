@@ -15,7 +15,7 @@
 // ============================================================================
 
 import { getKapsoClient } from "@/lib/engine/clients";
-import { getErrorMessage } from "@/lib/engine/logging";
+import { getErrorMessage, logSystemEvent } from "@/lib/engine/logging";
 import {
   getConfirmedAppointmentsWithoutEvent,
   getCanceledAppointmentsWithEvent,
@@ -48,6 +48,21 @@ export async function GET(request: Request) {
     (s): s is string => Boolean(s),
   );
   if (!validSecrets.length || !validSecrets.some((s) => authHeader === `Bearer ${s}`)) {
+    // Quien llama acá casi siempre es el trigger pg_net de Supabase, y pg_net es
+    // asíncrono: encola la petición y vuelve, así que un 401 NO se propaga como
+    // excepción al trigger y su `exception when others` nunca lo ve. Sin este
+    // registro, un secreto desalineado deja de confirmar citas en silencio
+    // absoluto — ni el paciente recibe su aviso ni queda rastro en ningún lado.
+    await logSystemEvent({
+      level: "critical",
+      eventType: "confirmations_unauthorized",
+      errorMessage: "Llamada rechazada por credencial inválida",
+      statusCode: 401,
+      metadata: {
+        hasAuthHeader: Boolean(authHeader),
+        secretsConfigured: validSecrets.length,
+      },
+    });
     return new Response("Unauthorized", { status: 401 });
   }
 
