@@ -8,6 +8,16 @@
 //
 // * choosing_doctor se salta si la especialidad solo tiene un doctor activo.
 //
+// Navegación no lineal: el primer mensaje pasa por extractBookingPrefs, que
+// guarda en draft.prefs lo que el paciente ya dijo (especialidad o síntoma,
+// franja del día, si le da igual el médico). Con eso, enterSpecialty puede
+// saltarse choosing_specialty y/o choosing_doctor:
+//   - "quiero pediatría por la tarde" → salta especialidad y filtra médicos
+//   - "me duele la barriga"           → orienta a la especialidad del catálogo
+//   - "lo antes posible, con quien sea" → choosing_slot_any, horarios de todos
+//     los médicos de la especialidad mezclados y ordenados por cercanía
+// Todo salto se anuncia en el mensaje y deja salida; nunca se decide en silencio.
+//
 // Bloqueo de 30 min (OBLIGATORIO MVP):
 //   Al confirmar slot → re-verificar disponibilidad → escribir hold en BD
 //   → pasar a collecting_name. Si el slot fue tomado → re-ofrecer.
@@ -30,6 +40,8 @@ import {
   computeAvailableSlots,
   createAppointmentEvent,
   deleteAppointmentEvent,
+  doctorWorksInTimeBand,
+  BAND_LABELS,
 } from "@/lib/clinic/googleCalendar";
 import {
   getSpecialties,
@@ -52,8 +64,12 @@ import type {
   BookingSession,
   BookingDraft,
   BookingHold,
+  BookingPrefs,
   TimeSlot,
+  SlotWithDoctor,
+  TimeBand,
   Doctor,
+  Specialty,
   PaymentMethod,
 } from "@/lib/clinic/types";
 import { buildClinicSystemPrompt, type ClinicConfig } from "@/lib/clinic/config";
@@ -305,7 +321,7 @@ async function getSlotsForDate(doctor: Doctor, conversationId: string, targetDat
 
 // Slots del día por defecto: hoy, o el próximo día hábil si ya pasó el
 // horario de atención de hoy (o hoy no es día laborable para el doctor).
-async function getSlotsForDefaultDay(doctor: Doctor, conversationId: string): Promise<TimeSlot[]> {
+async function getSlotsForDefaultDay(doctor: Doctor, conversationId: string, timeBand?: TimeBand | null): Promise<TimeSlot[]> {
   if (!doctor.googleCalendarId) return [];
 
   const now = new Date();
@@ -328,6 +344,7 @@ async function getSlotsForDefaultDay(doctor: Doctor, conversationId: string): Pr
       daysAhead: 0,
       maxSlots: 30,
       now,
+      timeBand,
     });
     if (daySlots.length) return daySlots;
   }
@@ -373,6 +390,417 @@ function slotsMessage(slots: TimeSlot[], tz: string): string {
   return `Estos son los horarios disponibles:\n\n${lines.join("\n")}\n\n¿Cuál le viene bien?\n\n¿Prefiere otro día? Dígame la fecha (ej. "el lunes" o "para el 5 de agosto") 📅`;
 }
 
+// Como slotsMessage pero mostrando de qué médico es cada horario: acá el
+// paciente elige por hora y el doctor sale de la opción que eligió.
+function slotsWithDoctorMessage(slots: SlotWithDoctor[], tz: string): string {
+  const lines = slots.map((s, i) => `  ${i + 1}. ${formatSlotLocal(s.start, tz)} — ${s.doctorName}`);
+  return `Estos son los horarios más próximos:\n\n${lines.join("\n")}\n\n¿Cuál le viene bien?`;
+}
+
+// ─── Preferencias del paciente (navegación no lineal) ────────────────────────
+
+// Extrae de un mensaje libre lo que el paciente ya nos dijo, para no volver a
+// preguntárselo: qué especialidad necesita (mencionada, o inferida de un
+// síntoma), en qué franja del día quiere y si le da igual el médico.
+//
+// El LLM se usa como EXTRACTOR, nunca como decisor: se le pasa la lista real de
+// especialidades activas y solo puede devolver un índice de esa lista, así que
+// no puede inventarse una que la clínica no tenga. Mismo patrón defensivo que
+// resolveDateRequestWithAI: temperature 0, timeout corto y catch → sin
+// preferencias (el flujo lineal de siempre).
+export async function extractBookingPrefs(
+  userText: string,
+  specialties: Specialty[],
+): Promise<BookingPrefs> {
+  const none: BookingPrefs = {};
+  if (!userText.trim() || !specialties.length) return none;
+
+  const list = specialties.map((s, i) => `${i + 1}. ${s.name}`).join("\n");
+
+  try {
+    const { text } = await generateText({
+      model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+      system: `Extraés preferencias de un paciente que quiere agendar una cita médica. Respondés ÚNICAMENTE con un JSON:
+{"specialty": <número de la lista o null>, "timeBand": "morning"|"afternoon"|"evening"|null, "anyDoctor": true|false}
+
+Reglas:
+- "specialty": el número de la especialidad de la lista que el paciente necesita. Si la nombra, usá esa. Si solo describe un SÍNTOMA o malestar, elegí la especialidad más apropiada de la lista; si ninguna encaja con claridad, elegí Medicina General. Si el mensaje no da ninguna pista (ej. "quiero una cita"), devolvé null.
+- Nunca afirmes la causa del síntoma ni diagnostiques: solo orientás a qué especialidad corresponde.
+- Si el mensaje es una pregunta general sobre la clínica (dirección, precios, horarios, formas de pago) y no menciona especialidad ni síntoma, "specialty" es null.
+- "timeBand": "morning" si pide mañana/temprano, "afternoon" si pide tarde, "evening" si pide noche. Si no menciona franja, null.
+- "anyDoctor": true solo si le da igual el médico o pide lo más pronto posible ("con quien sea", "el primero que haya", "lo antes posible", "urgente"). Si no, false.
+- Solo extraés lo que el mensaje dice de verdad. Ante la duda, null/false.`,
+      prompt: `Especialidades disponibles:\n${list}\n\nEl paciente escribió: "${userText}"`,
+      temperature: 0,
+      abortSignal: AbortSignal.timeout(8000),
+    });
+
+    const parsed = JSON.parse(text.trim().replace(/^```json|```$/g, "").trim());
+
+    const n = Number(parsed.specialty);
+    const specialtyId =
+      Number.isInteger(n) && n >= 1 && n <= specialties.length ? specialties[n - 1].id : null;
+
+    const band = parsed.timeBand;
+    const timeBand: TimeBand | null =
+      band === "morning" || band === "afternoon" || band === "evening" ? band : null;
+
+    return { specialtyId, timeBand, anyDoctor: parsed.anyDoctor === true };
+  } catch {
+    return none;
+  }
+}
+
+// Slots libres de TODA una especialidad, ordenados por cercanía y sabiendo de
+// qué médico es cada uno. Para el paciente que dice "lo antes posible, con
+// quien sea" y no quiere elegir doctor a ciegas.
+//
+// Coste: una llamada a Google Calendar POR MÉDICO (getAvailableSlots hace una
+// sola porque mira un doctor). Por eso: en paralelo, con tope de médicos y
+// mirando solo unos días —"lo antes posible" es cercano por definición—. Un
+// calendario que falle se omite en vez de tumbar la respuesta entera.
+const ANY_DOCTOR_MAX_DOCTORS = 6;
+const ANY_DOCTOR_DAYS_AHEAD = 3;
+const ANY_DOCTOR_MAX_SLOTS = 5;
+
+async function getEarliestSlotsForSpecialty(params: {
+  business: string;
+  specialtyId: string;
+  conversationId: string;
+  timeBand?: TimeBand | null;
+}): Promise<SlotWithDoctor[]> {
+  const { business, specialtyId, conversationId, timeBand } = params;
+
+  let doctors = await getDoctorsBySpecialty(business, specialtyId);
+  if (timeBand) {
+    const inBand = doctors.filter((d) => doctorWorksInTimeBand(d, timeBand));
+    // Si nadie atiende en esa franja, mejor ofrecer los horarios que sí hay que
+    // devolver una lista vacía y cortarle el flujo al paciente.
+    if (inBand.length) doctors = inBand;
+  }
+  doctors = doctors.filter((d) => d.googleCalendarId).slice(0, ANY_DOCTOR_MAX_DOCTORS);
+  if (!doctors.length) return [];
+
+  const now = new Date();
+  const timeMin = now.toISOString();
+  const timeMax = new Date(now.getTime() + (ANY_DOCTOR_DAYS_AHEAD + 1) * 24 * 60 * 60 * 1000).toISOString();
+
+  const perDoctor = await Promise.all(
+    doctors.map(async (doctor): Promise<SlotWithDoctor[]> => {
+      try {
+        const [busy, holds, activeAppts] = await Promise.all([
+          getBusyIntervals(doctor.googleCalendarId!, timeMin, timeMax),
+          getActiveHoldsForDoctor(doctor.id, conversationId),
+          getActiveAppointmentSlotsForDoctor(doctor.id, timeMin, timeMax),
+        ]);
+        return computeAvailableSlots({
+          doctor,
+          busy,
+          excludeSlots: [...holds, ...activeAppts],
+          fromDate: now,
+          daysAhead: ANY_DOCTOR_DAYS_AHEAD,
+          maxSlots: ANY_DOCTOR_MAX_SLOTS,
+          now,
+          timeBand,
+        }).map((s) => ({ ...s, doctorId: doctor.id, doctorName: doctor.name }));
+      } catch (err) {
+        console.error(`getEarliestSlotsForSpecialty: doctor ${doctor.id} failed, skipping`, err);
+        return [];
+      }
+    }),
+  );
+
+  return perDoctor
+    .flat()
+    .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())
+    .slice(0, ANY_DOCTOR_MAX_SLOTS);
+}
+
+// Confirma el horario que el paciente eligió y lo bloquea 30 minutos.
+//
+// Es la parte más delicada del flujo —re-verifica contra Calendar/BD para no
+// agendar dos pacientes en el mismo hueco— así que vive en UNA sola función:
+// la comparten choosing_slot (ya sabíamos el médico) y choosing_slot_any (el
+// médico sale del slot elegido). Duplicarla sería la forma más fácil de
+// introducir un doble-booking.
+//
+// `draft` debe traer ya doctorId/specialtyId resueltos.
+async function confirmSlotAndHold(params: {
+  conversationId: string;
+  business: string;
+  contactPhone: string;
+  chosen: TimeSlot;
+  clinic: ClinicConfig;
+  draft: BookingDraft;
+}): Promise<BookingResult> {
+  const { conversationId, business, contactPhone, chosen, clinic } = params;
+  let draft = params.draft;
+
+  if (!draft.doctorId) {
+    return reply("Ocurrió un error al recuperar el médico. Comencemos de nuevo.", "none", await resetAndReturn(conversationId, business));
+  }
+
+  const doctor = await getDoctorById(draft.doctorId);
+  if (!doctor || !doctor.googleCalendarId) {
+    return reply("No pude verificar la disponibilidad. Intente de nuevo.", "none", await resetAndReturn(conversationId, business));
+  }
+
+  // Re-verificar disponibilidad con timeout de 5s para no exceder el límite de Vercel.
+  const nowIso = new Date().toISOString();
+  const chosenStart = new Date(chosen.start).getTime();
+  const chosenEnd = new Date(chosen.end).getTime();
+
+  function slotOverlaps(b: TimeSlot) {
+    return new Date(b.start).getTime() < chosenEnd && new Date(b.end).getTime() > chosenStart;
+  }
+
+  try {
+    const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000));
+    const verification = Promise.all([
+      getBusyIntervals(doctor.googleCalendarId, nowIso, chosen.end),
+      getActiveHoldsForDoctor(doctor.id, conversationId),
+      getActiveAppointmentSlotsForDoctor(doctor.id, nowIso, chosen.end),
+    ]);
+
+    const result = await Promise.race([verification, timeout]);
+
+    if (result !== null) {
+      const [busyNow, holdsNow, activeAppts] = result;
+      if (busyNow.some(slotOverlaps) || holdsNow.some(slotOverlaps) || activeAppts.some(slotOverlaps)) {
+        const freshSlots = await getAvailableSlots(doctor, conversationId);
+        if (!freshSlots.length) {
+          const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+          return reply("Ese horario ya no está disponible y no quedan turnos libres. ¿Le puedo ayudar en otra cosa?", "none", newSession);
+        }
+        draft = { ...draft, offeredSlots: freshSlots, offeredSlotsAny: undefined };
+        const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+        return reply(`Ese horario acaba de ser tomado 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
+      }
+    }
+    // Si timeout → continuar optimistamente (el slot fue validado al mostrarse).
+  } catch (err) {
+    console.error("slot re-verification failed, proceeding optimistically", err);
+  }
+
+  // Slot libre → escribir hold de 30 minutos.
+  draft = { ...draft, slotStart: chosen.start, slotEnd: chosen.end, offeredSlots: undefined, offeredSlotsAny: undefined };
+  const newHold: BookingHold = {
+    heldDoctorId: doctor.id,
+    heldSlotStart: chosen.start,
+    holdExpiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+  };
+  // Reagendamiento de una cita que ya estaba confirmada (pagada por QR con
+  // comprobante validado, o efectivo ya dado por confirmado): no volvemos a
+  // pedir datos ni pago, reutilizamos lo que ya teníamos y confirmamos directo.
+  if (
+    draft.reschedulingAppointmentId &&
+    draft.rescheduleConfirmed &&
+    draft.patientName &&
+    draft.patientCi &&
+    draft.paymentMethod
+  ) {
+    const friendlySlot = formatSlotLocal(chosen.start, clinic.timezone);
+    const appointmentId = await createAppointment({
+      business,
+      conversationId,
+      contactPhone,
+      patientName: draft.patientName,
+      patientCi: draft.patientCi,
+      reason: draft.reason,
+      specialtyId: draft.specialtyId,
+      doctorId: draft.doctorId,
+      scheduledStart: chosen.start,
+      scheduledEnd: chosen.end,
+      status: "confirmed",
+      paymentMethod: draft.paymentMethod,
+    });
+
+    if (!appointmentId) {
+      const freshSlots = await getAvailableSlots(doctor, conversationId);
+      if (!freshSlots.length) {
+        const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+        return reply("Lo sentimos, justo se ocupó ese horario y no quedan más turnos libres para este médico 😔 ¿Le puedo ayudar en otra cosa?", "none", newSession);
+      }
+      draft = { ...draft, offeredSlots: freshSlots };
+      const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+      return reply(`Justo se ocupó ese horario 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
+    }
+
+    if (draft.paymentProofUrl) {
+      await updateAppointment(appointmentId, { paymentProofUrl: draft.paymentProofUrl });
+    }
+
+    // La cita nueva ya existe: recién ahora se cierra la vieja.
+    await closePreviousAppointment(draft.reschedulingAppointmentId);
+
+    const claimedReschedule = doctor.googleCalendarId
+      ? await claimAppointmentForEventCreation(appointmentId)
+      : false;
+
+    if (doctor.googleCalendarId && claimedReschedule) {
+      try {
+        const eventId = await createAppointmentEvent({
+          calendarId: doctor.googleCalendarId,
+          timezone: doctor.timezone,
+          startIso: chosen.start,
+          endIso: chosen.end,
+          summary: `Cita: ${draft.patientName} — ${doctor.name}`,
+          description: [
+            `Paciente: ${draft.patientName}`,
+            `CI: ${draft.patientCi ?? "—"}`,
+            `Tel: ${contactPhone}`,
+            `Especialidad: ${draft.specialtyName ?? "—"}`,
+            `Motivo: ${draft.reason ?? "—"}`,
+            `Pago: ${draft.paymentMethod === "qr" ? "QR BNB" : "Efectivo"} (reagendado)`,
+          ].join("\n"),
+        });
+        if (eventId) {
+          const currentStatus = await getAppointmentStatus(appointmentId);
+          if (currentStatus === "canceled") {
+            // Se volvió a reagendar/cancelar mientras se creaba el evento: no
+            // dejar un evento huérfano en Calendar.
+            await deleteAppointmentEvent(doctor.googleCalendarId, eventId);
+            await releaseAppointmentEventClaim(appointmentId);
+          } else {
+            await updateAppointment(appointmentId, { googleEventId: eventId });
+          }
+        } else {
+          await releaseAppointmentEventClaim(appointmentId);
+        }
+      } catch (err) {
+        console.error("createAppointmentEvent (reschedule confirmed) failed", err);
+        await releaseAppointmentEventClaim(appointmentId);
+        await updateAppointment(appointmentId, {
+          notes: "⚠️ Cita confirmada pero falló crear el evento en Google Calendar. Verificar el calendario del doctor.",
+        });
+      }
+    } else if (!doctor.googleCalendarId) {
+      await updateAppointment(appointmentId, {
+        notes: "⚠️ El doctor no tiene calendario configurado: la cita no aparece en ningún Google Calendar.",
+      });
+    }
+
+    await resetBookingSession(conversationId, business);
+    return reply(
+      `✅ *¡Cita reprogramada!*\n\n📅 ${friendlySlot}\n👨‍⚕️ ${doctor.name}\n👤 ${draft.patientName}\n💊 ${draft.reason ?? "—"}\n\nNo necesita volver a pagar, su cita ya está confirmada. 😊`,
+      "none",
+      { conversationId, step: "done", draft: {}, hold: emptyHold() },
+    );
+  }
+
+  await writeHold({
+    conversationId,
+    business,
+    step: "collecting_name",
+    draft,
+    doctorId: doctor.id,
+    slotStart: chosen.start,
+  });
+
+  const friendlySlot = formatSlotLocal(chosen.start, clinic.timezone);
+  return reply(
+    `¡Aparté su horario por 30 minutos! 🎉\n\n📅 *${friendlySlot}*\n👨‍⚕️ ${doctor.name}\n\nPara confirmar necesito algunos datos:\n\n👤 *Nombre completo*\n🪪 *Carnet de Identidad (CI)*\n💊 *Motivo de consulta*\n\nPuede respondernos todo en un mensaje o por separado 😊`,
+    "none",
+    { conversationId, step: "collecting_name", draft, hold: newHold },
+  );
+}
+// "Me da igual el médico / lo antes posible": determinista y barato, sin LLM.
+export const ANY_DOCTOR_PATTERN =
+  /\b(cualquiera|cualquier m[eé]dic[oa]|el que sea|la que sea|quien sea|me da igual|da lo mismo|no importa|el primero|la primera|m[aá]s pronto|lo antes posible|m[aá]s temprano|urgente)\b/i;
+
+// "¿Quién atiende en la mañana?" → la franja preguntada, o null.
+// Ojo: "mañana" a secas es el DÍA de mañana, no la franja — por eso se exige
+// "por la mañana" / "en la mañana" y nunca la palabra suelta.
+export function detectBandQuestion(text: string): TimeBand | null {
+  if (/\b(por la ma[ñn]ana|en la ma[ñn]ana|matutin[oa]|tempranito|temprano)\b/i.test(text)) return "morning";
+  if (/\b(por la tarde|en la tarde|vespertin[oa])\b/i.test(text)) return "afternoon";
+  if (/\b(por la noche|en la noche|nocturn[oa])\b/i.test(text)) return "evening";
+  return null;
+}
+
+// Entra a una especialidad ya resuelta y decide el SIGUIENTE paso aplicando lo
+// que el paciente ya pidió (draft.prefs): si le da igual el médico le ofrecemos
+// directamente los horarios más próximos de toda la especialidad, y si pidió
+// una franja filtramos a los médicos que atienden en ella.
+//
+// La comparten el paso idle (cuando el primer mensaje ya trae la especialidad o
+// un síntoma) y choosing_specialty (cuando la eligió de la lista).
+async function enterSpecialty(params: {
+  conversationId: string;
+  business: string;
+  clinic: ClinicConfig;
+  specialty: Specialty;
+  draft: BookingDraft;
+  intro?: string; // línea previa cuando saltamos un paso: nunca decidir en silencio
+}): Promise<BookingResult> {
+  const { conversationId, business, clinic, specialty, intro } = params;
+  let draft: BookingDraft = { ...params.draft, specialtyId: specialty.id, specialtyName: specialty.name };
+  const prefs = draft.prefs ?? {};
+  const lead = intro ? `${intro}\n\n` : "";
+
+  const allDoctors = await getDoctorsBySpecialty(business, specialty.id);
+  if (!allDoctors.length) {
+    const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+    return reply(`Lo sentimos, ${specialty.name} no tiene médicos disponibles. ¿Desea elegir otra especialidad?`, "none", newSession);
+  }
+
+  // "Con quien sea / lo antes posible": horarios de TODA la especialidad.
+  if (prefs.anyDoctor) {
+    const anySlots = await getEarliestSlotsForSpecialty({
+      business,
+      specialtyId: specialty.id,
+      conversationId,
+      timeBand: prefs.timeBand,
+    });
+    if (anySlots.length) {
+      draft = { ...draft, offeredSlotsAny: anySlots, offeredSlots: undefined };
+      const newSession = await saveAndReturn(conversationId, business, "choosing_slot_any", draft, emptyHold());
+      return reply(`${lead}${slotsWithDoctorMessage(anySlots, clinic.timezone)}`, "none", newSession);
+    }
+    // Sin huecos cercanos: seguimos por el camino normal en vez de cortarle el flujo.
+  }
+
+  // Franja pedida: nos quedamos con los médicos que atienden en ella.
+  let doctors = allDoctors;
+  let header = `Médicos disponibles en ${specialty.name}`;
+  if (prefs.timeBand) {
+    const inBand = allDoctors.filter((d) => doctorWorksInTimeBand(d, prefs.timeBand!));
+    if (inBand.length) {
+      doctors = inBand;
+      header = `Médicos de ${specialty.name} que atienden ${BAND_LABELS[prefs.timeBand]}`;
+    } else {
+      header = `No tenemos médicos de ${specialty.name} que atiendan ${BAND_LABELS[prefs.timeBand]} 😔 Estos son los que sí atienden`;
+      // Se olvida la franja para que choosing_doctor arme la MISMA lista que
+      // acabamos de mostrar: si no, los números no coincidirían.
+      draft = { ...draft, prefs: { ...prefs, timeBand: null } };
+    }
+  }
+
+  if (doctors.length === 1) {
+    const doctor = doctors[0];
+    draft = { ...draft, doctorId: doctor.id, doctorName: doctor.name };
+
+    const slots = await getSlotsForDefaultDay(doctor, conversationId, draft.prefs?.timeBand);
+    if (!slots.length) {
+      const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+      return reply(`No hay horarios disponibles para ${doctor.name} en los próximos días. ¿Puedo ayudarle en algo más?`, "none", newSession);
+    }
+
+    draft = { ...draft, offeredSlots: slots };
+    const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+    return reply(`${lead}Atenderá *${doctor.name}*.\n\n${slotsMessage(slots, clinic.timezone)}`, "none", newSession);
+  }
+
+  const lines = doctors.map((d, i) => `  ${i + 1}. ${d.name}${d.consultationPrice ? ` — ${d.consultationPrice} Bs` : ""}`).join("\n");
+  const newSession = await saveAndReturn(conversationId, business, "choosing_doctor", draft, emptyHold());
+  return reply(
+    `${lead}${header}:\n\n${lines}\n\n¿Con quién prefiere? Si le da igual, dígame "cualquiera" y le busco el horario más próximo 😊`,
+    "none",
+    newSession,
+  );
+}
+
+
 // ─── Avanzar la máquina de pasos ─────────────────────────────────────────────
 
 export async function advanceBooking(params: {
@@ -386,7 +814,6 @@ export async function advanceBooking(params: {
   const { conversationId, business, contactPhone, incomingText, session, clinic } = params;
   const text = incomingText.trim();
   let { step, draft, hold } = session;
-
   // ── idle / start ──────────────────────────────────────────────────────────
   if (step === "idle") {
     const specialties = await getSpecialties(business);
@@ -397,8 +824,30 @@ export async function advanceBooking(params: {
         { conversationId, step: "idle", draft: {}, hold: emptyHold() },
       );
     }
+
+    // Lo que el paciente ya nos dijo en su mensaje ("pediatría el jueves por la
+    // tarde", "me duele la barriga", "lo antes posible con quien sea") se
+    // extrae UNA sola vez, acá, y los pasos siguientes lo consumen del draft.
+    // No volvemos a preguntarle lo que acaba de decirnos.
+    const prefs = await extractBookingPrefs(text, specialties);
+    draft = { prefs };
+
+    const preselected = prefs.specialtyId
+      ? specialties.find((s) => s.id === prefs.specialtyId)
+      : undefined;
+
+    if (preselected) {
+      return enterSpecialty({
+        conversationId,
+        business,
+        clinic,
+        specialty: preselected,
+        draft,
+        intro: `Le busco en *${preselected.name}* 😊 (si prefiere otra especialidad, dígamelo)`,
+      });
+    }
+
     const lines = specialties.map((s, i) => `  ${i + 1}. ${s.name}`).join("\n");
-    draft = {};
     const newSession = await saveAndReturn(conversationId, business, "choosing_specialty", draft, emptyHold());
     return reply(`Perfecto 😊 ¿Qué especialidad necesita?\n\n${lines}\n\n¿Cuál necesita?`, "none", newSession);
   }
@@ -409,42 +858,88 @@ export async function advanceBooking(params: {
     const idx = parseNumberChoice(text) ?? await resolveChoiceWithAI(text, specialties.map(s => s.name));
 
     if (!idx || idx < 1 || idx > specialties.length) {
+      // No eligió de la lista, pero quizá describió un síntoma ("me duele la
+      // barriga") o una preferencia. Antes de repreguntar, intentamos orientarlo.
+      const prefs = await extractBookingPrefs(text, specialties);
+      const inferred = prefs.specialtyId
+        ? specialties.find((s) => s.id === prefs.specialtyId)
+        : undefined;
+
+      if (inferred) {
+        return enterSpecialty({
+          conversationId,
+          business,
+          clinic,
+          specialty: inferred,
+          draft: { ...draft, prefs: { ...draft.prefs, ...prefs } },
+          intro: `Por lo que me cuenta le corresponde *${inferred.name}* 😊 (si prefiere otra especialidad, dígamelo)`,
+        });
+      }
+
       const lines = specialties.map((s, i) => `  ${i + 1}. ${s.name}`).join("\n");
       return replyInContext(text, "eligiendo especialidad", `¿Cuál de estas especialidades necesita?\n\n${lines}`, session, clinic);
     }
 
-    const specialty = specialties[idx - 1];
-    draft = { ...draft, specialtyId: specialty.id, specialtyName: specialty.name };
-
-    const doctors = await getDoctorsBySpecialty(business, specialty.id);
-    if (!doctors.length) {
-      const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
-      return reply(`Lo sentimos, ${specialty.name} no tiene médicos disponibles. ¿Desea elegir otra especialidad?`, "none", newSession);
-    }
-
-    if (doctors.length === 1) {
-      const doctor = doctors[0];
-      draft = { ...draft, doctorId: doctor.id, doctorName: doctor.name };
-
-      const slots = await getSlotsForDefaultDay(doctor, conversationId);
-      if (!slots.length) {
-        const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
-        return reply(`No hay horarios disponibles para ${doctor.name} en los próximos días. ¿Puedo ayudarle en algo más?`, "none", newSession);
-      }
-
-      draft = { ...draft, offeredSlots: slots };
-      const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
-      return reply(`Atenderá *${doctor.name}*.\n\n${slotsMessage(slots, clinic.timezone)}`, "none", newSession);
-    }
-
-    const lines = doctors.map((d, i) => `  ${i + 1}. ${d.name}${d.consultationPrice ? ` — ${d.consultationPrice} Bs` : ""}`).join("\n");
-    const newSession = await saveAndReturn(conversationId, business, "choosing_doctor", draft, emptyHold());
-    return reply(`Médicos disponibles en ${specialty.name}:\n\n${lines}\n\n¿Con quién prefiere?`, "none", newSession);
+    return enterSpecialty({ conversationId, business, clinic, specialty: specialties[idx - 1], draft });
   }
 
   // ── choosing_doctor ───────────────────────────────────────────────────────
   if (step === "choosing_doctor") {
-    const doctors = draft.specialtyId ? await getDoctorsBySpecialty(business, draft.specialtyId) : [];
+    const allDoctors = draft.specialtyId ? await getDoctorsBySpecialty(business, draft.specialtyId) : [];
+    const band = draft.prefs?.timeBand ?? null;
+
+    // "Cualquiera" / "el que atienda antes": saltamos la elección de médico y
+    // ofrecemos los horarios más próximos de toda la especialidad.
+    if (draft.specialtyId && ANY_DOCTOR_PATTERN.test(text)) {
+      const anySlots = await getEarliestSlotsForSpecialty({
+        business,
+        specialtyId: draft.specialtyId,
+        conversationId,
+        timeBand: band,
+      });
+      if (anySlots.length) {
+        draft = { ...draft, offeredSlotsAny: anySlots, prefs: { ...draft.prefs, anyDoctor: true } };
+        const newSession = await saveAndReturn(conversationId, business, "choosing_slot_any", draft, emptyHold());
+        return reply(
+          `Perfecto, le busco lo más próximo con cualquiera de nuestros médicos 😊\n\n${slotsWithDoctorMessage(anySlots, clinic.timezone)}`,
+          "none",
+          newSession,
+        );
+      }
+    }
+
+    // "¿Quién atiende en la mañana?": se responde leyendo el horario de cada
+    // médico, sin consultar Google Calendar.
+    const askedBand = detectBandQuestion(text);
+    if (askedBand && allDoctors.length) {
+      const matching = allDoctors.filter((d) => doctorWorksInTimeBand(d, askedBand));
+      // La franja se guarda solo si alguien atiende en ella: así la lista que
+      // ve el paciente y la que reconstruimos al responder son la misma.
+      draft = { ...draft, prefs: { ...draft.prefs, timeBand: matching.length ? askedBand : null } };
+      const newSession = await saveAndReturn(conversationId, business, "choosing_doctor", draft, emptyHold());
+
+      if (!matching.length) {
+        const lines = allDoctors.map((d, i) => `  ${i + 1}. ${d.name}`).join("\n");
+        return reply(
+          `Ninguno de nuestros médicos de esta especialidad atiende ${BAND_LABELS[askedBand]} 😔\n\nEstos son los que tenemos:\n\n${lines}\n\n¿Con quién prefiere?`,
+          "none",
+          newSession,
+        );
+      }
+
+      const lines = matching.map((d, i) => `  ${i + 1}. ${d.name}${d.consultationPrice ? ` — ${d.consultationPrice} Bs` : ""}`).join("\n");
+      return reply(
+        `Atienden ${BAND_LABELS[askedBand]}:\n\n${lines}\n\n¿Con quién prefiere? Si le da igual, dígame "cualquiera" 😊`,
+        "none",
+        newSession,
+      );
+    }
+
+    // La lista numerada debe ser la MISMA que se le mostró: si hay franja
+    // guardada, el filtro se reaplica igual que en enterSpecialty.
+    const inBand = band ? allDoctors.filter((d) => doctorWorksInTimeBand(d, band)) : [];
+    const doctors = inBand.length ? inBand : allDoctors;
+
     const idx = parseNumberChoice(text) ?? await resolveChoiceWithAI(text, doctors.map(d => d.name));
 
     if (!idx || !doctors[idx - 1]) {
@@ -455,7 +950,7 @@ export async function advanceBooking(params: {
     const doctor = doctors[idx - 1];
     draft = { ...draft, doctorId: doctor.id, doctorName: doctor.name };
 
-    const slots = await getSlotsForDefaultDay(doctor, conversationId);
+    const slots = await getSlotsForDefaultDay(doctor, conversationId, band);
     if (!slots.length) {
       const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
       return reply(`No hay horarios disponibles para ${doctor.name}. ¿Desea elegir otro médico?`, "none", newSession);
@@ -464,6 +959,39 @@ export async function advanceBooking(params: {
     draft = { ...draft, offeredSlots: slots };
     const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
     return reply(slotsMessage(slots, clinic.timezone), "none", newSession);
+  }
+
+  // ── choosing_slot_any ─────────────────────────────────────────────────────
+  // Horarios de VARIOS médicos de la especialidad: el paciente elige por hora y
+  // el médico queda determinado por la opción que eligió.
+  if (step === "choosing_slot_any") {
+    const nowMs = Date.now() + 60 * 60 * 1000; // 1h de margen
+    const slots = (draft.offeredSlotsAny ?? []).filter(s => new Date(s.start).getTime() > nowMs);
+
+    if (!slots.length) {
+      const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+      return reply("Esos horarios ya no están disponibles 😔 ¿Desea que busquemos nuevos turnos?", "none", newSession);
+    }
+
+    const labels = slots.map(s => `${formatSlotLocal(s.start, clinic.timezone)} (${s.doctorName})`);
+    let idx = parseNumberChoice(text);
+
+    if (!idx || !slots[idx - 1]) {
+      const resolved = await resolveSlotChoiceWithAI(text, labels);
+      if (resolved.clarify) {
+        return reply(`${resolved.clarify}\n\n${slotsWithDoctorMessage(slots, clinic.timezone)}`, "none", session);
+      }
+      idx = resolved.index;
+    }
+
+    if (!idx || !slots[idx - 1]) {
+      return replyInContext(text, "eligiendo horario", slotsWithDoctorMessage(slots, clinic.timezone), session, clinic);
+    }
+
+    const chosen = slots[idx - 1];
+    draft = { ...draft, doctorId: chosen.doctorId, doctorName: chosen.doctorName };
+
+    return confirmSlotAndHold({ conversationId, business, contactPhone, chosen, clinic, draft });
   }
 
   // ── choosing_slot ─────────────────────────────────────────────────────────
@@ -524,175 +1052,16 @@ export async function advanceBooking(params: {
       return replyInContext(text, "eligiendo horario", slotsMessage(slots, clinic.timezone), session, clinic);
     }
 
-    const chosen = slots[idx - 1];
-
-    if (!draft.doctorId) {
-      return reply("Ocurrió un error al recuperar el médico. Comencemos de nuevo.", "none", await resetAndReturn(conversationId, business));
-    }
-
-    const doctor = await getDoctorById(draft.doctorId);
-    if (!doctor || !doctor.googleCalendarId) {
-      return reply("No pude verificar la disponibilidad. Intente de nuevo.", "none", await resetAndReturn(conversationId, business));
-    }
-
-    // Re-verificar disponibilidad con timeout de 5s para no exceder el límite de Vercel.
-    const nowIso = new Date().toISOString();
-    const chosenStart = new Date(chosen.start).getTime();
-    const chosenEnd = new Date(chosen.end).getTime();
-
-    function slotOverlaps(b: TimeSlot) {
-      return new Date(b.start).getTime() < chosenEnd && new Date(b.end).getTime() > chosenStart;
-    }
-
-    try {
-      const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000));
-      const verification = Promise.all([
-        getBusyIntervals(doctor.googleCalendarId, nowIso, chosen.end),
-        getActiveHoldsForDoctor(doctor.id, conversationId),
-        getActiveAppointmentSlotsForDoctor(doctor.id, nowIso, chosen.end),
-      ]);
-
-      const result = await Promise.race([verification, timeout]);
-
-      if (result !== null) {
-        const [busyNow, holdsNow, activeAppts] = result;
-        if (busyNow.some(slotOverlaps) || holdsNow.some(slotOverlaps) || activeAppts.some(slotOverlaps)) {
-          const freshSlots = await getAvailableSlots(doctor, conversationId);
-          if (!freshSlots.length) {
-            const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
-            return reply("Ese horario ya no está disponible y no quedan turnos libres. ¿Le puedo ayudar en otra cosa?", "none", newSession);
-          }
-          draft = { ...draft, offeredSlots: freshSlots };
-          const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
-          return reply(`Ese horario acaba de ser tomado 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
-        }
-      }
-      // Si timeout → continuar optimistamente (el slot fue validado al mostrarse).
-    } catch (err) {
-      console.error("slot re-verification failed, proceeding optimistically", err);
-    }
-
-    // Slot libre → escribir hold de 30 minutos.
-    draft = { ...draft, slotStart: chosen.start, slotEnd: chosen.end, offeredSlots: undefined };
-    const newHold: BookingHold = {
-      heldDoctorId: doctor.id,
-      heldSlotStart: chosen.start,
-      holdExpiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-    };
-    // Reagendamiento de una cita que ya estaba confirmada (pagada por QR con
-    // comprobante validado, o efectivo ya dado por confirmado): no volvemos a
-    // pedir datos ni pago, reutilizamos lo que ya teníamos y confirmamos directo.
-    if (
-      draft.reschedulingAppointmentId &&
-      draft.rescheduleConfirmed &&
-      draft.patientName &&
-      draft.patientCi &&
-      draft.paymentMethod
-    ) {
-      const friendlySlot = formatSlotLocal(chosen.start, clinic.timezone);
-      const appointmentId = await createAppointment({
-        business,
-        conversationId,
-        contactPhone,
-        patientName: draft.patientName,
-        patientCi: draft.patientCi,
-        reason: draft.reason,
-        specialtyId: draft.specialtyId,
-        doctorId: draft.doctorId,
-        scheduledStart: chosen.start,
-        scheduledEnd: chosen.end,
-        status: "confirmed",
-        paymentMethod: draft.paymentMethod,
-      });
-
-      if (!appointmentId) {
-        const freshSlots = await getAvailableSlots(doctor, conversationId);
-        if (!freshSlots.length) {
-          const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
-          return reply("Lo sentimos, justo se ocupó ese horario y no quedan más turnos libres para este médico 😔 ¿Le puedo ayudar en otra cosa?", "none", newSession);
-        }
-        draft = { ...draft, offeredSlots: freshSlots };
-        const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
-        return reply(`Justo se ocupó ese horario 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
-      }
-
-      if (draft.paymentProofUrl) {
-        await updateAppointment(appointmentId, { paymentProofUrl: draft.paymentProofUrl });
-      }
-
-      // La cita nueva ya existe: recién ahora se cierra la vieja.
-      await closePreviousAppointment(draft.reschedulingAppointmentId);
-
-      const claimedReschedule = doctor.googleCalendarId
-        ? await claimAppointmentForEventCreation(appointmentId)
-        : false;
-
-      if (doctor.googleCalendarId && claimedReschedule) {
-        try {
-          const eventId = await createAppointmentEvent({
-            calendarId: doctor.googleCalendarId,
-            timezone: doctor.timezone,
-            startIso: chosen.start,
-            endIso: chosen.end,
-            summary: `Cita: ${draft.patientName} — ${doctor.name}`,
-            description: [
-              `Paciente: ${draft.patientName}`,
-              `CI: ${draft.patientCi ?? "—"}`,
-              `Tel: ${contactPhone}`,
-              `Especialidad: ${draft.specialtyName ?? "—"}`,
-              `Motivo: ${draft.reason ?? "—"}`,
-              `Pago: ${draft.paymentMethod === "qr" ? "QR BNB" : "Efectivo"} (reagendado)`,
-            ].join("\n"),
-          });
-          if (eventId) {
-            const currentStatus = await getAppointmentStatus(appointmentId);
-            if (currentStatus === "canceled") {
-              // Se volvió a reagendar/cancelar mientras se creaba el evento: no
-              // dejar un evento huérfano en Calendar.
-              await deleteAppointmentEvent(doctor.googleCalendarId, eventId);
-              await releaseAppointmentEventClaim(appointmentId);
-            } else {
-              await updateAppointment(appointmentId, { googleEventId: eventId });
-            }
-          } else {
-            await releaseAppointmentEventClaim(appointmentId);
-          }
-        } catch (err) {
-          console.error("createAppointmentEvent (reschedule confirmed) failed", err);
-          await releaseAppointmentEventClaim(appointmentId);
-          await updateAppointment(appointmentId, {
-            notes: "⚠️ Cita confirmada pero falló crear el evento en Google Calendar. Verificar el calendario del doctor.",
-          });
-        }
-      } else if (!doctor.googleCalendarId) {
-        await updateAppointment(appointmentId, {
-          notes: "⚠️ El doctor no tiene calendario configurado: la cita no aparece en ningún Google Calendar.",
-        });
-      }
-
-      await resetBookingSession(conversationId, business);
-      return reply(
-        `✅ *¡Cita reprogramada!*\n\n📅 ${friendlySlot}\n👨‍⚕️ ${doctor.name}\n👤 ${draft.patientName}\n💊 ${draft.reason ?? "—"}\n\nNo necesita volver a pagar, su cita ya está confirmada. 😊`,
-        "none",
-        { conversationId, step: "done", draft: {}, hold: emptyHold() },
-      );
-    }
-
-    await writeHold({
+    // El hold, la re-verificación anti doble-booking y el reagendamiento
+    // confirmado viven en confirmSlotAndHold (compartido con choosing_slot_any).
+    return confirmSlotAndHold({
       conversationId,
       business,
-      step: "collecting_name",
+      contactPhone,
+      chosen: slots[idx - 1],
+      clinic,
       draft,
-      doctorId: doctor.id,
-      slotStart: chosen.start,
     });
-
-    const friendlySlot = formatSlotLocal(chosen.start, clinic.timezone);
-    return reply(
-      `¡Aparté su horario por 30 minutos! 🎉\n\n📅 *${friendlySlot}*\n👨‍⚕️ ${doctor.name}\n\nPara confirmar necesito algunos datos:\n\n👤 *Nombre completo*\n🪪 *Carnet de Identidad (CI)*\n💊 *Motivo de consulta*\n\nPuede respondernos todo en un mensaje o por separado 😊`,
-      "none",
-      { conversationId, step: "collecting_name", draft, hold: newHold },
-    );
   }
 
   // ── collecting_name / collecting_ci / collecting_reason ───────────────────

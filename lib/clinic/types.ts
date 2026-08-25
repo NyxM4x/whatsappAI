@@ -30,12 +30,33 @@ export type TimeSlot = {
   end: string; // ISO UTC
 };
 
+// Slot que además sabe de qué médico es. Se usa cuando ofrecemos horarios de
+// TODA una especialidad ("lo antes posible, con quien sea") y el paciente
+// todavía no eligió doctor: es el slot elegido el que determina el médico.
+export type SlotWithDoctor = TimeSlot & { doctorId: string; doctorName: string };
+
+// Franja del día. Los cortes (12:00 / 18:00) encajan con las work_hours reales
+// del plantel ({07:00, 12:00, 14:00, 17:00, 19:00}).
+export type TimeBand = "morning" | "afternoon" | "evening";
+
+// Lo que el paciente pidió en lenguaje natural al arrancar la reserva, ya
+// estructurado. Permite saltarse pasos del flujo en vez de preguntar lo que
+// ya nos dijo. Todo es opcional: sin preferencias, el flujo es el de siempre.
+export type BookingPrefs = {
+  specialtyId?: string | null; // mencionada explícitamente o inferida de un síntoma
+  timeBand?: TimeBand | null;
+  anyDoctor?: boolean; // "con quien sea" / "lo antes posible"
+};
+
 // Pasos de la máquina de reserva.
 export type BookingStep =
   | "idle"
   | "choosing_specialty"
   | "choosing_doctor"
   | "choosing_slot"
+  // Como choosing_slot, pero los horarios ofrecidos son de VARIOS médicos de la
+  // especialidad: el paciente dijo "con quien sea" y elige por hora, no por doctor.
+  | "choosing_slot_any"
   | "collecting_name"
   | "collecting_ci"
   | "collecting_reason"
@@ -62,6 +83,8 @@ export type BookingDraft = {
   reason?: string;
   paymentMethod?: PaymentMethod;
   offeredSlots?: TimeSlot[];
+  offeredSlotsAny?: SlotWithDoctor[]; // horarios de varios médicos (choosing_slot_any)
+  prefs?: BookingPrefs;
   appointmentId?: string;
   reschedulingAppointmentId?: string;
   cancelingAppointmentId?: string; // cita pendiente de confirmar cancelación

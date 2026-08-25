@@ -12,7 +12,7 @@
 // ============================================================================
 
 import { google } from "googleapis";
-import type { Doctor, TimeSlot } from "@/lib/clinic/types";
+import type { Doctor, TimeSlot, TimeBand } from "@/lib/clinic/types";
 
 const CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"];
 
@@ -123,6 +123,42 @@ function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): b
   return aStart < bEnd && bStart < aEnd;
 }
 
+// --- Franjas del día -------------------------------------------------------
+
+// A qué franja pertenece una hora de pared (0-23).
+export function bandOfHour(hour: number): TimeBand {
+  if (hour < 12) return "morning";
+  if (hour < 18) return "afternoon";
+  return "evening";
+}
+
+export const BAND_LABELS: Record<TimeBand, string> = {
+  morning: "por la mañana",
+  afternoon: "por la tarde",
+  evening: "por la noche",
+};
+
+// ¿El doctor atiende en esa franja? Lee SOLO su fila (workHours, o
+// workStart/workEnd como fallback) — cero llamadas a Google Calendar. Sirve
+// para responder "¿quién atiende en la mañana?" sin consultar disponibilidad.
+//
+// Ojo: dice si el doctor TRABAJA en esa franja, no si tiene huecos libres.
+// Para lo segundo hay que pasar por computeAvailableSlots con timeBand.
+export function doctorWorksInTimeBand(doctor: Doctor, band: TimeBand): boolean {
+  if (doctor.workHours?.length) {
+    return doctor.workHours.some((hhmm) => bandOfHour(parseHHMM(hhmm).hour) === band);
+  }
+  // Franja continua: basta con que algún slot entero caiga dentro de la banda.
+  const { hour: startH, minute: startM } = parseHHMM(doctor.workStart);
+  const { hour: endH, minute: endM } = parseHHMM(doctor.workEnd);
+  const startMin = startH * 60 + startM;
+  const endMin = endH * 60 + endM;
+  for (let m = startMin; m + doctor.slotMinutes <= endMin; m += doctor.slotMinutes) {
+    if (bandOfHour(Math.floor(m / 60)) === band) return true;
+  }
+  return false;
+}
+
 // Calcula los huecos LIBRES de un doctor: recorre cada día laborable desde
 // `fromDate` hasta `daysAhead` días, genera los slots del día y descarta los
 // que se solapan con lo ocupado o ya pasaron.
@@ -139,6 +175,9 @@ function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): b
 //
 // `excludeSlots`: slots ya reservados en BD (hold, awaiting_payment, payment_review,
 // confirmed) que aún no tienen evento en Calendar, para no ofrecerlos.
+//
+// `timeBand`: si viene, descarta los slots fuera de esa franja (el paciente pidió
+// "en la mañana"). Sin él, el comportamiento es idéntico al de siempre.
 export function computeAvailableSlots(params: {
   doctor: Doctor;
   busy: TimeSlot[];
@@ -147,12 +186,14 @@ export function computeAvailableSlots(params: {
   daysAhead?: number;
   maxSlots?: number;
   now?: Date;
+  timeBand?: TimeBand | null;
 }): TimeSlot[] {
   const { doctor } = params;
   const now = params.now ?? new Date();
   const fromDate = params.fromDate ?? now;
   const daysAhead = params.daysAhead ?? 14;
   const maxSlots = params.maxSlots ?? 20;
+  const timeBand = params.timeBand ?? null;
   const tz = doctor.timezone || "America/La_Paz";
 
   const allBusy = [...(params.busy ?? []), ...(params.excludeSlots ?? [])];
@@ -174,25 +215,31 @@ export function computeAvailableSlots(params: {
 
     if (!doctor.workDays.includes(weekday)) continue;
 
-    // Inicios de slot del día, en orden cronológico.
-    let dayStarts: number[];
+    // Inicios de slot del día, en orden cronológico. Se lleva la hora de pared
+    // junto al instante UTC para poder filtrar por franja sin reconvertir.
+    let dayStarts: Array<{ ms: number; hour: number }>;
 
     if (useWorkHours) {
       dayStarts = doctor
         .workHours!.map((hhmm) => {
           const { hour, minute } = parseHHMM(hhmm);
-          return zonedWallTimeToUtc(tz, year, month, day, hour, minute).getTime();
+          return { ms: zonedWallTimeToUtc(tz, year, month, day, hour, minute).getTime(), hour };
         })
-        .sort((a, b) => a - b);
+        .sort((a, b) => a.ms - b.ms);
     } else {
       const dayStart = zonedWallTimeToUtc(tz, year, month, day, startH, startM).getTime();
       const dayEnd = zonedWallTimeToUtc(tz, year, month, day, endH, endM).getTime();
+      const startMin = startH * 60 + startM;
       dayStarts = [];
-      for (let s = dayStart; s + stepMs <= dayEnd; s += stepMs) dayStarts.push(s);
+      for (let s = dayStart, i = 0; s + stepMs <= dayEnd; s += stepMs, i++) {
+        dayStarts.push({ ms: s, hour: Math.floor((startMin + i * doctor.slotMinutes) / 60) });
+      }
     }
 
-    for (const slotStart of dayStarts) {
+    for (const { ms: slotStart, hour } of dayStarts) {
       const slotEnd = slotStart + stepMs;
+
+      if (timeBand && bandOfHour(hour) !== timeBand) continue;
 
       // Descarta lo que ya pasó (con 1h de margen para coordinar).
       if (slotStart <= now.getTime() + 60 * 60 * 1000) continue;
