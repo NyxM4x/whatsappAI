@@ -41,6 +41,9 @@ export type BookingStep =
   | "collecting_reason"
   | "choosing_payment"
   | "awaiting_proof"
+  // Cancelar borra la cita y su evento sin vuelta atrás, así que se pide un sí
+  // explícito antes. "quería cancelar… bueno, mejor no" no debe destruir nada.
+  | "confirming_cancel"
   | "done";
 
 export type PaymentMethod = "qr" | "cash";
@@ -61,6 +64,7 @@ export type BookingDraft = {
   offeredSlots?: TimeSlot[];
   appointmentId?: string;
   reschedulingAppointmentId?: string;
+  cancelingAppointmentId?: string; // cita pendiente de confirmar cancelación
   paymentProofUrl?: string;
   rescheduleConfirmed?: boolean; // true si la cita original ya estaba `confirmed`
 };

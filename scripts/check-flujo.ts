@@ -11,7 +11,7 @@
 // ============================================================================
 
 import { readFileSync } from "node:fs";
-import { advanceBooking } from "../lib/clinic/booking";
+import { advanceBooking, cancelActiveAppointment } from "../lib/clinic/booking";
 import { getClinicConfig } from "../lib/clinic/config";
 import { getBookingSession, resetBookingSession } from "../lib/clinic/data";
 import type { BookingSession } from "../lib/clinic/types";
@@ -106,6 +106,32 @@ await conversacion(
   ["quiero agendar", "dónde están ubicados?", "y a qué teléfono los llamo?"],
   { debeContener: ["Moscú", "75681881"] },
 );
+
+// ── 6. Cancelación: pide confirmación y respeta el "no" ──────────────────────
+// Antes cancelaba de una, sin preguntar: "quería cancelar… mejor no" ya había
+// borrado la cita y su evento de Calendar.
+{
+  const conversationId = `test-flujo-${Date.now()}-cancel`;
+  usadas.push(conversationId);
+  console.log(`\n${"═".repeat(76)}`);
+  console.log("Cancelar sin cita activa (no debe romperse)");
+  console.log("═".repeat(76));
+
+  const r = await cancelActiveAppointment({
+    conversationId,
+    business: clinic.slug,
+    contactPhone: TELEFONO,
+    session: await getBookingSession(conversationId),
+    clinic,
+  });
+  console.log(`\n  paciente │ quiero cancelar mi cita`);
+  console.log(`  bot      │ ${corta(r.reply)}`);
+  console.log(`           └─ paso: ${r.session.step}`);
+
+  const ok = r.session.step === "idle";
+  if (!ok) fallos++;
+  console.log(`\n  ${ok ? "✓" : "✗"} sin cita activa vuelve a idle, no queda colgado en confirming_cancel`);
+}
 
 // ── Limpieza ─────────────────────────────────────────────────────────────────
 console.log(`\n${"═".repeat(76)}`);

@@ -89,7 +89,7 @@ export async function GET(request: Request) {
   const supabase = getSupabaseClient();
   const businesses = await listAllBusinessSlugs();
 
-  const results = { sent: 0, failed: 0, skipped_window_closed: 0, clinics: 0 };
+  const results = { sent: 0, failed: 0, skipped_window_closed: 0, skipped_test_phone: 0, clinics: 0 };
 
   for (const business of businesses) {
     const clinic = await getClinicConfig(business);
@@ -123,6 +123,16 @@ export async function GET(request: Request) {
 
     for (const appt of appts ?? []) {
       try {
+        // Mismo corte que el webhook: con TEST_PHONE puesta, el bot está cerrado
+        // y no debe escribirle a nadie más. El cron no pasaba por ese filtro, así
+        // que un paciente real con cita agendada habría recibido recordatorios
+        // aunque el bot estuviera cerrado para todo lo demás.
+        const testPhone = process.env.TEST_PHONE?.replace(/\D/g, "");
+        if (testPhone && String(appt.contact_phone ?? "").replace(/\D/g, "") !== testPhone) {
+          results.skipped_test_phone++;
+          continue;
+        }
+
         // WhatsApp solo permite texto libre dentro de la ventana de 24h desde el
         // último mensaje del cliente. Si la ventana está cerrada, saltamos el envío
         // (sin marcar reminder_sent) hasta tener plantillas aprobadas por Meta.

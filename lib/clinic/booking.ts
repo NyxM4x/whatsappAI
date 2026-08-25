@@ -46,6 +46,7 @@ import {
   claimAppointmentForEventCreation,
   releaseAppointmentEventClaim,
   getAppointmentStatus,
+  getAppointmentById,
 } from "@/lib/clinic/data";
 import type {
   BookingSession,
@@ -214,6 +215,43 @@ async function saveAndReturn(
 async function resetAndReturn(conversationId: string, business: string): Promise<BookingSession> {
   await resetBookingSession(conversationId, business);
   return { conversationId, step: "idle", draft: {}, hold: emptyHold() };
+}
+
+// Cierra la cita anterior de un reagendamiento: la cancela, borra su evento del
+// calendario y recién ahí consume la reprogramación.
+//
+// Se llama SOLO una vez que la cita nueva ya existe. Antes esto se hacía al
+// INICIAR el reagendamiento, y el paciente que abandonaba la conversación entre
+// medio —no le gustó ningún horario, se quedó sin batería— terminaba sin la cita
+// vieja y sin la nueva. Peor: rescheduleCount ya estaba gastado, así que al
+// volver a escribir recibía "solo se permite una reprogramación" mientras
+// findActiveAppointmentByPhone no le encontraba ninguna cita. Sin salida.
+//
+// Idempotente: si la cita ya está cancelada no vuelve a tocarla, así que da
+// igual si se llama dos veces.
+async function closePreviousAppointment(previousId: string): Promise<void> {
+  const previous = await getAppointmentById(previousId);
+  if (!previous || previous.status === "canceled") return;
+
+  await updateAppointment(previousId, {
+    status: "canceled",
+    rescheduleCount: previous.rescheduleCount + 1,
+    cancelReason: "Reagendada por el paciente",
+  });
+
+  if (previous.googleEventId && previous.doctorId) {
+    const doctor = await getDoctorById(previous.doctorId);
+    if (doctor?.googleCalendarId) {
+      try {
+        await deleteAppointmentEvent(doctor.googleCalendarId, previous.googleEventId);
+        await updateAppointment(previousId, { googleEventId: null as unknown as string });
+      } catch (err) {
+        // El evento huérfano es molesto pero no bloquea: la cita nueva ya existe
+        // y el trigger de confirmaciones vuelve a intentar el borrado.
+        console.error("deleteAppointmentEvent (reschedule) failed", err);
+      }
+    }
+  }
 }
 
 // Slots libres para un doctor, excluyendo holds y citas activas en BD.
@@ -582,6 +620,9 @@ export async function advanceBooking(params: {
         await updateAppointment(appointmentId, { paymentProofUrl: draft.paymentProofUrl });
       }
 
+      // La cita nueva ya existe: recién ahora se cierra la vieja.
+      await closePreviousAppointment(draft.reschedulingAppointmentId);
+
       const claimedReschedule = doctor.googleCalendarId
         ? await claimAppointmentForEventCreation(appointmentId)
         : false;
@@ -719,10 +760,21 @@ Ejemplos:
     // Todos los datos completos → ir a elegir pago.
     const newSession = await saveAndReturn(conversationId, business, "choosing_payment", draft, hold);
 
-    let price = 150;
-    if (draft.doctorId) {
-      const doc = await getDoctorById(draft.doctorId);
-      price = doc?.consultationPrice ?? 150;
+    // El precio sale SIEMPRE del médico. Antes había un 150 Bs de respaldo — un
+    // monto del seed viejo que hoy no existe en ningún tarifario (la clínica
+    // cobra 60 y 80). Pedirle a un paciente una cifra inventada es peor que
+    // pedirle que reintente, así que si no se puede recuperar, se corta.
+    const doc = draft.doctorId ? await getDoctorById(draft.doctorId) : null;
+    const price = doc?.consultationPrice ?? null;
+
+    if (price === null) {
+      console.error("no se pudo recuperar el precio de consulta", { doctorId: draft.doctorId });
+      return reply(
+        "Disculpe, tuve un problema al recuperar el precio de la consulta 😔 Escríbame de nuevo en un momento o llámenos al " +
+          `${clinic.generalInfo.phone} y lo resolvemos.`,
+        "none",
+        await resetAndReturn(conversationId, business),
+      );
     }
 
     return reply(
@@ -788,6 +840,13 @@ Ejemplos:
         draft = { ...draft, offeredSlots: freshSlots };
         const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
         return reply(`Justo se ocupó ese horario 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
+      }
+
+      // Si esto venía de un reagendamiento de una cita aún no confirmada, la
+      // anterior sigue viva hasta acá — cerrarla ahora evita dejar dos citas
+      // activas para el mismo paciente.
+      if (draft.reschedulingAppointmentId) {
+        await closePreviousAppointment(draft.reschedulingAppointmentId);
       }
 
       // Claim atómico: si otro proceso (ej. el trigger de confirmaciones) ya está
@@ -898,12 +957,70 @@ Ejemplos:
       return reply(`Justo se ocupó ese horario 😔 Aquí los próximos disponibles:\n\n${slotsMessage(freshSlots, clinic.timezone)}`, "none", newSession);
     }
 
+    // Mismo caso que en efectivo: reagendamiento de una cita no confirmada.
+    if (draft.reschedulingAppointmentId) {
+      await closePreviousAppointment(draft.reschedulingAppointmentId);
+    }
+
     draft = { ...draft, appointmentId };
     const newSession = await saveAndReturn(conversationId, business, "awaiting_proof", draft, hold);
     const friendlySlot = formatSlotLocal(draft.slotStart, clinic.timezone);
     return reply(
       `Perfecto 😊 Le envío el QR para el pago.\n\n📅 *${friendlySlot}*\n👨‍⚕️ ${doctor.name}\n👤 ${draft.patientName}\n💊 ${draft.reason ?? "—"}\n\nUna vez realizado el pago, envíe el *comprobante* (foto o PDF) y lo validamos. ¡Gracias! 🙏`,
       "send_qr",
+      newSession,
+    );
+  }
+
+  // ── confirming_cancel ─────────────────────────────────────────────────────
+  // Segundo paso de la cancelación: acá sí se destruye la cita. Ante cualquier
+  // respuesta que no sea un sí claro se mantiene la cita, que es el lado seguro
+  // del error.
+  if (step === "confirming_cancel") {
+    const lc = text.toLowerCase();
+    const dice_si = /\b(si|sí|sip|claro|confirmo|dale|correcto|afirmativo|asi es|así es|por favor)\b/i.test(lc);
+    const dice_no = /\b(no|nop|mejor no|olvidelo|olvídelo|dejalo|déjalo|mantener|mantenerla|cancele no)\b/i.test(lc);
+
+    if (!dice_si || dice_no) {
+      const newSession = await resetAndReturn(conversationId, business);
+      return reply(
+        dice_no
+          ? "Perfecto, su cita sigue en pie 😊 ¿Puedo ayudarle en algo más?"
+          : "No estoy seguro de haber entendido, así que dejo su cita como estaba 😊 Si desea cancelarla, escríbame *quiero cancelar mi cita*.",
+        "none",
+        newSession,
+      );
+    }
+
+    const appointmentId = draft.cancelingAppointmentId;
+    const appointment = appointmentId ? await getAppointmentById(appointmentId) : null;
+
+    if (!appointment || appointment.status === "canceled") {
+      const newSession = await resetAndReturn(conversationId, business);
+      return reply(clinic.replies.noActiveAppointment, "none", newSession);
+    }
+
+    await updateAppointment(appointment.id, { status: "canceled", cancelReason: "Cancelada por el paciente" });
+
+    if (appointment.googleEventId && appointment.doctorId) {
+      const doc = await getDoctorById(appointment.doctorId);
+      if (doc?.googleCalendarId) {
+        try {
+          await deleteAppointmentEvent(doc.googleCalendarId, appointment.googleEventId);
+          await updateAppointment(appointment.id, { googleEventId: null as unknown as string });
+        } catch (err) {
+          console.error("deleteAppointmentEvent (cancel) failed", err);
+        }
+      }
+    }
+
+    const friendlySlot = appointment.scheduledStart
+      ? formatSlotLocal(appointment.scheduledStart, clinic.timezone)
+      : "su cita";
+    const newSession = await resetAndReturn(conversationId, business);
+    return reply(
+      `Su cita del *${friendlySlot}* ha sido cancelada ✅. Si desea agendar una nueva, escríbame cuando quiera 😊`,
+      "none",
       newSession,
     );
   }
@@ -1152,36 +1269,40 @@ export async function cancelActiveAppointment(params: {
 }): Promise<BookingResult> {
   const { conversationId, business, contactPhone, clinic } = params;
 
-  // Resetear sesión PRIMERO para que la máquina no quede colgada.
-  await resetBookingSession(conversationId, business);
-
   const appointment = await findActiveAppointmentByPhone(business, contactPhone);
   if (!appointment) {
+    await resetBookingSession(conversationId, business);
     return reply(clinic.replies.noActiveAppointment, "none", { conversationId, step: "idle", draft: {}, hold: emptyHold() });
   }
 
-  await updateAppointment(appointment.id, { status: "canceled" });
-
-  if (appointment.googleEventId && appointment.doctorId) {
-    const doctor = await getDoctorById(appointment.doctorId);
-    if (doctor?.googleCalendarId) {
-      try {
-        await deleteAppointmentEvent(doctor.googleCalendarId, appointment.googleEventId);
-        await updateAppointment(appointment.id, { googleEventId: null as unknown as string });
-      } catch (err) {
-        console.error("deleteAppointmentEvent (cancel) failed", err);
-      }
-    }
-  }
-
+  // NO se cancela todavía. Cancelar borra la cita y su evento de Calendar sin
+  // vuelta atrás, y el patrón que dispara esto es tan amplio como /cancelar|anular/:
+  // un "quería cancelar… mejor no" alcanzaba para destruirla. Se muestra la cita
+  // y se espera un sí explícito; lo ejecuta el paso confirming_cancel.
+  const doctor = appointment.doctorId ? await getDoctorById(appointment.doctorId) : null;
   const friendlySlot = appointment.scheduledStart
     ? formatSlotLocal(appointment.scheduledStart, clinic.timezone)
     : "su cita";
 
+  const newSession = await saveAndReturn(
+    conversationId,
+    business,
+    "confirming_cancel",
+    { cancelingAppointmentId: appointment.id },
+    emptyHold(),
+  );
+
   return reply(
-    `Su cita del *${friendlySlot}* ha sido cancelada ✅. Si desea agendar una nueva, escríbame cuando quiera 😊`,
+    [
+      `¿Confirma que desea cancelar esta cita?`,
+      ``,
+      `📅 ${friendlySlot}`,
+      doctor ? `👨‍⚕️ ${doctor.name}` : null,
+      ``,
+      `Responda *SÍ* para cancelarla o *NO* para mantenerla 😊`,
+    ].filter((l) => l !== null).join("\n"),
     "none",
-    { conversationId, step: "idle", draft: {}, hold: emptyHold() },
+    newSession,
   );
 }
 
@@ -1213,21 +1334,10 @@ export async function rescheduleActiveAppointment(params: {
     return reply("No pude recuperar los datos de su cita. Contáctenos directamente.", "none", { conversationId, step: "idle", draft: {}, hold: emptyHold() });
   }
 
-  // Cancelar la cita anterior.
-  await updateAppointment(appointment.id, { status: "canceled", rescheduleCount: appointment.rescheduleCount + 1 });
-
-  if (appointment.googleEventId && appointment.doctorId) {
-    const doctor = await getDoctorById(appointment.doctorId);
-    if (doctor?.googleCalendarId) {
-      try {
-        await deleteAppointmentEvent(doctor.googleCalendarId, appointment.googleEventId);
-        await updateAppointment(appointment.id, { googleEventId: null as unknown as string });
-      } catch (err) {
-        console.error("deleteAppointmentEvent (reschedule) failed", err);
-      }
-    }
-  }
-
+  // La cita anterior se mantiene VIVA hasta que el paciente elija el horario
+  // nuevo; la cierra closePreviousAppointment() una vez creada la nueva. Si acá
+  // se cancelara por adelantado, abandonar la conversación en este punto dejaría
+  // al paciente sin ninguna de las dos.
   const doctor = await getDoctorById(appointment.doctorId);
   if (!doctor) {
     await resetBookingSession(conversationId, business);
@@ -1255,8 +1365,10 @@ export async function rescheduleActiveAppointment(params: {
     rescheduleConfirmed,
   };
   const newSession = await saveAndReturn(conversationId, business, "choosing_slot", draft, emptyHold());
+  // El texto ya no dice "anulé su cita anterior": ahora sigue vigente hasta que
+  // elija el horario nuevo, y sería mentirle si abandona acá.
   const intro = rescheduleConfirmed
-    ? "Anulé su cita anterior 😊 Elija el nuevo horario (no necesita volver a pagar):"
-    : "Anulé su cita anterior 😊 Elija el nuevo horario:";
+    ? "Claro 😊 Elija el nuevo horario y muevo su cita (no necesita volver a pagar):"
+    : "Claro 😊 Elija el nuevo horario y muevo su cita:";
   return reply(`${intro}\n\n${slotsMessage(slots, clinic.timezone)}`, "none", newSession);
 }
