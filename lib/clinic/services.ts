@@ -67,9 +67,9 @@ export const defaultServices: ServiceItem[] = [
   // ── Procedimientos ──────────────────────────────────────────────────────
   { name: "Papanicolaou", price: 100, category: "procedimiento", aliases: ["papanicolau", "papanicolao", "pap", "citologia"] },
   { name: "Colocación de DIU", price: 150, category: "procedimiento", aliases: ["poner diu", "colocacion diu", "diu"] },
-  { name: "Retiro de DIU", price: 100, category: "procedimiento", aliases: ["sacar diu", "quitar diu"] },
+  { name: "Retiro de DIU", price: 100, category: "procedimiento", aliases: ["sacar diu", "sacar el diu", "quitar diu", "quitar el diu", "retirar el diu"] },
   { name: "Colocación de implante", price: 480, category: "procedimiento", aliases: ["poner implante", "implante anticonceptivo", "implante"] },
-  { name: "Retiro de implante", price: 100, category: "procedimiento", aliases: ["sacar implante", "quitar implante"] },
+  { name: "Retiro de implante", price: 100, category: "procedimiento", aliases: ["sacar implante", "sacar el implante", "quitar implante", "quitar el implante", "retirar el implante"] },
   { name: "Cirugía menor", price: 300, category: "procedimiento", aliases: ["cirugia pequeña", "operacion menor"] },
   { name: "Cirugía mediana", price: 600, category: "procedimiento", aliases: ["operacion mediana"] },
   { name: "Cirugía mayor", price: 800, category: "procedimiento", aliases: ["operacion mayor", "cirugia grande"] },
@@ -99,9 +99,12 @@ export const defaultServices: ServiceItem[] = [
   { name: "Curación grande", price: 100, category: "enfermeria", aliases: ["curacion grande"] },
   { name: "Sutura por punto (enfermería)", price: 15, category: "enfermeria", aliases: ["punto de sutura enfermeria", "sutura enfermeria"] },
   { name: "Sutura por punto (médico)", price: 20, category: "enfermeria", aliases: ["punto de sutura medico", "sutura medico", "sutura", "suturar"] },
-  { name: "Lavado de oído", price: 80, category: "enfermeria", note: "lunes a viernes", aliases: ["lavado de oido", "limpieza de oido", "destapar oido"] },
+  { name: "Lavado de oído", price: 80, category: "enfermeria", note: "lunes a viernes", aliases: ["lavado de oido", "limpieza de oido", "destapar oido", "destapar el oido", "lavar el oido", "lavar oido"] },
   { name: "Lavado de oído fin de semana", price: 100, category: "enfermeria", note: "sábado y domingo", aliases: ["lavado de oido sabado", "lavado de oido domingo"] },
-  { name: "Retiro de puntos (1 a 10 puntos)", price: 25, category: "enfermeria", aliases: ["sacar puntos", "retiro de puntos", "quitar puntos"] },
+  // Los alias con artículo ("sacar los puntos") están a propósito: normalize()
+  // unifica el verbo pero no borra artículos — hacerlo rompería "retiro de uña",
+  // que al quitarle la tilde de la ñ queda como "retiro de una".
+  { name: "Retiro de puntos (1 a 10 puntos)", price: 25, category: "enfermeria", aliases: ["sacar puntos", "sacar los puntos", "retiro de puntos", "quitar puntos", "quitar los puntos"] },
   { name: "Retiro de puntos (10 a 30 puntos)", price: 40, category: "enfermeria", aliases: ["retiro de muchos puntos"] },
 
   // ── Certificados ────────────────────────────────────────────────────────
@@ -123,14 +126,39 @@ export function formatServicePrice(service: ServiceItem): string {
     : `${service.price} Bs`;
 }
 
-// Minúsculas + sin tildes, para comparar "ecografía" con "ecografia".
+// Los alias del catálogo están en infinitivo ("sacar puntos"), pero el paciente
+// conjuga: "que me saquen puntos", "quiero sacarme los puntos", "sáquenme".
+// Como el match es por substring, esas formas no daban en el blanco. Acá se
+// llevan las familias verbales frecuentes a una forma única; se aplica a los
+// DOS lados de la comparación, así que texto y alias convergen igual.
+//
+// Deliberadamente corto: solo los verbos con que se piden estos servicios. No
+// pretende ser un lematizador — para lo que no cubra, el mensaje sigue al Q&A
+// general, que ya tiene el tarifario completo en su prompt.
+const FORMAS_VERBALES: [RegExp, string][] = [
+  [/\bsaqu\w+|\bsacar\w*|\bsacame\b/g, "sacar"],
+  [/\bquit\w+/g, "quitar"],
+  [/\bretir\w+/g, "retirar"],
+  [/\bpong\w+|\bponer\w*|\bponme\b/g, "poner"],
+  [/\bcoloc\w+/g, "colocar"],
+  [/\bhag\w+|\bhacer\w*|\bhaganme\b/g, "hacer"],
+  [/\bdestap\w+/g, "destapar"],
+  [/\blav\w+/g, "lavar"],
+];
+
+// Minúsculas + sin tildes + verbos unificados, para comparar "ecografía" con
+// "ecografia" y "me saquen puntos" con "sacar puntos".
 function normalize(text: string): string {
-  return text
+  let out = text
     .toLowerCase()
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+
+  for (const [patron, forma] of FORMAS_VERBALES) out = out.replace(patron, forma);
+
+  return out;
 }
 
 // ¿Qué servicio del catálogo menciona este mensaje? Compara el texto contra el

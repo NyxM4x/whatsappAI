@@ -55,7 +55,7 @@ import type {
   Doctor,
   PaymentMethod,
 } from "@/lib/clinic/types";
-import type { ClinicConfig } from "@/lib/clinic/config";
+import { buildClinicSystemPrompt, type ClinicConfig } from "@/lib/clinic/config";
 
 // ─── Tipos de resultado ──────────────────────────────────────────────────────
 
@@ -156,20 +156,32 @@ Responde ÚNICAMENTE con el JSON.`,
 }
 
 // Responde una pregunta del cliente dentro del flujo de reserva sin perder el paso actual.
+//
+// Usa el MISMO system prompt que el Q&A general del webhook. Antes armaba uno
+// propio de cinco líneas, sin ningún dato del negocio: preguntarle "¿dónde
+// están ubicados?" en mitad de una reserva devolvía "en el corazón de la
+// ciudad" en vez de la dirección real. Con buildClinicSystemPrompt hay una
+// sola fuente de verdad — si cambia la dirección en clinic_settings, cambia
+// acá también.
 async function replyInContext(
   userText: string,
   contextHint: string,
   followUp: string,
   session: BookingSession,
+  clinic: ClinicConfig,
 ): Promise<BookingResult> {
+  const system = [
+    buildClinicSystemPrompt(clinic),
+    "",
+    `CONTEXTO: el paciente está agendando una cita y va por el paso "${contextHint}".`,
+    "Responde su pregunta en pocas líneas y después invítalo con naturalidad a seguir con el agendamiento.",
+    "La disponibilidad y los horarios de cada médico los resuelve el sistema, no vos: nunca los inventes ni los prometas.",
+  ].join("\n");
+
   try {
     const { text } = await generateText({
       model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
-      system: `Eres la recepcionista virtual de la Clínica San Martín de Porres (Bolivia).
-Estás ayudando a un paciente a agendar una cita y está en el paso: ${contextHint}.
-Responde su pregunta de forma breve y cálida, como una recepcionista boliviana empática.
-Al final de tu respuesta, invítalo suavemente a continuar con el agendamiento.
-No inventes horarios, precios ni doctores. Si no sabes algo, dile que puede llamar al +591 75681881.`,
+      system,
       prompt: userText,
       temperature: 0.5,
       abortSignal: AbortSignal.timeout(10000),
@@ -360,7 +372,7 @@ export async function advanceBooking(params: {
 
     if (!idx || idx < 1 || idx > specialties.length) {
       const lines = specialties.map((s, i) => `  ${i + 1}. ${s.name}`).join("\n");
-      return replyInContext(text, "eligiendo especialidad", `¿Cuál de estas especialidades necesita?\n\n${lines}`, session);
+      return replyInContext(text, "eligiendo especialidad", `¿Cuál de estas especialidades necesita?\n\n${lines}`, session, clinic);
     }
 
     const specialty = specialties[idx - 1];
@@ -399,7 +411,7 @@ export async function advanceBooking(params: {
 
     if (!idx || !doctors[idx - 1]) {
       const lines = doctors.map((d, i) => `  ${i + 1}. ${d.name}`).join("\n");
-      return replyInContext(text, "eligiendo médico", `¿Con cuál de estos médicos prefiere?\n\n${lines}`, session);
+      return replyInContext(text, "eligiendo médico", `¿Con cuál de estos médicos prefiere?\n\n${lines}`, session, clinic);
     }
 
     const doctor = doctors[idx - 1];
@@ -471,7 +483,7 @@ export async function advanceBooking(params: {
     }
 
     if (!idx || !slots[idx - 1]) {
-      return replyInContext(text, "eligiendo horario", slotsMessage(slots, clinic.timezone), session);
+      return replyInContext(text, "eligiendo horario", slotsMessage(slots, clinic.timezone), session, clinic);
     }
 
     const chosen = slots[idx - 1];

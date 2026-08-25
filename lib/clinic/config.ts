@@ -92,9 +92,18 @@ const defaultClinicConfig = {
   emergencyResponse:
     "🚨 Diríjase inmediatamente a Emergencias. Comparta su ubicación en tiempo real con una persona cercana y solicite ayuda inmediata.\n\n📍 Av. Moscú, a una cuadra del Mercado La Cuchilla\n🗺️ https://maps.app.goo.gl/RcMqdE3z8NX1ZULG6\n📞 +591 75681881",
 
-  // Dispara el flujo de agendamiento.
+  // Dispara el flujo de agendamiento. Es un fast-path: lo que no cae acá lo
+  // decide GPT en el webhook, así que conviene cubrir bien las formas comunes
+  // para ahorrar esa llamada (y no depender de que responda).
+  //
+  // "ficha" es como los pacientes bolivianos piden un turno — la usaron varios
+  // el 2026-08-24 y ninguno entraba por acá.
+  //
+  // OJO con "atiend": va anclado a "me atiend…" a propósito. Suelto capturaría
+  // "¿a qué hora atienden?" o "¿atienden los domingos?", que son preguntas de
+  // horario, y les arrancaría una reserva que nadie pidió.
   bookingIntentPatterns:
-    /\bagendar|agenda|cita|citas|turno|reserva\w*|sacar (una|un)|quiero (una|un)? ?(cita|turno|consulta)|atender\w*|consultar con/i,
+    /\bagendar|agenda|cita|citas|turno|ficha\w*|reserva\w*|sacar (una|un)|quiero (una|un)? ?(cita|turno|consulta|ficha)|atender\w*|me atiend\w*|consultar con/i,
 
   // Dispara cancelación/reprogramación.
   cancelIntentPatterns: /\bcancelar|anular|cancela mi/i,
