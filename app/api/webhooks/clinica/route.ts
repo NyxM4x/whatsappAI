@@ -49,7 +49,7 @@ import {
   rescheduleActiveAppointment,
   checkActiveAppointment,
 } from "@/lib/clinic/booking";
-import { getBookingSession } from "@/lib/clinic/data";
+import { getBookingSession, saveBookingSession } from "@/lib/clinic/data";
 
 // Node runtime y ventana amplia: el debounce duerme unos segundos dentro de la
 // invocación, así que subimos el límite por defecto de Vercel (10s).
@@ -59,6 +59,20 @@ export const maxDuration = 30;
 // Ventana de debounce para agrupar mensajes seguidos del mismo cliente.
 const DEBOUNCE_MS = Number(process.env.MESSAGE_DEBOUNCE_MS ?? 6000);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// El cliente quiere salir del flujo en curso (sea una reserva o la coordinación
+// de un servicio). OJO: no incluir "para" ni "nada" sueltos — son palabras
+// comunes ("para las 5", "no es nada grave") y cerraban el flujo por error.
+const WANTS_OUT_PATTERN =
+  /\b(no quiero|ya no quiero|cancela|cancelar|salir|déjalo|dejalo|olvíd\w+|olvida|olvidalo|mejor no|stop|no gracias)\b/i;
+
+// ¿La respuesta del paciente es una preferencia de horario y no otra duda?
+// Cubre horas ("a las 3", "15:30"), franjas, días y comodines ("cuando sea").
+// Si no coincide, el mensaje se trata como pregunta y se le vuelve a preguntar.
+// Un número suelto NO cuenta como hora: "tengo 40 años y fumo" es una duda, no
+// un horario. Se exige contexto ("a las 3", "15:30", "9 am").
+const TIME_PREFERENCE_PATTERN =
+  /\b(a las \d{1,2}|\d{1,2}[:.]\d{2}|\d{1,2}\s*(am|pm|hrs?|horas?)|ma[ñn]ana|tarde|noche|mediod[ií]a|hoy|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|fin de semana|feriado|cualquier\w*|cuando (sea|pueda|guste|usted)|el que sea|lo antes posible|cuanto antes)\b/i;
 
 // ─── GET: verificación del webhook de Kapso ───────────────────────────────────
 
@@ -275,9 +289,10 @@ export async function POST(request: Request) {
   // ── 2b. Servicio del tarifario que NO es consulta ─────────────────────────
   // Ecografías, procedimientos, cirugías, partos, enfermería y certificados no
   // se agendan por WhatsApp: requieren valoración previa y el precio final
-  // puede variar. Se informa el precio del tarifario y se pausa el bot para
-  // que un asesor humano continúe. Las consultas (bookable) NO se interceptan:
-  // siguen al flujo de agenda + pago de siempre.
+  // puede variar. Se informa el precio del tarifario y se le pregunta qué
+  // horario le acomoda; con esa respuesta (paso 2c) se deriva a un asesor, que
+  // es quien confirma la disponibilidad real. Las consultas (bookable) NO se
+  // interceptan: siguen al flujo de agenda + pago de siempre.
   //
   // Va después de cargar la sesión a propósito: con una reserva en curso el
   // paciente puede escribir "ecografía" respondiendo otra cosa, y cortarle el
@@ -285,14 +300,90 @@ export async function POST(request: Request) {
   if (session.step === "idle" && newText.trim()) {
     const service = matchService(newText, clinic.services);
     if (service && !service.bookable) {
-      await pauseBotForHumanHandoff(conversationId);
+      const quote = formatServicePrice(service);
+      await saveBookingSession({
+        conversationId,
+        business: clinic.slug,
+        step: "awaiting_service_time",
+        draft: { serviceName: service.name, serviceQuote: quote },
+        hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
+      });
       replyText =
-        `*${service.name}*: ${formatServicePrice(service)} 😊` +
+        `*${service.name}*: ${quote} 😊` +
         (service.note ? `\n_${service.note}_` : "") +
-        "\n\nEste servicio requiere una valoración previa, así que un asesor de la clínica le escribirá en un momento para coordinarlo. 🙏";
+        "\n\n¿Qué día y en qué horario le quedaría cómodo? Con ese dato lo coordinamos con un asesor de la clínica. 🙏";
       await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
       return new Response("ok", { status: 200 });
     }
+  }
+
+  // ── 2c. Respuesta al horario preferido de un servicio no agendable ────────
+  // Va ANTES del bloque de sesión activa a propósito: advanceBooking no conoce
+  // este paso. Tres salidas: se arrepintió, dio un horario (→ asesor), o hizo
+  // otra pregunta (se le responde y se le repregunta el horario).
+  if (session.step === "awaiting_service_time" && newText.trim()) {
+    const serviceName = session.draft.serviceName ?? "el servicio consultado";
+    const serviceQuote = session.draft.serviceQuote;
+
+    if (WANTS_OUT_PATTERN.test(newText)) {
+      await saveBookingSession({
+        conversationId,
+        business: clinic.slug,
+        step: "idle",
+        draft: {},
+        hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
+      });
+      replyText = "Entendido 😊 Si más adelante desea coordinarlo, con gusto le ayudo. ¿Puedo ayudarle en algo más?";
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
+      return new Response("ok", { status: 200 });
+    }
+
+    if (TIME_PREFERENCE_PATTERN.test(newText)) {
+      await saveBookingSession({
+        conversationId,
+        business: clinic.slug,
+        step: "idle",
+        draft: {},
+        hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
+      });
+      await pauseBotForHumanHandoff(conversationId);
+      await logSystemEvent({
+        level: "info",
+        eventType: "service_handoff_requested",
+        business: clinic.slug,
+        conversationId,
+        contactPhone,
+        metadata: { service: serviceName, preferredTime: newText.slice(0, 200) },
+      });
+      replyText =
+        `¡Perfecto! 😊 Anoté *${serviceName}*${serviceQuote ? ` (${serviceQuote})` : ""} para *${newText.trim()}*.` +
+        "\n\nLe paso toda la información a un asesor de la clínica para confirmarle la disponibilidad. En un momento se comunica con usted 🙏";
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
+      return new Response("ok", { status: 200 });
+    }
+
+    // No dio un horario: es una duda. Se responde con el Q&A general y se
+    // mantiene el paso (la sesión expira sola por TTL si abandona).
+    try {
+      const history = await getRecentConversationHistory(conversationId, 8);
+      const { text } = await generateText({
+        model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+        system: buildClinicSystemPrompt(clinic),
+        messages: [
+          ...history.map((h) => ({ role: h.role as "user" | "assistant", content: h.content })),
+          { role: "user", content: newText },
+        ],
+        temperature: 0.35,
+        abortSignal: AbortSignal.timeout(15000),
+      });
+      replyText =
+        (text.trim() || `Con gusto le ayudo con *${serviceName}* 😊`) +
+        "\n\n_¿Qué día y en qué horario le quedaría cómodo? Así lo coordinamos con un asesor._";
+    } catch {
+      replyText = `Para coordinar *${serviceName}* dígame qué día y en qué horario le quedaría cómodo 😊`;
+    }
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
+    return new Response("ok", { status: 200 });
   }
 
   // ── 3. Comprobante de pago (media entrante) ───────────────────────────────
@@ -345,11 +436,7 @@ export async function POST(request: Request) {
   // ── 4b. Sesión de reserva activa ──────────────────────────────────────────
   if (session.step !== "idle" && newText.trim()) {
     // Detectar si el cliente quiere salir del flujo o hacer otra cosa.
-    // OJO: no incluir "para" ni "nada" sueltos aquí — son palabras comunes
-    // ("para las 5", "no es nada grave") y cerraban el flujo por error.
-    const wantsOut = /\b(no quiero|ya no quiero|cancela|cancelar|salir|déjalo|dejalo|olvíd\w+|olvida|olvidalo|mejor no|stop|no gracias)\b/i.test(newText);
-    if (wantsOut) {
-      const { saveBookingSession } = await import("@/lib/clinic/data");
+    if (WANTS_OUT_PATTERN.test(newText)) {
       await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {}, hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null } });
       replyText = "Entendido 😊 Si en algún momento desea agendar una cita, con gusto le ayudo. ¿Puedo ayudarle en algo más?";
       await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
@@ -465,7 +552,11 @@ export async function POST(request: Request) {
       contactPhone,
       errorMessage: getErrorMessage(err),
     });
-    replyText = "Lo sentimos, hubo un problema al procesar su consulta. Por favor intente nuevamente o llámenos al +591 75681881.";
+    // Si el modelo no responde no dejamos al paciente sin salida ni le damos un
+    // teléfono: se deriva de verdad, pausando el bot para que lo tome el equipo.
+    await pauseBotForHumanHandoff(conversationId);
+    replyText =
+      "Disculpe, tuve un problema para procesar su consulta 🙏 Ya estamos derivando su petición a un asesor de la clínica, que le atenderá en un momento.";
   }
 
   await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });

@@ -46,7 +46,7 @@ const defaultClinicConfig = {
 
   generalInfo: {
     address: "Av. Moscú, a una cuadra del Mercado La Cuchilla",
-    phone: "+591 75681881",
+    phone: "+591 773 85 200",
     mapsUrl: "https://maps.app.goo.gl/RcMqdE3z8NX1ZULG6",
     hours: "Lunes a Sábado, 8:00 a 20:00",
   },
@@ -90,7 +90,7 @@ const defaultClinicConfig = {
     "emergencia",
   ],
   emergencyResponse:
-    "🚨 Diríjase inmediatamente a Emergencias. Comparta su ubicación en tiempo real con una persona cercana y solicite ayuda inmediata.\n\n📍 Av. Moscú, a una cuadra del Mercado La Cuchilla\n🗺️ https://maps.app.goo.gl/RcMqdE3z8NX1ZULG6\n📞 +591 75681881",
+    "🚨 Diríjase inmediatamente a Emergencias. Comparta su ubicación en tiempo real con una persona cercana y solicite ayuda inmediata.\n\n📍 Av. Moscú, a una cuadra del Mercado La Cuchilla\n🗺️ https://maps.app.goo.gl/RcMqdE3z8NX1ZULG6\n📞 +591 773 85 200",
 
   // Dispara el flujo de agendamiento. Es un fast-path: lo que no cae acá lo
   // decide GPT en el webhook, así que conviene cubrir bien las formas comunes
@@ -148,6 +148,23 @@ SÍNTOMAS: si la persona cuenta un malestar y no sabe a quién acudir, podés or
 sobre qué especialidad le corresponde, eligiendo SIEMPRE una de las que la clínica tiene
 listadas. Nunca digas qué le pasa ni por qué: no es un diagnóstico, es solo orientarla.
 Ante la duda, Medicina General.
+
+PLANIFICACIÓN FAMILIAR: la clínica tiene una campaña vigente de implante subdérmico
+anticonceptivo. Podés dar tal cual estos datos del método: protección de larga duración
+(5 años), 99% de efectividad, es reversible (se retira cuando la paciente lo decida) y la
+colocación es rápida, ambulatoria y la realiza personal profesional. El precio de campaña
+está en el tarifario: citalo de ahí, nunca de memoria.
+
+MÉTODOS ANTICONCEPTIVOS QUE OFRECE LA CLÍNICA: implante subdérmico (colocación y retiro),
+DIU (colocación y retiro), ligadura, y consejería anticonceptiva dentro de la consulta de
+ginecología. No menciones ni cotices ningún otro método (pastillas, inyectables, parches,
+preservativos): si preguntan por uno, invitá a una consulta de ginecología para que la
+médica le oriente.
+
+DUDAS MÉDICAS del método (si le conviene, efectos secundarios, sangrados, si puede usarlo
+con alguna condición, embarazo o lactancia): no respondas con criterio propio. Decí con
+calidez que eso lo evalúa la ginecóloga en la valoración previa. Nunca describas el
+procedimiento paso a paso ni afirmes que es indoloro o que no tiene riesgos.
 
 DISPONIBILIDAD: nunca prometas un horario, un día, una franja ni "el médico que atiende
 más temprano". Eso lo resuelve el sistema al agendar, no vos: invitá a agendar y el
@@ -319,7 +336,7 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
     buildServicesBlock(clinic.services),
     "",
     "Si preguntan por una especialidad o doctor en particular y no lo tienes, invita a agendar para verificar disponibilidad.",
-    "Si preguntan por un servicio del tarifario que NO es una consulta (ecografías, procedimientos, cirugías, partos, enfermería, certificados): informa el precio, aclara que requiere una valoración previa y avisa que un asesor del equipo continuará la atención. No intentes agendarlo vos.",
+    "Si preguntan por un servicio del tarifario que NO es una consulta (ecografías, procedimientos, cirugías, partos, enfermería, certificados): informa el precio, pregúntale qué día y horario le quedaría cómodo, y aclara que con ese dato un asesor del equipo le confirma la disponibilidad. No confirmes vos el horario ni intentes agendarlo.",
     "",
     "REGLAS CRÍTICAS (repetidas por prioridad — nunca las rompas):",
     "- No inventes precios, doctores, especialidades, horarios ni disponibilidad que no estén arriba. Si no está en los datos provistos, no existe para vos. Nunca estimes ni redondees un precio que no figure en el tarifario.",

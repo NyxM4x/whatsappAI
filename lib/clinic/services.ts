@@ -25,10 +25,19 @@ export type ServiceCategory =
   | "certificado"
   | "obstetricia";
 
+// Precio de campaña vigente. `price` se conserva como el precio regular: el bot
+// cotiza el promocional y aclara cuál es el de lista, para que la rebaja se lea
+// como tal y para poder retirar la campaña borrando solo este campo.
+export type ServicePromo = {
+  price: number;
+  label: string; // cómo se nombra la campaña al paciente ("precio de campaña")
+};
+
 export type ServiceItem = {
   name: string;
   price: number;      // precio base en Bs
   priceMax?: number;  // rangos del tarifario (ej. cesárea multigesta 3800/4200)
+  promo?: ServicePromo;
   category: ServiceCategory;
   bookable?: boolean; // true solo para consultas (flujo de agenda + pago)
   note?: string;      // "L-V", "Sáb/Dom", aclaraciones del tarifario
@@ -68,8 +77,12 @@ export const defaultServices: ServiceItem[] = [
   { name: "Papanicolaou", price: 100, category: "procedimiento", aliases: ["papanicolau", "papanicolao", "pap", "citologia"] },
   { name: "Colocación de DIU", price: 150, category: "procedimiento", aliases: ["poner diu", "colocacion diu", "diu"] },
   { name: "Retiro de DIU", price: 100, category: "procedimiento", aliases: ["sacar diu", "sacar el diu", "quitar diu", "quitar el diu", "retirar el diu"] },
-  { name: "Colocación de implante", price: 480, category: "procedimiento", aliases: ["poner implante", "implante anticonceptivo", "implante"] },
-  { name: "Retiro de implante", price: 100, category: "procedimiento", aliases: ["sacar implante", "sacar el implante", "quitar implante", "quitar el implante", "retirar el implante"] },
+  // Campaña de planificación familiar: 400 Bs en vez de los 480 de lista. Los
+  // alias NO incluyen genéricos ("anticonceptivo", "planificación familiar"):
+  // engancharían preguntas sobre pastillas o inyectables, que la clínica no
+  // ofrece, y dispararían la derivación a un asesor por nada.
+  { name: "Colocación de implante subdérmico", price: 480, promo: { price: 400, label: "precio de campaña" }, category: "procedimiento", aliases: ["poner implante", "implante anticonceptivo", "implante subdermico", "implante hormonal", "subdermico", "implante"] },
+  { name: "Retiro de implante subdérmico", price: 100, category: "procedimiento", aliases: ["sacar implante", "sacar el implante", "quitar implante", "quitar el implante", "retirar el implante"] },
   { name: "Cirugía menor", price: 300, category: "procedimiento", aliases: ["cirugia pequeña", "operacion menor"] },
   { name: "Cirugía mediana", price: 600, category: "procedimiento", aliases: ["operacion mediana"] },
   { name: "Cirugía mayor", price: 800, category: "procedimiento", aliases: ["operacion mayor", "cirugia grande"] },
@@ -119,8 +132,12 @@ export const defaultServices: ServiceItem[] = [
   { name: "Ligadura", price: 400, category: "obstetricia", aliases: ["ligadura de trompas", "ligarme"] },
 ];
 
-// Precio legible: "100 Bs", "3800 a 4200 Bs".
+// Precio legible: "100 Bs", "3800 a 4200 Bs", y con campaña vigente
+// "400 Bs (precio de campaña, regular 480 Bs)".
 export function formatServicePrice(service: ServiceItem): string {
+  if (service.promo) {
+    return `${service.promo.price} Bs (${service.promo.label}, regular ${service.price} Bs)`;
+  }
   return service.priceMax
     ? `${service.price} a ${service.priceMax} Bs`
     : `${service.price} Bs`;

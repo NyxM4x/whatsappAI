@@ -62,6 +62,10 @@ export type BookingStep =
   | "collecting_reason"
   | "choosing_payment"
   | "awaiting_proof"
+  // Servicio del tarifario que no se agenda por WhatsApp (implante, ecografías,
+  // cirugías…): se le pregunta al paciente qué horario le acomoda y con esa
+  // respuesta se deriva a un asesor. No pasa por advanceBooking.
+  | "awaiting_service_time"
   // Cancelar borra la cita y su evento sin vuelta atrás, así que se pide un sí
   // explícito antes. "quería cancelar… bueno, mejor no" no debe destruir nada.
   | "confirming_cancel"
@@ -89,6 +93,8 @@ export type BookingDraft = {
   reschedulingAppointmentId?: string;
   cancelingAppointmentId?: string; // cita pendiente de confirmar cancelación
   paymentProofUrl?: string;
+  serviceName?: string;  // servicio no agendable en curso (awaiting_service_time)
+  serviceQuote?: string; // su precio ya formateado, para repetirlo al confirmar
   rescheduleConfirmed?: boolean; // true si la cita original ya estaba `confirmed`
 };
 

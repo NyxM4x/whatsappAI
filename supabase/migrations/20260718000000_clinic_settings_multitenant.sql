@@ -88,7 +88,7 @@ values (
   'Clínica San Martín de Porres',
   'America/La_Paz',
   'Av. Moscú, a una cuadra del Mercado La Cuchilla',
-  '+591 75681881',
+  '+591 773 85 200',
   'https://maps.app.goo.gl/RcMqdE3z8NX1ZULG6',
   'Lunes a Sábado, 8:00 a 20:00',
   'Bienvenido a Clínica San Martín de Porres 😊 ¿En qué podemos ayudarle?',
@@ -113,7 +113,7 @@ values (
 
 📍 Av. Moscú, a una cuadra del Mercado La Cuchilla
 🗺️ https://maps.app.goo.gl/RcMqdE3z8NX1ZULG6
-📞 +591 75681881',
+📞 +591 773 85 200',
   '
 Eres el asistente virtual de la Clínica San Martín de Porres y atiendes por WhatsApp.
 Hablas cálido, cercano, profesional y empático, como una recepcionista de Bolivia.

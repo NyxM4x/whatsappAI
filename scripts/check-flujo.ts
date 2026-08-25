@@ -104,7 +104,7 @@ await conversacion("Abandonar el flujo a mitad", ["quiero una cita", "medicina g
 await conversacion(
   "Pregunta fuera de contexto sin perder el paso",
   ["quiero agendar", "dónde están ubicados?", "y a qué teléfono los llamo?"],
-  { debeContener: ["Moscú", "75681881"] },
+  { debeContener: ["Moscú", "773 85 200"] },
 );
 
 // ── 6. Cancelación: pide confirmación y respeta el "no" ──────────────────────

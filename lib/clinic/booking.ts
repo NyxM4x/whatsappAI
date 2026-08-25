@@ -819,7 +819,7 @@ export async function advanceBooking(params: {
     const specialties = await getSpecialties(business);
     if (!specialties.length) {
       return reply(
-        "Lo sentimos, en este momento no hay especialidades disponibles. Contáctenos al +591 75681881.",
+        "Lo sentimos, en este momento no puedo mostrarle las especialidades 🙏 Ya estamos derivando su petición a un asesor de la clínica para que le atienda.",
         "none",
         { conversationId, step: "idle", draft: {}, hold: emptyHold() },
       );
@@ -1454,7 +1454,7 @@ export async function handlePaymentProof(params: {
     });
     const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
     return reply(
-      "¡Gracias por su comprobante! 🙏 Estamos terminando de procesar su confirmación, en unos minutos le avisamos. Si no recibe noticias, contáctenos al +591 75681881.",
+      "¡Gracias por su comprobante! 🙏 Estamos terminando de procesar su confirmación, en unos minutos le avisamos. Ya derivamos su petición a un asesor de la clínica, que le confirmará en un momento.",
       "none",
       newSession,
     );
@@ -1579,7 +1579,7 @@ export async function handlePaymentProof(params: {
       friendlySlot ? `📅 ${friendlySlot}` : null,
       doctor ? `👨‍⚕️ ${doctor.name}` : null,
       ``,
-      `Le esperamos en la Clínica San Martín de Porres. Cualquier consulta llámenos al +591 75681881. ¡Hasta pronto! 🙏`,
+      `Le esperamos en la Clínica San Martín de Porres. Cualquier consulta, escríbanos por aquí. ¡Hasta pronto! 🙏`,
     ].filter((l) => l !== null).join("\n"),
     "none",
     newSession,

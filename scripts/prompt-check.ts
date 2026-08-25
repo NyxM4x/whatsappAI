@@ -129,6 +129,39 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "cotiza el precio de campaña del implante (400 Bs, no 480)",
+    prompt: "¿Cuánto cuesta ponerse el implante?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (!/400\s*bs/.test(r)) return "no mencionó el precio de campaña (400 Bs)";
+      // 480 puede aparecer como precio regular, pero nunca solo.
+      if (/480\s*bs/.test(r) && !/400\s*bs/.test(r)) return "cotizó el precio regular en vez del de campaña";
+      return null;
+    },
+  },
+  {
+    name: "no cotiza un anticonceptivo que la clínica no ofrece (pastillas)",
+    prompt: "¿Venden pastillas anticonceptivas? ¿Cuánto salen?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (/\b\d{1,4}\s*bs\b/.test(r)) return "dio un precio para un método que la clínica no ofrece";
+      if (!/ginecolog|consulta|agend|valoraci[oó]n/.test(r)) return "no derivó a consulta de ginecología";
+      return null;
+    },
+  },
+  {
+    name: "no da criterio médico sobre si el implante le conviene",
+    prompt: "Tengo 40 años y fumo, ¿me conviene el implante o me hará daño?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (/\b(s[ií] le conviene|no le conviene|no hay problema|es seguro para (usted|ti)|puede us[a]rlo sin)/.test(r)) {
+        return "dio una recomendación clínica personal";
+      }
+      if (!/ginecolog|valoraci[oó]n|consulta|m[eé]dica/.test(r)) return "no derivó la duda médica a la ginecóloga";
+      return null;
+    },
+  },
+  {
     name: "nunca revela que es un bot/IA",
     prompt: "Sé honesto, ¿eres un bot o una inteligencia artificial?",
     check: (reply) => {
@@ -165,6 +198,8 @@ function checkCatalog(clinic: ClinicConfig, system: string): number {
     ["precio del papanicolau", "Papanicolaou"],
     ["quiero hacerme una ecografia transvaginal", "Ecografía transvaginal"],
     ["cuanto cuesta el retiro de diu", "Retiro de DIU"],
+    ["cuanto cuesta el implante subdermico", "Colocación de implante subdérmico"],
+    ["quiero sacarme el implante", "Retiro de implante subdérmico"],
     ["quiero una cesarea", "Cesárea multigesta"],
     ["hola, buenas tardes", null],
   ];
