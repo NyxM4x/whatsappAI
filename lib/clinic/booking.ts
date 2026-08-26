@@ -723,7 +723,7 @@ async function confirmSlotAndHold(params: {
             `Tel: ${contactPhone}`,
             `Especialidad: ${draft.specialtyName ?? "—"}`,
             `Motivo: ${draft.reason ?? "—"}`,
-            `Pago: ${draft.paymentMethod === "qr" ? "QR BNB" : "Efectivo"} (reagendado)`,
+            `Pago: ${draft.paymentMethod === "qr" ? "QR" : "Efectivo"} (reagendado)`,
           ].join("\n"),
         });
         if (eventId) {
@@ -1274,7 +1274,7 @@ Ejemplos:
     }
 
     return reply(
-      `Perfecto 😊 ¿Cómo prefiere pagar la consulta? (*${price} Bs*)\n\n  1. QR BNB\n  2. Efectivo`,
+      `Perfecto 😊 ¿Cómo prefiere pagar la consulta? (*${price} Bs*)\n\n  1. Pago con QR\n  2. Efectivo`,
       "none",
       newSession,
     );
@@ -1293,7 +1293,7 @@ Ejemplos:
     }
 
     if (!paymentMethod) {
-      return reply("No entendí 😊 Responda *1* para QR BNB o *2* para Efectivo.", "none", session);
+      return reply("No entendí 😊 Responda *1* para pago con QR o *2* para Efectivo.", "none", session);
     }
 
     draft = { ...draft, paymentMethod };
@@ -1658,7 +1658,7 @@ export async function handlePaymentProof(params: {
           `Tel: ${contactPhone}`,
           `Especialidad: ${draft.specialtyName ?? "—"}`,
           `Motivo: ${draft.reason ?? "—"}`,
-          `Pago: QR BNB (${check.amount} Bs verificados)`,
+          `Pago: QR (${check.amount} Bs verificados)`,
         ].join("\n"),
       });
       if (eventId) {

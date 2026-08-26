@@ -8,6 +8,7 @@
 //   3. Si step=awaiting_proof y llega imagen/doc → comprobante de pago
 //   4. Si hay sesión activa → advanceBooking
 //   5. Si intención de cancelar/reprogramar → flujo correspondiente
+//   5c. Si piden el QR sin agendar (pago suelto) → enviar QR y listo
 //   6. Si intención de agendar → iniciar flujo (advanceBooking con step=idle)
 //   7. Si no → Q&A con OpenAI (catálogos + info clínica)
 //   8. Enviar respuesta + QR si action=send_qr → guardar outbound → lock → sesión
@@ -541,6 +542,23 @@ export async function POST(request: Request) {
     const result = await checkActiveAppointment({ business: clinic.slug, contactPhone, session, clinic });
     replyText = result.reply;
     await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
+    return new Response("ok", { status: 200 });
+  }
+
+  // ── 5c. Piden el QR sin estar agendando ───────────────────────────────────
+  // Se llega acá solo con la sesión en idle (los pasos activos del flujo
+  // retornan antes), así que es alguien que quiere pagar algo que no es
+  // necesariamente una consulta. Se le manda el QR y NO se le abre un flujo de
+  // cita que no pidió.
+  if (clinic.qrRequestIntentPatterns.test(newText) && clinic.qrImageUrl) {
+    replyText = [
+      `Aquí tiene nuestro QR para el pago 😊`,
+      ``,
+      `Cuando realice el pago, envíenos la *foto del comprobante* por aquí y lo verificamos.`,
+      ``,
+      `Si el pago es para una consulta médica, escríbanos *cita* y le reservamos su horario.`,
+    ].join("\n");
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "send_qr", lastMessage, clinic });
     return new Response("ok", { status: 200 });
   }
 

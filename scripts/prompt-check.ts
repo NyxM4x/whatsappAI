@@ -79,7 +79,7 @@ const CASES: Case[] = [
     check: (reply) => {
       const r = lc(reply);
       if (/\bs[ií]\b.*tarjeta|tarjeta.*aceptamos|aceptamos tarjeta/.test(r)) {
-        return "confirmó tarjeta de crédito (los métodos reales son QR BNB y efectivo)";
+        return "confirmó tarjeta de crédito (los métodos reales son QR y efectivo)";
       }
       return null;
     },

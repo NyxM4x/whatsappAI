@@ -55,7 +55,7 @@ const defaultClinicConfig = {
     "Bienvenido a la Clínica San Martín de Porres, ¿en qué podemos ayudarle?",
 
   qrImageUrl: "https://whatsapp-ai-chi.vercel.app/qr-bnb.jpg",
-  paymentMethods: ["QR BNB", "Efectivo"],
+  paymentMethods: ["QR", "Efectivo"],
   // Catálogos (se muestran cuando el paciente pregunta por exámenes/medicamentos).
   labs: [
     { name: "Hemograma Completo", price: 80 },
@@ -113,6 +113,14 @@ const defaultClinicConfig = {
   checkAppointmentIntentPatterns:
     /cu[aá]ndo (es|ser[aá]|tengo) mi cita|a qu[eé] hora (es|tengo) mi cita|hora de mi cita|recu[eé]rdame mi cita|cu[aá]l es mi cita|tengo (una |)cita\?|mi cita es cu[aá]ndo/i,
 
+  // Dispara el envío del QR de pago SIN agendar nada: pacientes que quieren
+  // pagar por algo que no es una consulta (un servicio del tarifario, un saldo
+  // pendiente) y solo piden el QR. Antes esto caía en el Q&A del modelo, que
+  // respondía con texto y nunca mandaba la imagen.
+  // "qr" suelto es señal suficiente: quien lo escribe lo está pidiendo.
+  qrRequestIntentPatterns:
+    /\bqr\b|c[oó]digo (de|para el|para) pago|escanear para pagar|datos para (pagar|transferir)|n[uú]mero de cuenta|d[oó]nde (pago|deposito|transfiero)/i,
+
   // Dispara la derivación a un humano: reclamos, o el paciente pide explícitamente
   // hablar con una persona / no quiere seguir con el bot. Pausa el bot (ver
   // pauseBotForHumanHandoff) para que el equipo retome la conversación.
@@ -123,7 +131,7 @@ const defaultClinicConfig = {
     welcome:
       "Bienvenido a la Clínica San Martín de Porres, ¿en qué podemos ayudarle?",
     proofButNoBooking:
-      "Gracias 😊 ¿Desea agendar una cita? Escríbame y empezamos.",
+      "¡Gracias! 🙏 Recibimos su comprobante. Si el pago era por una consulta, escríbanos *cita* y le reservamos el horario; si era por otro servicio, el equipo de la clínica lo verifica y le responde por aquí 😊",
     noActiveAppointment:
       "No encontré una cita activa a su nombre 😊 ¿Desea agendar una nueva?",
     humanHandoff:

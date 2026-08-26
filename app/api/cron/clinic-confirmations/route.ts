@@ -127,7 +127,7 @@ export async function GET(request: Request) {
           `Tel: ${appt.contactPhone}`,
           `Especialidad: ${specialty?.name ?? "—"}`,
           `Motivo: ${appt.reason ?? "—"}`,
-          `Pago: ${appt.paymentMethod === "qr" ? "QR BNB" : "Efectivo"}`,
+          `Pago: ${appt.paymentMethod === "qr" ? "QR" : "Efectivo"}`,
         ].join("\n"),
       });
 
