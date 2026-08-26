@@ -12,9 +12,11 @@
 // debe conocerlo ni poder citarlo.
 //
 // bookable=true SOLO en consultas: son las únicas que entran al flujo de
-// agenda + pago (el monto real lo pone clinic_doctors.consultation_price).
-// Todo lo demás requiere valoración previa → el webhook informa el precio y
-// deriva a un asesor humano.
+// agenda + pago (el monto real lo calcula getPriceForDoctorSlot en
+// lib/clinic/data.ts, según médico + día + hora del turno — ver
+// clinic_doctor_price_rules; los precios de acá son solo el texto informativo
+// para el Q&A libre). Todo lo demás requiere valoración previa → el webhook
+// informa el precio y deriva a un asesor humano.
 // ============================================================================
 
 export type ServiceCategory =
@@ -65,12 +67,14 @@ export const SERVICE_CATEGORY_ORDER: ServiceCategory[] = [
 
 export const defaultServices: ServiceItem[] = [
   // ── Consultas (agendables) ──────────────────────────────────────────────
-  { name: "Consulta médica general", price: 60, category: "consulta", bookable: true, aliases: ["consulta general", "medicina general", "consulta medica"] },
-  { name: "Consulta médica general de emergencia", price: 80, category: "consulta", bookable: true, aliases: ["consulta de emergencia", "emergencia general"] },
-  { name: "Consulta de Ginecología o Pediatría", price: 80, category: "consulta", bookable: true, aliases: ["consulta ginecologia", "consulta pediatria", "ginecologo", "pediatra"] },
-  { name: "Consulta de Pediatría", price: 100, category: "consulta", bookable: true, note: "sábado, domingo, feriado, tarde o noche", aliases: ["pediatria fin de semana", "pediatra de noche"] },
-  { name: "Consulta pediátrica de fin de semana", price: 120, category: "consulta", bookable: true, note: "sábado y domingo", aliases: ["pediatria sabado", "pediatria domingo"] },
-  { name: "Consulta de tránsito", price: 150, category: "consulta", bookable: true, aliases: ["transito", "certificado de transito", "examen de transito"] },
+  // Precios de consulta reales (lo que efectivamente cobra el flujo de agenda,
+  // ver clinic_doctor_price_rules): varían por día/hora, así que el número de
+  // acá es el diurno y la nota explica el recargo. El bot no calcula la hora
+  // exacta en el Q&A libre — solo cita este texto.
+  { name: "Consulta médica general", price: 60, category: "consulta", bookable: true, note: "lunes a viernes 7:00-19:00 y sábado 7:00-12:00; 80 Bs el resto (noche, sábado tarde y domingo)", aliases: ["consulta general", "medicina general", "consulta medica"] },
+  { name: "Consulta de Ginecología o Pediatría", price: 80, category: "consulta", bookable: true, note: "lunes a viernes 7:00-19:00", aliases: ["consulta ginecologia", "consulta pediatria", "ginecologo", "pediatra"] },
+  { name: "Consulta de Pediatría o Ginecología (fin de semana)", price: 120, category: "consulta", bookable: true, note: "sábado y domingo", aliases: ["pediatria fin de semana", "pediatra de noche", "pediatria sabado", "pediatria domingo", "ginecologia fin de semana", "ginecologia sabado", "ginecologia domingo"] },
+  { name: "Emergencia o accidente de tránsito", price: 150, category: "consulta", bookable: true, aliases: ["transito", "accidente de transito", "certificado de transito", "examen de transito", "consulta de emergencia", "emergencia general"] },
   { name: "Consulta ginecológica de emergencia a llamado", price: 200, category: "consulta", bookable: true, aliases: ["ginecologia de emergencia", "emergencia ginecologica"] },
 
   // ── Procedimientos ──────────────────────────────────────────────────────

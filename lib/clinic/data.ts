@@ -146,6 +146,62 @@ export async function getDoctorById(id: string): Promise<Doctor | null> {
   return mapDoctor(data);
 }
 
+// Día de la semana (0=domingo…6=sábado, igual criterio que clinic_doctors.work_days)
+// y hora "HH:MM" de un instante UTC, en la timezone del médico. Mismo mecanismo
+// que formatSlotLocal en booking.ts, pero con locale en-US para poder mapear el
+// nombre corto del día a un índice sin depender de la traducción de es-BO.
+const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+function localWeekdayAndTime(isoUtc: string, timezone: string): { weekday: number; hhmmss: string } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(isoUtc));
+
+  const map: Record<string, string> = {};
+  for (const part of parts) map[part.type] = part.value;
+
+  const weekday = WEEKDAY_INDEX[map.weekday] ?? 0;
+  // hour12:false puede devolver "24" para medianoche en algunos motores JS.
+  const hour = map.hour === "24" ? "00" : map.hour.padStart(2, "0");
+  return { weekday, hhmmss: `${hour}:${map.minute}:00` };
+}
+
+// Precio real de una consulta: depende del médico, el día y la hora del turno
+// (ver clinic_doctor_price_rules — reemplaza el monto fijo por médico que tenía
+// consultation_price). Si el médico no tiene reglas cargadas para ese día/hora,
+// cae a consultation_price como respaldo; solo devuelve null si tampoco existe
+// eso, para nunca inventarle un precio al paciente.
+export async function getPriceForDoctorSlot(
+  doctorId: string,
+  slotStartIso: string,
+  timezone: string,
+): Promise<number | null> {
+  const { weekday, hhmmss } = localWeekdayAndTime(slotStartIso, timezone);
+  const supabase = getSupabaseClient();
+
+  const { data, error } = await supabase
+    .from("clinic_doctor_price_rules")
+    .select("start_time, end_time, price")
+    .eq("doctor_id", doctorId)
+    .eq("weekday", weekday);
+
+  if (error) {
+    console.error("getPriceForDoctorSlot: query failed, falling back to consultation_price", error);
+  } else if (data) {
+    // Límite superior exclusivo: un turno justo a las 19:00 cae en la franja
+    // [19:00, 24:00), es decir en la tarifa alta.
+    const match = data.find((r: any) => r.start_time <= hhmmss && hhmmss < r.end_time);
+    if (match) return Number(match.price);
+  }
+
+  const doctor = await getDoctorById(doctorId);
+  return doctor?.consultationPrice ?? null;
+}
+
 // ─── Sesión de reserva ───────────────────────────────────────────────────────
 
 // TTL de la sesión de reserva: si el cliente abandona el flujo a medias y vuelve

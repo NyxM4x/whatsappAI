@@ -47,6 +47,7 @@ import {
   getSpecialties,
   getDoctorsBySpecialty,
   getDoctorById,
+  getPriceForDoctorSlot,
   saveBookingSession,
   resetBookingSession,
   writeHold,
@@ -791,7 +792,7 @@ async function enterSpecialty(params: {
     return reply(`${lead}Atenderá *${doctor.name}*.\n\n${slotsMessage(slots, clinic.timezone)}`, "none", newSession);
   }
 
-  const lines = doctors.map((d, i) => `  ${i + 1}. ${d.name}${d.consultationPrice ? ` — ${d.consultationPrice} Bs` : ""}`).join("\n");
+  const lines = doctors.map((d, i) => `  ${i + 1}. ${d.name}`).join("\n");
   const newSession = await saveAndReturn(conversationId, business, "choosing_doctor", draft, emptyHold());
   return reply(
     `${lead}${header}:\n\n${lines}\n\n¿Con quién prefiere? Si le da igual, dígame "cualquiera" y le busco el horario más próximo 😊`,
@@ -927,7 +928,7 @@ export async function advanceBooking(params: {
         );
       }
 
-      const lines = matching.map((d, i) => `  ${i + 1}. ${d.name}${d.consultationPrice ? ` — ${d.consultationPrice} Bs` : ""}`).join("\n");
+      const lines = matching.map((d, i) => `  ${i + 1}. ${d.name}`).join("\n");
       return reply(
         `Atienden ${BAND_LABELS[askedBand]}:\n\n${lines}\n\n¿Con quién prefiere? Si le da igual, dígame "cualquiera" 😊`,
         "none",
@@ -1129,12 +1130,16 @@ Ejemplos:
     // Todos los datos completos → ir a elegir pago.
     const newSession = await saveAndReturn(conversationId, business, "choosing_payment", draft, hold);
 
-    // El precio sale SIEMPRE del médico. Antes había un 150 Bs de respaldo — un
-    // monto del seed viejo que hoy no existe en ningún tarifario (la clínica
-    // cobra 60 y 80). Pedirle a un paciente una cifra inventada es peor que
-    // pedirle que reintente, así que si no se puede recuperar, se corta.
+    // El precio depende del médico, el día y la hora del turno (ver
+    // clinic_doctor_price_rules / getPriceForDoctorSlot). Si no se puede
+    // recuperar ningún precio (ni siquiera el respaldo de consultation_price),
+    // pedirle a un paciente una cifra inventada es peor que pedirle que
+    // reintente, así que se corta.
     const doc = draft.doctorId ? await getDoctorById(draft.doctorId) : null;
-    const price = doc?.consultationPrice ?? null;
+    const price =
+      draft.doctorId && draft.slotStart && doc
+        ? await getPriceForDoctorSlot(draft.doctorId, draft.slotStart, doc.timezone)
+        : null;
 
     if (price === null) {
       console.error("no se pudo recuperar el precio de consulta", { doctorId: draft.doctorId });
@@ -1518,8 +1523,14 @@ export async function handlePaymentProof(params: {
   // trigger de confirmaciones) ya está creando el evento — no hacemos nada más.
 
   // Verificación best-effort del monto: NO bloquea la confirmación, solo deja
-  // una nota para revisión posterior de la secretaria si algo no cuadra.
-  if (doctor?.consultationPrice != null) {
+  // una nota para revisión posterior de la secretaria si algo no cuadra. El
+  // precio real depende del día/hora del turno, no solo del médico.
+  const expectedPrice =
+    draft.doctorId && draft.slotStart && doctor
+      ? await getPriceForDoctorSlot(draft.doctorId, draft.slotStart, doctor.timezone)
+      : null;
+
+  if (expectedPrice != null) {
     try {
       const imgRes = await fetch(mediaUrl, {
         headers: process.env.KAPSO_API_KEY ? { "X-API-Key": process.env.KAPSO_API_KEY } : {},
@@ -1553,8 +1564,6 @@ export async function handlePaymentProof(params: {
 
         const cleaned = rawAmount.trim().replace(/[^0-9.]/g, "");
         const amount = parseFloat(cleaned);
-        const expectedPrice = doctor.consultationPrice;
-
         if (isNaN(amount)) {
           await updateAppointment(draft.appointmentId, {
             notes: `⚠️ Revisar comprobante: no se pudo leer un monto. Verificar manualmente antes de la consulta.`,
