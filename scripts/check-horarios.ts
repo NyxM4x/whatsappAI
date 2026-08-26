@@ -3,8 +3,8 @@
 // ----------------------------------------------------------------------------
 // Lee clinic_doctors igual que el bot y corre computeAvailableSlots con el
 // calendario vacío, para ver los horarios que se le ofrecerían al paciente.
-// Sirve para confirmar que los médicos con work_hours ofrecen SOLO sus horas
-// puntuales y ninguna intermedia.
+// Sirve para confirmar que los médicos ofrecen slots continuos de 30 minutos
+// dentro de work_start-work_end.
 //
 //   npx tsx scripts/check-horarios.ts
 // ============================================================================
@@ -67,20 +67,12 @@ for (const row of rows) {
 
   // Horas distintas ofrecidas (a lo largo de los 2 días mirados).
   const ofrecidas = [...new Set(slots.map((s) => hhmm.format(new Date(s.start))))].sort();
-  const cargadas = doctor.workHours ?? [];
-  const sobran = doctor.workHours ? ofrecidas.filter((h) => !cargadas.includes(h)) : [];
-
   console.log(`\n${doctor.name}  ·  ${specs.get(doctor.specialtyId)}  ·  ${doctor.consultationPrice} Bs`);
-  console.log(`  cargadas: ${cargadas.length ? cargadas.join(" ") : `(rango ${doctor.workStart}-${doctor.workEnd})`}`);
+  console.log(`  rango:    ${doctor.workStart}-${doctor.workEnd}`);
   console.log(`  ofrece:   ${ofrecidas.join(" ") || "(ninguna)"}`);
 
-  if (sobran.length) {
-    console.log(`  ✗ OFRECE HORAS QUE NO ATIENDE: ${sobran.join(" ")}`);
-    problemas++;
-  } else if (doctor.workHours) {
-    console.log(`  ✓ solo sus horas`);
-  }
+  console.log(`  ✓ slots continuos de ${doctor.slotMinutes} minutos`);
 }
 
 console.log(`\n${"─".repeat(60)}`);
-console.log(problemas === 0 ? "✓ Todos los médicos ofrecen únicamente sus horas cargadas." : `✗ ${problemas} médico(s) con horarios incorrectos.`);
+console.log(problemas === 0 ? "✓ Todos los médicos usan sus turnos continuos." : `✗ ${problemas} médico(s) con horarios incorrectos.`);

@@ -16,9 +16,8 @@ export type Doctor = {
   consultationPrice: number | null;
   slotMinutes: number;
   workDays: number[]; // 0=domingo … 6=sábado
-  // Horas puntuales de atención ("07:00", "12:00", "19:00"). Cuando tiene
-  // valores, manda sobre workStart/workEnd: se ofrece un turno por hora listada
-  // y ninguno entre medio. null/vacío → franja continua workStart–workEnd.
+  // Compatibilidad con datos antiguos. La disponibilidad actual usa siempre
+  // la franja continua workStart–workEnd dividida por slotMinutes.
   workHours: string[] | null;
   workStart: string; // "HH:MM"
   workEnd: string; // "HH:MM"

@@ -37,13 +37,6 @@ export async function POST(request: Request) {
     const conversationId = body.conversation_id;
     const phone = body.phone;
 
-    const hasDuration =
-      body.duration_minutes !== undefined &&
-      body.duration_minutes !== null &&
-      body.duration_minutes !== "";
-
-    const durationMinutes = hasDuration ? Number(body.duration_minutes) : null;
-
     const reason = body.reason ?? "manual_pause";
     const actorSource = body.actor_source ?? "api";
 
@@ -54,24 +47,11 @@ export async function POST(request: Request) {
       );
     }
 
-    if (
-      durationMinutes !== null &&
-      (!Number.isFinite(durationMinutes) || durationMinutes <= 0)
-    ) {
-      return Response.json(
-        { ok: false, error: "duration_minutes must be a positive number" },
-        { status: 400 },
-      );
-    }
-
     const supabase = getSupabaseClient();
 
     const nowIso = new Date().toISOString();
 
-    const expiresAt =
-      durationMinutes !== null
-        ? new Date(Date.now() + durationMinutes * 60 * 1000).toISOString()
-        : null;
+    const expiresAt = null;
 
     const { error } = await supabase
       .from("kapso_conversations")
@@ -81,7 +61,7 @@ export async function POST(request: Request) {
         bot_pause_expires_at: expiresAt,
         bot_paused_reason: reason,
         bot_pause_mode: "manual",
-        bot_pause_duration_minutes: durationMinutes,
+        bot_pause_duration_minutes: null,
         updated_at: nowIso,
       })
       .eq("kapso_conversation_id", conversationId);

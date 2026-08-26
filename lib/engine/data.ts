@@ -9,7 +9,7 @@
 // ============================================================================
 
 import { getSupabaseClient } from "@/lib/engine/clients";
-import { logSystemEvent } from "@/lib/engine/logging";
+import { logSystemEvent, maskPhone } from "@/lib/engine/logging";
 import type {
   GroupKey,
   HistoryMessage,
@@ -27,46 +27,104 @@ export type BotPauseState = {
   expiresAt?: string | null;
 };
 
-// Duración de las pausas automáticas (intervención humana). Vencen solas para
-// que ninguna conversación quede sin bot indefinidamente si nadie la retoma:
-// 12h cubre el resto de la jornada y al día siguiente el bot vuelve solo.
-//
-// OJO: bot_pause_duration_minutes es `int not null` en la tabla (ver migración
-// 20260620000000_create_core_tables.sql). Escribir null ahí revienta con 23502
-// y la pausa NO se aplica — el error solo se loguea y el bot sigue respondiendo.
-const AUTO_PAUSE_MINUTES = 720;
+const DEFAULT_HUMAN_TAKEOVER_MINUTES = 30;
 
-function autoPauseFields(nowMs: number) {
+function getHumanTakeoverMinutes(): number {
+  const value = Number(process.env.HUMAN_TAKEOVER_PAUSE_MINUTES);
+  return Number.isInteger(value) && value >= 1 && value <= 1440 ? value : DEFAULT_HUMAN_TAKEOVER_MINUTES;
+}
+
+function autoPauseFields(nowMs: number, minutes: number) {
   return {
-    bot_pause_expires_at: new Date(nowMs + AUTO_PAUSE_MINUTES * 60_000).toISOString(),
-    bot_pause_duration_minutes: AUTO_PAUSE_MINUTES,
+    bot_pause_expires_at: new Date(nowMs + minutes * 60_000).toISOString(),
+    bot_pause_duration_minutes: minutes,
   };
 }
 
 // Auto-pausa el bot cuando un humano responde desde la app de WhatsApp Business
 // (origin=business_app). Llamado desde la normalización del evento saliente.
-export async function autoPauseBotFromBusinessApp(conversationId: string) {
+export async function autoPauseBotFromBusinessApp(params: {
+  conversationId: string;
+  customerPhone: string;
+  providerMessageId: string;
+  messageTimestamp: string | null;
+}) {
   const supabase = getSupabaseClient();
-  const now = Date.now();
-  const nowIso = new Date(now).toISOString();
+  const nowIso = new Date().toISOString();
+  const eventMs = params.messageTimestamp ? new Date(params.messageTimestamp).getTime() : Date.now();
+  const baseMs = Number.isFinite(eventMs) ? eventMs : Date.now();
+  const minutes = getHumanTakeoverMinutes();
+  const expiresAt = new Date(baseMs + minutes * 60_000).toISOString();
 
-  const { error } = await supabase
+  const { data: completedEvent, error: completedLookupError } = await supabase
+    .from("bot_control_events")
+    .select("id")
+    .eq("action", "pause")
+    .eq("provider_message_id", params.providerMessageId)
+    .maybeSingle();
+  if (completedLookupError) throw completedLookupError;
+  if (completedEvent) return { applied: false, duplicate: true };
+
+  const { data: existingConversation, error: lookupError } = await supabase
     .from("kapso_conversations")
-    .update({
+    .select("kapso_conversation_id, bot_paused, bot_pause_mode, bot_pause_expires_at")
+    .eq("contact_phone", params.customerPhone)
+    .maybeSingle();
+  if (lookupError) throw lookupError;
+
+  const durableConversationId = existingConversation?.kapso_conversation_id ?? params.conversationId;
+  if (!existingConversation) {
+    const { error } = await supabase.from("kapso_conversations").upsert({
+      kapso_conversation_id: durableConversationId,
+      contact_phone: params.customerPhone,
+      updated_at: nowIso,
+    }, { onConflict: "kapso_conversation_id" });
+    if (error) throw error;
+  }
+
+  const { error: messageError } = await supabase.from("kapso_messages").insert({
+    kapso_message_id: params.providerMessageId,
+    kapso_conversation_id: durableConversationId,
+    contact_phone: params.customerPhone,
+    direction: "outbound",
+    role: "assistant",
+    content: "[HUMAN_TAKEOVER]",
+    message_timestamp: params.messageTimestamp ?? nowIso,
+    raw_payload: null,
+  });
+  if (messageError && messageError.code !== "23505") throw messageError;
+
+  if (!(existingConversation?.bot_paused && existingConversation.bot_pause_mode === "manual")) {
+    const oldExpiry = existingConversation?.bot_pause_expires_at
+      ? new Date(existingConversation.bot_pause_expires_at).getTime() : 0;
+    const finalExpiry = Math.max(Number.isFinite(oldExpiry) ? oldExpiry : 0, new Date(expiresAt).getTime());
+    const { error } = await supabase.from("kapso_conversations").update({
       bot_paused: true,
-      bot_paused_at: nowIso,
+      bot_paused_at: params.messageTimestamp ?? nowIso,
       bot_paused_reason: "human_whatsapp_business_app",
       bot_pause_mode: "auto",
-      ...autoPauseFields(now),
+      bot_pause_expires_at: new Date(finalExpiry).toISOString(),
+      bot_pause_duration_minutes: minutes,
       updated_at: nowIso,
-    })
-    .eq("kapso_conversation_id", conversationId);
-
-  if (error) {
-    console.error("auto pause from business_app failed", error);
-  } else {
-    console.log("bot auto-paused from business_app", { conversationId });
+    }).eq("kapso_conversation_id", durableConversationId);
+    if (error) throw error;
   }
+
+  const eventPayload = {
+    kapso_conversation_id: durableConversationId,
+    contact_phone_masked: maskPhone(params.customerPhone),
+    action: "pause",
+    actor_source: "whatsapp_business_app",
+    reason: "human_whatsapp_business_app",
+    expires_at: expiresAt,
+    provider_message_id: params.providerMessageId,
+    metadata: { takeover_completed: true, kapso_conversation_id: params.conversationId },
+  };
+  const { error: eventError } = await supabase.from("bot_control_events").insert(eventPayload);
+  if (eventError && eventError.code !== "23505") throw eventError;
+
+  if (eventError?.code === "23505") return { applied: false, duplicate: true };
+  return { applied: true, duplicate: false };
 }
 
 // Pausa el bot cuando el propio paciente pide hablar con una persona (reclamos,
@@ -85,7 +143,7 @@ export async function pauseBotForHumanHandoff(conversationId: string) {
       bot_paused_at: nowIso,
       bot_paused_reason: "human_handoff_requested",
       bot_pause_mode: "auto",
-      ...autoPauseFields(now),
+      ...autoPauseFields(now, getHumanTakeoverMinutes()),
       updated_at: nowIso,
     })
     .eq("kapso_conversation_id", conversationId);
@@ -494,16 +552,19 @@ export async function resumeBotIfPauseExpired(conversationId?: string) {
 
   const supabase = getSupabaseClient();
 
+  const nowIso = new Date().toISOString();
   const { error } = await supabase
     .from("kapso_conversations")
     .update({
       bot_paused: false,
-      bot_resumed_at: new Date().toISOString(),
+      bot_resumed_at: nowIso,
       bot_pause_expires_at: null,
       bot_paused_reason: "auto_resume_expired",
-      updated_at: new Date().toISOString(),
+      updated_at: nowIso,
     })
-    .eq("kapso_conversation_id", conversationId);
+    .eq("kapso_conversation_id", conversationId)
+    .eq("bot_paused", true)
+    .not("bot_pause_expires_at", "is", null);
 
   if (error) {
     console.error("supabase auto resume bot failed", error);
@@ -518,7 +579,17 @@ export async function resumeBotIfPauseExpired(conversationId?: string) {
         details: error.details,
       },
     });
+    return;
   }
+
+  await supabase.from("bot_control_events").insert({
+    kapso_conversation_id: conversationId,
+    action: "resume",
+    actor_source: "system",
+    reason: "auto_resume_expired",
+    expires_at: null,
+    metadata: {},
+  });
 }
 
 export async function getRecentConversationHistory(

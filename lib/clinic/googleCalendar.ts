@@ -145,9 +145,6 @@ export const BAND_LABELS: Record<TimeBand, string> = {
 // Ojo: dice si el doctor TRABAJA en esa franja, no si tiene huecos libres.
 // Para lo segundo hay que pasar por computeAvailableSlots con timeBand.
 export function doctorWorksInTimeBand(doctor: Doctor, band: TimeBand): boolean {
-  if (doctor.workHours?.length) {
-    return doctor.workHours.some((hhmm) => bandOfHour(parseHHMM(hhmm).hour) === band);
-  }
   // Franja continua: basta con que algún slot entero caiga dentro de la banda.
   const { hour: startH, minute: startM } = parseHHMM(doctor.workStart);
   const { hour: endH, minute: endM } = parseHHMM(doctor.workEnd);
@@ -163,15 +160,9 @@ export function doctorWorksInTimeBand(doctor: Doctor, band: TimeBand): boolean {
 // `fromDate` hasta `daysAhead` días, genera los slots del día y descarta los
 // que se solapan con lo ocupado o ya pasaron.
 //
-// Un doctor define su día de DOS formas posibles:
-//   - workHours: horas puntuales de atención ("07:00", "12:00", "19:00"). Es lo
-//     habitual en esta clínica — los médicos pasan consulta en bloques sueltos,
-//     no de corrido. Se genera UN slot por hora listada.
-//   - workStart/workEnd: franja continua troceada en slots de slotMinutes.
-//     Fallback para quien no tenga horas puntuales cargadas.
-// Cargar un médico de bloques sueltos como franja continua haría que el bot
-// ofreciera turnos en horas que no atiende (07:30, 08:00…), así que workHours
-// tiene prioridad siempre que esté definido.
+// Un doctor define su día mediante workStart/workEnd: la franja completa se
+// divide en intervalos de slotMinutes. workHours se conserva por compatibilidad
+// con filas antiguas, pero ya no decide la disponibilidad de la clínica.
 //
 // `excludeSlots`: slots ya reservados en BD (hold, awaiting_payment, payment_review,
 // confirmed) que aún no tienen evento en Calendar, para no ofrecerlos.
@@ -205,8 +196,6 @@ export function computeAvailableSlots(params: {
   const { hour: startH, minute: startM } = parseHHMM(doctor.workStart);
   const { hour: endH, minute: endM } = parseHHMM(doctor.workEnd);
   const stepMs = doctor.slotMinutes * 60 * 1000;
-  const useWorkHours = Boolean(doctor.workHours?.length);
-
   const slots: TimeSlot[] = [];
 
   for (let dayOffset = 0; dayOffset <= daysAhead; dayOffset++) {
@@ -219,21 +208,12 @@ export function computeAvailableSlots(params: {
     // junto al instante UTC para poder filtrar por franja sin reconvertir.
     let dayStarts: Array<{ ms: number; hour: number }>;
 
-    if (useWorkHours) {
-      dayStarts = doctor
-        .workHours!.map((hhmm) => {
-          const { hour, minute } = parseHHMM(hhmm);
-          return { ms: zonedWallTimeToUtc(tz, year, month, day, hour, minute).getTime(), hour };
-        })
-        .sort((a, b) => a.ms - b.ms);
-    } else {
-      const dayStart = zonedWallTimeToUtc(tz, year, month, day, startH, startM).getTime();
-      const dayEnd = zonedWallTimeToUtc(tz, year, month, day, endH, endM).getTime();
-      const startMin = startH * 60 + startM;
-      dayStarts = [];
-      for (let s = dayStart, i = 0; s + stepMs <= dayEnd; s += stepMs, i++) {
-        dayStarts.push({ ms: s, hour: Math.floor((startMin + i * doctor.slotMinutes) / 60) });
-      }
+    const dayStart = zonedWallTimeToUtc(tz, year, month, day, startH, startM).getTime();
+    const dayEnd = zonedWallTimeToUtc(tz, year, month, day, endH, endM).getTime();
+    const startMin = startH * 60 + startM;
+    dayStarts = [];
+    for (let s = dayStart, i = 0; s + stepMs <= dayEnd; s += stepMs, i++) {
+      dayStarts.push({ ms: s, hour: Math.floor((startMin + i * doctor.slotMinutes) / 60) });
     }
 
     for (const { ms: slotStart, hour } of dayStarts) {

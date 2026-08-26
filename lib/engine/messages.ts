@@ -5,8 +5,6 @@
 // No contiene lógica de negocio: solo extrae y tipifica los campos del evento.
 // ============================================================================
 
-import { autoPauseBotFromBusinessApp } from "@/lib/engine/data";
-
 // Transcribe un audio usando OpenAI Whisper. Descarga el archivo desde la URL
 // (con la API key de Kapso si es necesario) y lo envía a la API de Whisper.
 async function transcribeAudio(audioUrl: string): Promise<string | null> {
@@ -59,6 +57,13 @@ export type IncomingMessage = {
   // en ninguna de las rutas conocidas; el caller cae a la clínica por defecto.
   phoneNumberId?: string | null;
   raw: Record<string, any>;
+};
+
+export type HumanTakeoverEvent = {
+  conversationId: string;
+  customerPhone: string;
+  providerMessageId: string;
+  messageTimestamp: string | null;
 };
 
 // Extrae el phone_number_id del número de WhatsApp que RECIBIÓ el mensaje.
@@ -190,20 +195,49 @@ function getWebhookEvents(payload: Record<string, any>, request: Request): Recor
   return [payload];
 }
 
+function getEventName(event: Record<string, any>): string | null {
+  const value = event.type ?? event.event ?? event.name;
+  return typeof value === "string" ? value : null;
+}
+
+export function extractHumanTakeoverEvent(event: Record<string, any>): HumanTakeoverEvent | null {
+  if (getEventName(event) !== "whatsapp.message.sent") return null;
+
+  const message = event.message;
+  const customerPhone = event.conversation?.phone_number;
+  const conversationId = event.conversation?.id;
+  const providerMessageId = message?.id;
+  if (
+    message?.kapso?.direction !== "outbound" ||
+    message?.kapso?.origin !== "business_app" ||
+    typeof customerPhone !== "string" || !customerPhone.trim() ||
+    typeof conversationId !== "string" || !conversationId.trim() ||
+    typeof providerMessageId !== "string" || !providerMessageId.trim()
+  ) return null;
+
+  return {
+    conversationId: conversationId.trim(),
+    customerPhone: customerPhone.trim(),
+    providerMessageId: providerMessageId.trim(),
+    messageTimestamp: parseKapsoTimestamp(message.timestamp),
+  };
+}
+
+export function extractHumanTakeoverEvents(
+  payload: Record<string, any>,
+  request: Request,
+): HumanTakeoverEvent[] {
+  return getWebhookEvents(payload, request)
+    .map(extractHumanTakeoverEvent)
+    .filter((event): event is HumanTakeoverEvent => Boolean(event));
+}
+
 async function extractIncomingFromEvent(
   event: Record<string, any>,
 ): Promise<IncomingMessage | null> {
   const kapsoDirection = event.message?.kapso?.direction;
 
-  if (kapsoDirection && kapsoDirection !== "inbound") {
-    const origin = event.message?.kapso?.origin ?? null;
-    const conversationId = event.conversation?.id ?? null;
-
-    if (origin === "business_app" && conversationId) {
-      await autoPauseBotFromBusinessApp(conversationId);
-    }
-    return null;
-  }
+  if (kapsoDirection && kapsoDirection !== "inbound") return null;
 
   // Reacciones: no generan respuesta.
   const messageType = event.message?.type;

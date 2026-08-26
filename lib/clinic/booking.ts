@@ -99,6 +99,66 @@ function formatSlotLocal(isoUtc: string, timezone: string): string {
   }).format(new Date(isoUtc));
 }
 
+// Hora local "HH:MM" de un instante UTC — mismo mecanismo que formatSlotLocal
+// pero solo la hora, para comparar contra una hora explícita que dio el paciente.
+export function localHHMM(isoUtc: string, timezone: string): string {
+  const hhmm = new Intl.DateTimeFormat("en-GB", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(isoUtc));
+  return hhmm === "24:00" ? "00:00" : hhmm;
+}
+
+// Interpreta una hora con am/pm o mañana/tarde/noche EXPLÍCITOS ("11 am", "7pm",
+// "a las 7 de la noche") a "HH:MM" en 24h, sin pasar por IA — así el am/pm nunca
+// depende de que el modelo lo "entienda" bien. Devuelve null si el texto no trae
+// ninguna marca explícita (ej. "las 11" a secas) o ya es un 24h inequívoco fuera
+// de rango 0-12 sin necesidad de marca ("las 19"); en esos dos casos sigue
+// resolviéndose como antes: resolveSlotChoiceWithAI (que si hace falta, SÍ debe
+// preguntar mañana/tarde) o, si ya es inequívoco, se usa directo.
+export function parseExplicitHour(text: string): string | null {
+  const t = text.toLowerCase();
+
+  // Todas las horas mencionadas junto a su marca am/pm, venga pegada o
+  // separada ("11am", "11 am", "7pm"). Se toma la ULTIMA porque la gente se
+  // corrige sobre la marcha: "las 10am, ponele 11am" quiere decir 11.
+  const matches = [...t.matchAll(/(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?/g)]
+    .filter((m) => m[1] !== undefined);
+  if (!matches.length) return null;
+
+  const last = matches[matches.length - 1];
+  let hour = parseInt(last[1], 10);
+  const minute = last[2] ?? "00";
+  if (hour > 23) return null;
+
+  // "las 19", "19:00" - ya es 24h inequivoco, no hace falta am/pm.
+  if (hour >= 13) return `${String(hour).padStart(2, "0")}:${minute}`;
+
+  // La marca puede venir pegada al numero o como frase suelta en el mensaje.
+  const marker = last[3];
+  const hasAm = marker
+    ? marker.startsWith("a")
+    : /de la ma[ñn]ana|\ba\.?m\.?\b/.test(t);
+  const hasPm = marker
+    ? marker.startsWith("p")
+    : /de la tarde|de la noche|\bp\.?m\.?\b/.test(t);
+
+  if (hasAm && !hasPm) {
+    if (hour === 12) hour = 0; // "12 am" = medianoche
+    return `${String(hour).padStart(2, "0")}:${minute}`;
+  }
+  if (hasPm && !hasAm) {
+    if (hour !== 12) hour += 12; // "12 pm" = mediodia, se queda igual
+    return `${String(hour).padStart(2, "0")}:${minute}`;
+  }
+
+  // Ambiguo de verdad ("las 11" sin marca): que lo resuelva
+  // resolveSlotChoiceWithAI, que sabe pedir la aclaracion.
+  return null;
+}
+
 function parseNumberChoice(text: string): number | null {
   const clean = text.trim();
   const n = parseInt(clean, 10);
@@ -387,14 +447,14 @@ Si el mensaje NO pide otro día (por ejemplo, está eligiendo un horario de la l
 }
 
 function slotsMessage(slots: TimeSlot[], tz: string): string {
-  const lines = slots.map((s, i) => `  ${i + 1}. ${formatSlotLocal(s.start, tz)}`);
+  const lines = slots.slice(0, 3).map((s, i) => `  ${i + 1}. ${formatSlotLocal(s.start, tz)}`);
   return `Estos son los horarios disponibles:\n\n${lines.join("\n")}\n\n¿Cuál le viene bien?\n\n¿Prefiere otro día? Dígame la fecha (ej. "el lunes" o "para el 5 de agosto") 📅`;
 }
 
 // Como slotsMessage pero mostrando de qué médico es cada horario: acá el
 // paciente elige por hora y el doctor sale de la opción que eligió.
 function slotsWithDoctorMessage(slots: SlotWithDoctor[], tz: string): string {
-  const lines = slots.map((s, i) => `  ${i + 1}. ${formatSlotLocal(s.start, tz)} — ${s.doctorName}`);
+  const lines = slots.slice(0, 3).map((s, i) => `  ${i + 1}. ${formatSlotLocal(s.start, tz)} — ${s.doctorName}`);
   return `Estos son los horarios más próximos:\n\n${lines.join("\n")}\n\n¿Cuál le viene bien?`;
 }
 
@@ -977,6 +1037,28 @@ export async function advanceBooking(params: {
     const labels = slots.map(s => `${formatSlotLocal(s.start, clinic.timezone)} (${s.doctorName})`);
     let idx = parseNumberChoice(text);
 
+    // Hora explícita con am/pm ("11 am", "7 de la noche"): se resuelve sin IA.
+    if (!idx || !slots[idx - 1]) {
+      const wanted = parseExplicitHour(text);
+      if (wanted) {
+        const hit = slots.findIndex(s => localHHMM(s.start, clinic.timezone) === wanted);
+        if (hit >= 0) {
+          idx = hit + 1;
+        } else {
+          // Pidió una hora concreta que no está en la lista: decirlo tal cual en
+          // vez de mandarlo al Q&A general, que no conoce estos horarios y
+          // termina preguntando "mañana o tarde" aunque ya haya dicho am/pm.
+          return reply(
+            `A esa hora no tenemos turno disponible 😔 Estos son los horarios que sí tenemos:
+
+${slotsWithDoctorMessage(slots, clinic.timezone)}`,
+            "none",
+            session,
+          );
+        }
+      }
+    }
+
     if (!idx || !slots[idx - 1]) {
       const resolved = await resolveSlotChoiceWithAI(text, labels);
       if (resolved.clarify) {
@@ -1038,6 +1120,25 @@ export async function advanceBooking(params: {
 
     const slotLabels = slots.map(s => formatSlotLocal(s.start, clinic.timezone));
     let idx = parseNumberChoice(text);
+
+    // Hora explícita con am/pm ("11 am", "7 de la noche"): se resuelve sin IA.
+    if (!idx || !slots[idx - 1]) {
+      const wanted = parseExplicitHour(text);
+      if (wanted) {
+        const hit = slots.findIndex(s => localHHMM(s.start, clinic.timezone) === wanted);
+        if (hit >= 0) {
+          idx = hit + 1;
+        } else {
+          return reply(
+            `A esa hora no tenemos turno disponible 😔 Estos son los horarios que sí tenemos:
+
+${slotsMessage(slots, clinic.timezone)}`,
+            "none",
+            session,
+          );
+        }
+      }
+    }
 
     if (!idx || !slots[idx - 1]) {
       const resolved = await resolveSlotChoiceWithAI(text, slotLabels);

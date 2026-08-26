@@ -31,8 +31,9 @@ import {
   isLatestInboundMessage,
   getUnansweredInboundText,
   pauseBotForHumanHandoff,
+  autoPauseBotFromBusinessApp,
 } from "@/lib/engine/data";
-import { normalizeIncomingMessages } from "@/lib/engine/messages";
+import { extractHumanTakeoverEvents, normalizeIncomingMessages } from "@/lib/engine/messages";
 
 import {
   getClinicConfig,
@@ -136,6 +137,17 @@ export async function POST(request: Request) {
     payload = JSON.parse(rawBody);
   } catch {
     return new Response("invalid json", { status: 400 });
+  }
+
+  // Takeover humano: se procesa antes de debounce, OpenAI o cualquier respuesta.
+  const humanTakeovers = extractHumanTakeoverEvents(payload, request);
+  try {
+    for (const takeover of humanTakeovers) {
+      await autoPauseBotFromBusinessApp(takeover);
+    }
+  } catch (err) {
+    console.error("human takeover failed", getErrorMessage(err));
+    return new Response("takeover failed", { status: 500 });
   }
 
   const incomingMessages = await normalizeIncomingMessages(payload, request);
@@ -253,6 +265,13 @@ export async function POST(request: Request) {
       ? gathered
       : newMessages.map((m) => m.text ?? "").filter((t) => t.trim().length > 0).join("\n")
   ).trim();
+
+  // Barrera 1 reforzada: la pausa puede haber llegado durante el debounce.
+  const currentPauseState = await getBotPauseState(conversationId);
+  if (currentPauseState.paused) {
+    console.log("ai turn omitted because bot is paused", { conversationId });
+    return new Response("bot paused", { status: 200 });
+  }
 
   const textLc = newText.toLowerCase();
 
@@ -577,6 +596,13 @@ async function sendAndPersist(params: {
   clinic: ClinicConfig;
 }) {
   const { kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, clinic } = params;
+
+  // Segunda barrera: una persona puede tomar el control mientras OpenAI procesa.
+  const pauseState = await getBotPauseState(conversationId);
+  if (pauseState.paused) {
+    console.log("ai response omitted because bot is paused", { conversationId });
+    return;
+  }
 
   try {
     await kapso.messages.sendText({
