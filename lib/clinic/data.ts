@@ -15,7 +15,7 @@ import type {
   Specialty,
   TimeSlot,
 } from "@/lib/clinic/types";
-import { ACTIVE_APPOINTMENT_STATUSES } from "@/lib/clinic/types";
+import { ACTIVE_APPOINTMENT_STATUSES, PAYMENT_WINDOW_MINUTES } from "@/lib/clinic/types";
 
 // Multi-tenant (P2): todas las clínicas dadas de alta, para que los crons
 // (recordatorios, confirmaciones) procesen a cada una en vez de una sola fija.
@@ -693,6 +693,46 @@ export async function getActiveAppointmentSlotsForDoctor(
   return (data ?? [])
     .filter((r) => r.scheduled_start && r.scheduled_end)
     .map((r) => ({ start: r.scheduled_start!, end: r.scheduled_end! }));
+}
+
+// Libera las reservas de pago QR vencidas: citas que siguen en
+// `awaiting_payment` (nunca llegó un comprobante válido) pasados
+// PAYMENT_WINDOW_MINUTES desde su última actividad. Mientras están en ese
+// estado bloquean el slot (ACTIVE_APPOINTMENT_STATUSES), así que sin esto un
+// paciente que elige QR y no paga deja el horario muerto para siempre.
+//
+// Se llama de forma perezosa en cada mensaje entrante del webhook: el plan
+// Hobby de Vercel solo permite un cron diario, y esperar hasta el día
+// siguiente para devolver un cupo no sirve. Devuelve las citas liberadas para
+// poder avisar al paciente.
+//
+// Las que están en `payment_review` NO se tocan: ya mandaron comprobante y hay
+// una persona revisándolo, el horario les sigue reservado.
+export async function expireStalePaymentAppointments(
+  business: string,
+  windowMinutes: number = PAYMENT_WINDOW_MINUTES,
+): Promise<Appointment[]> {
+  const supabase = getSupabaseClient();
+  const cutoff = new Date(Date.now() - windowMinutes * 60_000).toISOString();
+
+  const { data, error } = await supabase
+    .from("clinic_appointments")
+    .update({
+      status: "canceled",
+      cancel_reason: "pago_no_recibido",
+      notes: `⏱️ Reserva liberada automáticamente: no llegó el comprobante dentro de los ${windowMinutes} min.`,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("business", business)
+    .eq("status", "awaiting_payment")
+    .lt("updated_at", cutoff)
+    .select("*");
+
+  if (error) {
+    console.error("expireStalePaymentAppointments failed", error);
+    return [];
+  }
+  return (data ?? []).map(mapAppointment);
 }
 
 // Citas `confirmed` sin evento de Calendar (para el cron de confirmaciones).

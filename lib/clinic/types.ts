@@ -127,6 +127,11 @@ export type AppointmentStatus =
   | "confirmed"
   | "canceled";
 
+// Minutos que se le reserva el horario a un paciente que eligió pago por QR
+// mientras esperamos su comprobante. Pasado ese plazo la cita se cancela sola
+// y el slot vuelve a ofrecerse (ver expireStalePaymentAppointments).
+export const PAYMENT_WINDOW_MINUTES = 30;
+
 // Estatutos que bloquean un slot (no se debe ofrecer a otro paciente).
 export const ACTIVE_APPOINTMENT_STATUSES: AppointmentStatus[] = [
   "hold",

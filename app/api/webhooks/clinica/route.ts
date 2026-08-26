@@ -43,6 +43,7 @@ import {
   type ClinicConfig,
 } from "@/lib/clinic/config";
 import { matchService, formatServicePrice } from "@/lib/clinic/services";
+import { PAYMENT_WINDOW_MINUTES } from "@/lib/clinic/types";
 import {
   advanceBooking,
   handlePaymentProof,
@@ -50,7 +51,12 @@ import {
   rescheduleActiveAppointment,
   checkActiveAppointment,
 } from "@/lib/clinic/booking";
-import { getBookingSession, saveBookingSession } from "@/lib/clinic/data";
+import {
+  getBookingSession,
+  saveBookingSession,
+  expireStalePaymentAppointments,
+  getAppointmentStatus,
+} from "@/lib/clinic/data";
 
 // Node runtime y ventana amplia: el debounce duerme unos segundos dentro de la
 // invocación, así que subimos el límite por defecto de Vercel (10s).
@@ -173,6 +179,22 @@ export async function POST(request: Request) {
     ? (await getBusinessByPhoneNumberId(lastMessage.phoneNumberId)) ?? DEFAULT_BUSINESS_SLUG
     : DEFAULT_BUSINESS_SLUG;
   const clinic = await getClinicConfig(business);
+
+  // Liberar reservas de pago vencidas antes de tocar disponibilidad: una cita
+  // en `awaiting_payment` bloquea el slot, y el plan Hobby de Vercel solo
+  // permite un cron diario — así que la expiración se hace acá, en cada mensaje
+  // entrante. Es un solo UPDATE con filtro y no debe tumbar el webhook.
+  try {
+    const freed = await expireStalePaymentAppointments(clinic.slug);
+    if (freed.length) {
+      console.log("reservas de pago liberadas por vencimiento", {
+        count: freed.length,
+        ids: freed.map((a) => a.id),
+      });
+    }
+  } catch (err) {
+    console.error("expireStalePaymentAppointments threw", err);
+  }
 
   console.log("clinica webhook received", {
     phone: maskPhone(lastMessage.from),
@@ -426,7 +448,29 @@ export async function POST(request: Request) {
   // ── 4a. awaiting_proof + texto (sin media) → reenviar QR o Q&A ───────────
   if (session.step === "awaiting_proof" && !hasMedia && newText.trim()) {
     const asksForQr = /qr|pago|código|codigo|envía|envia|manda|pásame|pasame|comparte/i.test(newText);
-    if (asksForQr && clinic.qrImageUrl) {
+
+    // La reserva pudo vencer mientras el paciente iba a pagar: reenviarle el QR
+    // sería cobrarle por un horario que ya se liberó.
+    const appointmentGone =
+      session.draft.appointmentId
+        ? (await getAppointmentStatus(session.draft.appointmentId)) === "canceled"
+        : false;
+
+    if (asksForQr && appointmentGone) {
+      replyText = [
+        `Su reserva ya venció: el horario se aparta ${PAYMENT_WINDOW_MINUTES} minutos esperando el pago y luego vuelve a quedar disponible 😕`,
+        ``,
+        `Escríbanos *cita* y le buscamos un nuevo horario 😊`,
+      ].join("\n");
+      await saveBookingSession({
+        conversationId,
+        business: clinic.slug,
+        step: "idle",
+        draft: {},
+        hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
+      });
+      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
+    } else if (asksForQr && clinic.qrImageUrl) {
       replyText = "Aquí le reenvío el QR de pago 😊 Una vez realizado el pago, envíe el comprobante (foto o PDF) y lo validamos. ¡Gracias! 🙏";
       await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "send_qr", lastMessage, clinic });
     } else {

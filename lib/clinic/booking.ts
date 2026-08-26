@@ -22,8 +22,13 @@
 //   Al confirmar slot → re-verificar disponibilidad → escribir hold en BD
 //   → pasar a collecting_name. Si el slot fue tomado → re-ofrecer.
 //
-// QR: al llegar el comprobante se confirma de inmediato (modelo de confianza,
-// ver handlePaymentProof); la secretaria solo cancela si detecta un pago inválido.
+// QR (ver handlePaymentProof): al llegar el comprobante se LEE el monto y solo
+// se confirma si cubre la cotización del turno; si el monto no cuadra, la
+// imagen es ilegible o la verificación falla, la cita queda en `payment_review`
+// para que la secretaria decida — nunca se le dice "confirmada" al paciente sin
+// pago verificado. Si el comprobante nunca llega, la reserva vence sola a los
+// PAYMENT_WINDOW_MINUTES y el horario vuelve a ofrecerse
+// (ver expireStalePaymentAppointments en data.ts).
 // Efectivo: se crea el evento en Google Calendar de inmediato.
 //
 // Reagendamiento (ver rescheduleActiveAppointment): si la cita original ya
@@ -74,6 +79,7 @@ import type {
   Specialty,
   PaymentMethod,
 } from "@/lib/clinic/types";
+import { PAYMENT_WINDOW_MINUTES } from "@/lib/clinic/types";
 import { buildClinicSystemPrompt, type ClinicConfig } from "@/lib/clinic/config";
 
 // ─── Tipos de resultado ──────────────────────────────────────────────────────
@@ -1525,15 +1531,14 @@ Ejemplos:
 
 // ─── Comprobante recibido (media entrante) ────────────────────────────────────
 
-// Modelo de confianza: la mayoría de los pacientes son clientes recurrentes que
-// sí pagan, así que apenas llega el comprobante la cita queda CONFIRMADA de
-// inmediato (crea el evento en Calendar y avisa al paciente), igual que el pago
-// en efectivo. La secretaria ya NO aprueba cada comprobante uno por uno: la
-// verificación con GPT-vision corre en paralelo solo para DEJAR UNA NOTA en la
-// cita cuando el monto no cuadra o la imagen no parece un comprobante válido.
-// Si al revisar esa nota la secretaria confirma que el pago era inválido,
-// cancela la cita manualmente (status = 'canceled'), lo que dispara el borrado
-// automático del evento en Calendar.
+// Verificación ANTES de confirmar: la cita solo pasa a `confirmed` (y solo ahí
+// se crea el evento en Calendar y se le dice al paciente "confirmada") cuando
+// GPT-vision lee en el comprobante un monto que cubre la cotización de ese
+// turno. Cualquier otro caso — monto menor, imagen ilegible, no es un
+// comprobante, o no pudimos verificar — pasa a `payment_review`: el horario le
+// sigue reservado, pero confirma una persona desde el panel. Confirmar desde
+// el panel dispara el trigger de Supabase, que crea el evento y avisa al
+// paciente igual que el camino automático.
 export async function handlePaymentProof(params: {
   conversationId: string;
   business: string;
@@ -1550,20 +1555,68 @@ export async function handlePaymentProof(params: {
     return reply(clinic.replies.proofButNoBooking, "none", newSession);
   }
 
+  // La reserva pudo vencer mientras el paciente iba a pagar: el slot ya se
+  // liberó (ver expireStalePaymentAppointments) y sería falso confirmarla.
+  const statusBefore = await getAppointmentStatus(draft.appointmentId);
+  if (statusBefore === "canceled" || statusBefore === null) {
+    const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+    return reply(
+      [
+        `Recibimos su comprobante 🙏 pero su reserva ya venció: el horario se aparta ${PAYMENT_WINDOW_MINUTES} minutos esperando el pago y luego vuelve a quedar disponible 😕`,
+        ``,
+        `Escríbanos *cita* y le buscamos un nuevo horario. Si ya realizó el pago, avísenos por aquí y lo resolvemos sin que pierda su dinero.`,
+      ].join("\n"),
+      "none",
+      newSession,
+    );
+  }
+
+  // Guardar el comprobante como evidencia pase lo que pase con la verificación:
+  // si después hay que revisarlo a mano, la secretaria necesita verlo.
+  await updateAppointment(draft.appointmentId, { paymentProofUrl: mediaUrl });
+
+  const doctor = draft.doctorId ? await getDoctorById(draft.doctorId) : null;
+
+  // El precio real depende del día/hora del turno, no solo del médico.
+  const expectedPrice =
+    draft.doctorId && draft.slotStart && doctor
+      ? await getPriceForDoctorSlot(draft.doctorId, draft.slotStart, doctor.timezone)
+      : null;
+
+  const check = await verifyPaymentAmount(mediaUrl, expectedPrice);
+
+  // ── Camino A: no se pudo validar el pago → revisión de la secretaria ───────
+  if (!check.ok) {
+    const parked = await updateAppointment(draft.appointmentId, {
+      status: "payment_review",
+      notes: check.note,
+    });
+    if (!parked) {
+      console.error("handlePaymentProof: no se pudo marcar payment_review", {
+        appointmentId: draft.appointmentId,
+      });
+    }
+    const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
+    return reply(
+      [
+        `¡Gracias por su comprobante! 🙏 Lo estamos verificando y en unos minutos le confirmamos su cita por aquí.`,
+        ``,
+        `Su horario queda reservado mientras tanto 😊`,
+      ].join("\n"),
+      "none",
+      newSession,
+    );
+  }
+
+  // ── Camino B: el monto cubre la cotización → confirmar ─────────────────────
   // Escritura CRÍTICA: si esto no queda guardado, no hay que crear el evento de
   // Calendar ni decirle al cliente "confirmada" — se vería confirmada en
   // WhatsApp pero no en la BD, y los recordatorios/confirmaciones automáticas
   // (que filtran por status='confirmed') nunca la tomarían. Un reintento cubre
-  // fallos transitorios; si vuelve a fallar, se deja para revisión manual.
-  let confirmed = await updateAppointment(draft.appointmentId, {
-    paymentProofUrl: mediaUrl,
-    status: "confirmed",
-  });
+  // fallos transitorios; si vuelve a fallar, queda para revisión manual.
+  let confirmed = await updateAppointment(draft.appointmentId, { status: "confirmed", notes: null });
   if (!confirmed) {
-    confirmed = await updateAppointment(draft.appointmentId, {
-      paymentProofUrl: mediaUrl,
-      status: "confirmed",
-    });
+    confirmed = await updateAppointment(draft.appointmentId, { status: "confirmed", notes: null });
   }
 
   if (!confirmed) {
@@ -1571,7 +1624,8 @@ export async function handlePaymentProof(params: {
       appointmentId: draft.appointmentId,
     });
     await updateAppointment(draft.appointmentId, {
-      notes: "🚨 Error al confirmar automáticamente el pago (falló la escritura en BD). Revisar y confirmar o cancelar manualmente.",
+      status: "payment_review",
+      notes: "🚨 Pago verificado OK pero falló la escritura en BD al confirmar. Revisar y confirmar manualmente.",
     });
     const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
     return reply(
@@ -1580,8 +1634,6 @@ export async function handlePaymentProof(params: {
       newSession,
     );
   }
-
-  const doctor = draft.doctorId ? await getDoctorById(draft.doctorId) : null;
 
   // Crear el evento en Calendar de inmediato (mismo patrón que el pago en
   // efectivo). El status ya se puso 'confirmed' arriba, lo que también puede
@@ -1606,7 +1658,7 @@ export async function handlePaymentProof(params: {
           `Tel: ${contactPhone}`,
           `Especialidad: ${draft.specialtyName ?? "—"}`,
           `Motivo: ${draft.reason ?? "—"}`,
-          `Pago: QR BNB`,
+          `Pago: QR BNB (${check.amount} Bs verificados)`,
         ].join("\n"),
       });
       if (eventId) {
@@ -1638,68 +1690,11 @@ export async function handlePaymentProof(params: {
   // Si había calendarId/horario pero no se ganó el claim, otro proceso (el
   // trigger de confirmaciones) ya está creando el evento — no hacemos nada más.
 
-  // Verificación best-effort del monto: NO bloquea la confirmación, solo deja
-  // una nota para revisión posterior de la secretaria si algo no cuadra. El
-  // precio real depende del día/hora del turno, no solo del médico.
-  const expectedPrice =
-    draft.doctorId && draft.slotStart && doctor
-      ? await getPriceForDoctorSlot(draft.doctorId, draft.slotStart, doctor.timezone)
-      : null;
-
-  if (expectedPrice != null) {
-    try {
-      const imgRes = await fetch(mediaUrl, {
-        headers: process.env.KAPSO_API_KEY ? { "X-API-Key": process.env.KAPSO_API_KEY } : {},
-        signal: AbortSignal.timeout(10000),
-      });
-
-      // Límite de tamaño: no cargar comprobantes gigantes a memoria (la cita ya
-      // quedó confirmada; esta verificación es best-effort y puede saltarse).
-      const contentLength = Number(imgRes.headers.get("content-length") ?? 0);
-      const MAX_PROOF_BYTES = 8 * 1024 * 1024; // 8 MB
-      if (imgRes.ok && contentLength <= MAX_PROOF_BYTES) {
-        const imgBuffer = await imgRes.arrayBuffer();
-        const imgUint8 = new Uint8Array(imgBuffer);
-
-        const { text: rawAmount } = await generateText({
-          model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
-          messages: [
-            {
-              role: "user",
-              content: [
-                { type: "image", image: imgUint8 },
-                {
-                  type: "text",
-                  text: `Este es un comprobante de transferencia/pago QR boliviano. Extrae ÚNICAMENTE el monto total pagado en bolivianos (Bs). Responde solo con el número (ej: "150" o "85.50"). Si no puedes leerlo o no es un comprobante de pago, responde "N/A".`,
-                },
-              ],
-            },
-          ],
-          abortSignal: AbortSignal.timeout(15000),
-        });
-
-        const cleaned = rawAmount.trim().replace(/[^0-9.]/g, "");
-        const amount = parseFloat(cleaned);
-        if (isNaN(amount)) {
-          await updateAppointment(draft.appointmentId, {
-            notes: `⚠️ Revisar comprobante: no se pudo leer un monto. Verificar manualmente antes de la consulta.`,
-          });
-        } else if (amount < expectedPrice) {
-          await updateAppointment(draft.appointmentId, {
-            notes: `⚠️ Revisar pago: monto detectado ${amount} Bs, precio de consulta ${expectedPrice} Bs.`,
-          });
-        }
-      }
-    } catch (err) {
-      console.error("GPT vision payment check failed", err);
-    }
-  }
-
   const newSession = await saveAndReturn(conversationId, business, "idle", {}, emptyHold());
   const friendlySlot = draft.slotStart ? formatSlotLocal(draft.slotStart, clinic.timezone) : null;
   return reply(
     [
-      `✅ ¡Recibimos su comprobante! Su cita quedó *confirmada* 😊`,
+      `✅ ¡Pago verificado! Su cita quedó *confirmada* 😊`,
       ``,
       friendlySlot ? `📅 ${friendlySlot}` : null,
       doctor ? `👨‍⚕️ ${doctor.name}` : null,
@@ -1709,6 +1704,96 @@ export async function handlePaymentProof(params: {
     "none",
     newSession,
   );
+}
+
+// Lee el monto del comprobante con GPT-vision y lo compara con la cotización.
+// Devuelve ok:true SOLO si se pudo leer un monto que cubre el precio del turno;
+// en cualquier otro caso devuelve la nota que verá la secretaria en el panel.
+// Tolerancia de 0.5 Bs por redondeos del OCR.
+// Sin `strict` en tsconfig, TS no discrimina uniones por un literal booleano,
+// así que el resultado es un objeto plano: `ok` decide, `note` explica el
+// rechazo y `amount` solo tiene sentido cuando ok === true.
+type PaymentCheck = { ok: boolean; amount: number | null; note: string | null };
+
+async function verifyPaymentAmount(
+  mediaUrl: string,
+  expectedPrice: number | null,
+): Promise<PaymentCheck> {
+  if (expectedPrice == null) {
+    return {
+      ok: false,
+      amount: null,
+      note: "⚠️ Revisar pago: no se pudo determinar el precio de la consulta para ese horario, el monto no fue verificado.",
+    };
+  }
+
+  try {
+    const imgRes = await fetch(mediaUrl, {
+      headers: process.env.KAPSO_API_KEY ? { "X-API-Key": process.env.KAPSO_API_KEY } : {},
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!imgRes.ok) {
+      return {
+        ok: false,
+        amount: null,
+        note: `⚠️ Revisar pago: no se pudo descargar el comprobante (HTTP ${imgRes.status}).`,
+      };
+    }
+
+    // Límite de tamaño: no cargar comprobantes gigantes a memoria.
+    const contentLength = Number(imgRes.headers.get("content-length") ?? 0);
+    const MAX_PROOF_BYTES = 8 * 1024 * 1024; // 8 MB
+    if (contentLength > MAX_PROOF_BYTES) {
+      return {
+        ok: false,
+        amount: null,
+        note: "⚠️ Revisar pago: el comprobante es demasiado grande para verificarlo automáticamente.",
+      };
+    }
+
+    const imgBuffer = await imgRes.arrayBuffer();
+    const imgUint8 = new Uint8Array(imgBuffer);
+
+    const { text: rawAmount } = await generateText({
+      model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", image: imgUint8 },
+            {
+              type: "text",
+              text: `Este es un comprobante de transferencia/pago QR boliviano. Extrae ÚNICAMENTE el monto total pagado en bolivianos (Bs). Responde solo con el número (ej: "150" o "85.50"). Si no puedes leerlo o no es un comprobante de pago, responde "N/A".`,
+            },
+          ],
+        },
+      ],
+      abortSignal: AbortSignal.timeout(15000),
+    });
+
+    const cleaned = rawAmount.trim().replace(/[^0-9.]/g, "");
+    const amount = parseFloat(cleaned);
+
+    if (isNaN(amount)) {
+      return {
+        ok: false,
+        amount: null,
+        note: `⚠️ Revisar comprobante: no se pudo leer un monto (¿imagen ilegible o no es un comprobante?). Precio de consulta: ${expectedPrice} Bs.`,
+      };
+    }
+    if (amount < expectedPrice - 0.5) {
+      return {
+        ok: false,
+        amount: null,
+        note: `⚠️ Revisar pago: monto detectado ${amount} Bs, precio de consulta ${expectedPrice} Bs.`,
+      };
+    }
+    return { ok: true, amount, note: null };
+  } catch (err) {
+    console.error("GPT vision payment check failed", err);
+    return { ok: false, amount: null, note: "⚠️ Revisar pago: falló la verificación automática del comprobante (error técnico)." };
+  }
 }
 
 // ─── Consultar cita activa ("¿cuándo es mi cita?") ───────────────────────────
