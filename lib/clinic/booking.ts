@@ -41,6 +41,7 @@ import {
   createAppointmentEvent,
   deleteAppointmentEvent,
   doctorWorksInTimeBand,
+  doctorWorksOnDate,
   BAND_LABELS,
 } from "@/lib/clinic/googleCalendar";
 import {
@@ -456,6 +457,10 @@ function slotsMessage(slots: TimeSlot[], tz: string): string {
 function slotsWithDoctorMessage(slots: SlotWithDoctor[], tz: string): string {
   const lines = slots.slice(0, 3).map((s, i) => `  ${i + 1}. ${formatSlotLocal(s.start, tz)} — ${s.doctorName}`);
   return `Estos son los horarios más próximos:\n\n${lines.join("\n")}\n\n¿Cuál le viene bien?`;
+}
+
+function asksWhoWorksToday(text: string): boolean {
+  return /\b(todos|qu[ié]n|quienes|cu[aá]les)\b.*\b(atiende|trabaja|est[aá]n)\b.*\bhoy\b|\bhoy\b.*\b(todos|qu[ié]n|quienes|cu[aá]les)\b/i.test(text);
 }
 
 // ─── Preferencias del paciente (navegación no lineal) ────────────────────────
@@ -948,6 +953,16 @@ export async function advanceBooking(params: {
   if (step === "choosing_doctor") {
     const allDoctors = draft.specialtyId ? await getDoctorsBySpecialty(business, draft.specialtyId) : [];
     const band = draft.prefs?.timeBand ?? null;
+
+    if (asksWhoWorksToday(text) && allDoctors.length) {
+      const today = new Date();
+      const workingToday = allDoctors.filter((doctor) => doctorWorksOnDate(doctor, today));
+      const lines = workingToday.map((doctor, index) => `  ${index + 1}. ${doctor.name}`).join("\n");
+      const response = workingToday.length
+        ? `Hoy atienden los siguientes médicos de ${draft.specialtyName ?? "esta especialidad"}:\n\n${lines}\n\n¿Con cuál prefiere? Si le da igual, dígame "cualquiera" 😊`
+        : `Hoy no hay médicos de ${draft.specialtyName ?? "esta especialidad"} con turno registrado. ¿Desea que revisemos otro día?`;
+      return reply(response, "none", session);
+    }
 
     // "Cualquiera" / "el que atienda antes": saltamos la elección de médico y
     // ofrecemos los horarios más próximos de toda la especialidad.

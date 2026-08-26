@@ -138,6 +138,17 @@ export const BAND_LABELS: Record<TimeBand, string> = {
   evening: "por la noche",
 };
 
+export function doctorWorksOnDate(doctor: Doctor, date: Date): boolean {
+  const { weekday } = datetimePartsInZone(doctor.timezone || "America/La_Paz", date);
+  if (doctor.workSchedules?.length) {
+    const previousWeekday = (weekday + 6) % 7;
+    return doctor.workSchedules.some((schedule) =>
+      schedule.weekday === weekday || (schedule.endsNextDay && schedule.weekday === previousWeekday),
+    );
+  }
+  return doctor.workDays.includes(weekday);
+}
+
 // ¿El doctor atiende en esa franja? Lee SOLO su fila (workHours, o
 // workStart/workEnd como fallback) — cero llamadas a Google Calendar. Sirve
 // para responder "¿quién atiende en la mañana?" sin consultar disponibilidad.
