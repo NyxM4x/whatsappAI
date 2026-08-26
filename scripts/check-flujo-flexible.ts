@@ -62,6 +62,7 @@ const doctors: Doctor[] = ((await docsRes.json()) as any[]).map((row) => ({
     Array.isArray(row.work_hours) && row.work_hours.length
       ? row.work_hours.map((h: any) => String(h).slice(0, 5))
       : null,
+  workSchedules: [],
   workStart: String(row.work_start ?? "09:00").slice(0, 5),
   workEnd: String(row.work_end ?? "17:00").slice(0, 5),
   timezone: String(row.timezone ?? "America/La_Paz"),

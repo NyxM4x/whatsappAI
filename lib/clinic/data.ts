@@ -11,6 +11,7 @@ import type {
   BookingSession,
   BookingStep,
   Doctor,
+  DoctorWorkSchedule,
   Specialty,
   TimeSlot,
 } from "@/lib/clinic/types";
@@ -53,10 +54,43 @@ function mapDoctor(row: any): Doctor {
     workHours: Array.isArray(row.work_hours) && row.work_hours.length
       ? row.work_hours.map((h: any) => String(h).slice(0, 5))
       : null,
+    workSchedules: Array.isArray(row.work_schedules)
+      ? row.work_schedules.map((s: any): DoctorWorkSchedule => ({
+          weekday: Number(s.weekday),
+          startTime: String(s.start_time).slice(0, 5),
+          endTime: String(s.end_time).slice(0, 5),
+          endsNextDay: Boolean(s.ends_next_day),
+        }))
+      : [],
     workStart: String(row.work_start ?? "09:00").slice(0, 5),
     workEnd: String(row.work_end ?? "17:00").slice(0, 5),
     timezone: String(row.timezone ?? "America/La_Paz"),
   };
+}
+
+async function addDoctorSchedules(doctors: Doctor[]): Promise<Doctor[]> {
+  if (!doctors.length) return doctors;
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clinic_doctor_work_hours")
+    .select("doctor_id, weekday, start_time, end_time, ends_next_day")
+    .in("doctor_id", doctors.map((d) => d.id));
+  if (error) {
+    console.error("getDoctorWorkSchedules failed", error);
+    return doctors;
+  }
+  const grouped = new Map<string, DoctorWorkSchedule[]>();
+  for (const row of data ?? []) {
+    const list = grouped.get(String(row.doctor_id)) ?? [];
+    list.push({
+      weekday: Number(row.weekday),
+      startTime: String(row.start_time).slice(0, 5),
+      endTime: String(row.end_time).slice(0, 5),
+      endsNextDay: Boolean(row.ends_next_day),
+    });
+    grouped.set(String(row.doctor_id), list);
+  }
+  return doctors.map((doctor) => ({ ...doctor, workSchedules: grouped.get(doctor.id) ?? [] }));
 }
 
 function mapAppointment(row: any): Appointment {
@@ -128,7 +162,7 @@ export async function getDoctorsBySpecialty(
     console.error("getDoctorsBySpecialty failed", error);
     return [];
   }
-  return (data ?? []).map(mapDoctor);
+  return addDoctorSchedules((data ?? []).map(mapDoctor));
 }
 
 export async function getDoctorById(id: string): Promise<Doctor | null> {
@@ -143,7 +177,7 @@ export async function getDoctorById(id: string): Promise<Doctor | null> {
     if (error) console.error("getDoctorById failed", error);
     return null;
   }
-  return mapDoctor(data);
+  return (await addDoctorSchedules([mapDoctor(data)]))[0];
 }
 
 // Día de la semana (0=domingo…6=sábado, igual criterio que clinic_doctors.work_days)

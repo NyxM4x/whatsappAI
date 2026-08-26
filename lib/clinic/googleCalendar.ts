@@ -12,7 +12,7 @@
 // ============================================================================
 
 import { google } from "googleapis";
-import type { Doctor, TimeSlot, TimeBand } from "@/lib/clinic/types";
+import type { Doctor, TimeSlot, TimeBand, DoctorWorkSchedule } from "@/lib/clinic/types";
 
 const CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"];
 
@@ -145,6 +145,13 @@ export const BAND_LABELS: Record<TimeBand, string> = {
 // Ojo: dice si el doctor TRABAJA en esa franja, no si tiene huecos libres.
 // Para lo segundo hay que pasar por computeAvailableSlots con timeBand.
 export function doctorWorksInTimeBand(doctor: Doctor, band: TimeBand): boolean {
+  if (doctor.workSchedules?.length) {
+    return doctor.workSchedules.some((schedule) => {
+      const start = parseHHMM(schedule.startTime).hour;
+      const end = parseHHMM(schedule.endTime).hour;
+      return bandOfHour(start) === band || (schedule.endsNextDay && bandOfHour(0) === band) || bandOfHour(Math.max(start, end - 1)) === band;
+    });
+  }
   // Franja continua: basta con que algún slot entero caiga dentro de la banda.
   const { hour: startH, minute: startM } = parseHHMM(doctor.workStart);
   const { hour: endH, minute: endM } = parseHHMM(doctor.workEnd);
@@ -202,19 +209,43 @@ export function computeAvailableSlots(params: {
     const cursor = new Date(fromDate.getTime() + dayOffset * 24 * 60 * 60 * 1000);
     const { year, month, day, weekday } = datetimePartsInZone(tz, cursor);
 
-    if (!doctor.workDays.includes(weekday)) continue;
+    if (!doctor.workSchedules?.length && !doctor.workDays.includes(weekday)) continue;
 
     // Inicios de slot del día, en orden cronológico. Se lleva la hora de pared
     // junto al instante UTC para poder filtrar por franja sin reconvertir.
-    let dayStarts: Array<{ ms: number; hour: number }>;
+    let dayStarts: Array<{ ms: number; hour: number }> = [];
+    const schedules: DoctorWorkSchedule[] = doctor.workSchedules?.length
+      ? doctor.workSchedules
+      : [{ weekday, startTime: doctor.workStart, endTime: doctor.workEnd, endsNextDay: false }];
+    const previousWeekday = (weekday + 6) % 7;
+    const previousCursor = new Date(cursor.getTime() - 24 * 60 * 60 * 1000);
+    const nextCursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+    const nextParts = datetimePartsInZone(tz, nextCursor);
 
-    const dayStart = zonedWallTimeToUtc(tz, year, month, day, startH, startM).getTime();
-    const dayEnd = zonedWallTimeToUtc(tz, year, month, day, endH, endM).getTime();
-    const startMin = startH * 60 + startM;
-    dayStarts = [];
-    for (let s = dayStart, i = 0; s + stepMs <= dayEnd; s += stepMs, i++) {
-      dayStarts.push({ ms: s, hour: Math.floor((startMin + i * doctor.slotMinutes) / 60) });
+    for (const schedule of schedules) {
+      const start = parseHHMM(schedule.startTime);
+      const end = parseHHMM(schedule.endTime);
+      let rangeStart: number;
+      let rangeEnd: number;
+      let firstMinute: number;
+      if (schedule.weekday === weekday) {
+        rangeStart = zonedWallTimeToUtc(tz, year, month, day, start.hour, start.minute).getTime();
+        const endDate = schedule.endsNextDay ? nextParts : { year, month, day };
+        rangeEnd = zonedWallTimeToUtc(tz, endDate.year, endDate.month, endDate.day, end.hour, end.minute).getTime();
+        firstMinute = start.hour * 60 + start.minute;
+      } else if (schedule.weekday === previousWeekday && schedule.endsNextDay) {
+        rangeStart = zonedWallTimeToUtc(tz, year, month, day, 0, 0).getTime();
+        rangeEnd = zonedWallTimeToUtc(tz, year, month, day, end.hour, end.minute).getTime();
+        firstMinute = 0;
+      } else {
+        continue;
+      }
+      for (let s = rangeStart, i = 0; s + stepMs <= rangeEnd; s += stepMs, i++) {
+        const wallHour = Math.floor((firstMinute + i * doctor.slotMinutes) / 60) % 24;
+        dayStarts.push({ ms: s, hour: wallHour });
+      }
     }
+    dayStarts.sort((a, b) => a.ms - b.ms);
 
     for (const { ms: slotStart, hour } of dayStarts) {
       const slotEnd = slotStart + stepMs;

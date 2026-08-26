@@ -19,9 +19,17 @@ export type Doctor = {
   // Compatibilidad con datos antiguos. La disponibilidad actual usa siempre
   // la franja continua workStart–workEnd dividida por slotMinutes.
   workHours: string[] | null;
+  workSchedules?: DoctorWorkSchedule[];
   workStart: string; // "HH:MM"
   workEnd: string; // "HH:MM"
   timezone: string; // IANA, ej "America/La_Paz"
+};
+
+export type DoctorWorkSchedule = {
+  weekday: number;
+  startTime: string;
+  endTime: string;
+  endsNextDay: boolean;
 };
 
 export type TimeSlot = {

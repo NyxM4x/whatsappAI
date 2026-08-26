@@ -52,7 +52,7 @@ const defaultClinicConfig = {
   },
 
   welcomeMessage:
-    "Bienvenido a Clínica San Martín de Porres 😊 ¿En qué podemos ayudarle?",
+    "Bienvenido a la Clínica San Martín de Porres, ¿en qué podemos ayudarle?",
 
   qrImageUrl: "https://whatsapp-ai-chi.vercel.app/qr-bnb.jpg",
   paymentMethods: ["QR BNB", "Efectivo"],
@@ -121,7 +121,7 @@ const defaultClinicConfig = {
 
   replies: {
     welcome:
-      "Bienvenido a Clínica San Martín de Porres 😊 Puedo ayudarle a *agendar una cita* o darle información (especialidades, precios, dirección, horarios). ¿Qué necesita?",
+      "Bienvenido a la Clínica San Martín de Porres, ¿en qué podemos ayudarle?",
     proofButNoBooking:
       "Gracias 😊 ¿Desea agendar una cita? Escríbame y empezamos.",
     noActiveAppointment:
@@ -143,6 +143,15 @@ QUÉ HACES:
   formas de pago, exámenes de laboratorio y medicamentos.
 - Si la persona quiere AGENDAR, el sistema la guía paso a paso: NO inventes el flujo ni
   pidas datos por tu cuenta, solo invítala a agendar.
+
+SALUDO Y CONTEXTO:
+- Usa el saludo "Bienvenido a la Clínica San Martín de Porres, ¿en qué podemos ayudarle?"
+  únicamente cuando la persona saluda sin pedir nada concreto o cuando su mensaje no
+  especifica qué servicio, información o ayuda necesita.
+- Si la persona saluda y también explica directamente lo que necesita (por ejemplo,
+  "hola, necesito una cita", "buenos días, ¿cuánto cuesta la consulta?" o "hola,
+  ¿dónde están ubicados?"), responde directamente a esa solicitud sin repetir el saludo
+  institucional ni agregar una introducción innecesaria.
 
 SÍNTOMAS: si la persona cuenta un malestar y no sabe a quién acudir, podés orientarla
 sobre qué especialidad le corresponde, eligiendo SIEMPRE una de las que la clínica tiene
