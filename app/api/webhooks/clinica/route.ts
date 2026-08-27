@@ -41,6 +41,7 @@ import {
   buildClinicSystemPrompt,
   getBusinessByPhoneNumberId,
   DEFAULT_BUSINESS_SLUG,
+  CLINIC_WELCOME_MESSAGE,
   type ClinicConfig,
 } from "@/lib/clinic/config";
 import { matchService, formatServicePrice } from "@/lib/clinic/services";
@@ -81,6 +82,9 @@ const WANTS_OUT_PATTERN =
 // un horario. Se exige contexto ("a las 3", "15:30", "9 am").
 const TIME_PREFERENCE_PATTERN =
   /\b(a las \d{1,2}|\d{1,2}[:.]\d{2}|\d{1,2}\s*(am|pm|hrs?|horas?)|ma[ñn]ana|tarde|noche|mediod[ií]a|hoy|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|fin de semana|feriado|cualquier\w*|cuando (sea|pueda|guste|usted)|el que sea|lo antes posible|cuanto antes)\b/i;
+
+const GREETING_ONLY_PATTERN =
+  /^(?:hola|holaa+|buenas(?: tardes| d[ií]as| noches)?|buen(?:os|as)\s+(?:d[ií]as|tardes|noches)|saludos|hey)[.!\s😊👋]*$/i;
 
 // ─── GET: verificación del webhook de Kapso ───────────────────────────────────
 
@@ -334,6 +338,12 @@ export async function POST(request: Request) {
 
   // ── 2. Cargar sesión de reserva ───────────────────────────────────────────
   const session = await getBookingSession(conversationId);
+
+  if (session.step === "idle" && GREETING_ONLY_PATTERN.test(newText)) {
+    replyText = CLINIC_WELCOME_MESSAGE;
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
+    return new Response("ok", { status: 200 });
+  }
 
   // ── 2b. Servicio del tarifario que NO es consulta ─────────────────────────
   // Ecografías, procedimientos, cirugías, partos, enfermería y certificados no

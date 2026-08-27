@@ -33,6 +33,8 @@ export type CatalogItem = { name: string; price: number };
 // para los pocos lugares que necesitan un fallback de negocio sin poder await
 // (ej. un valor por defecto de parámetro).
 export const DEFAULT_BUSINESS_SLUG = "clinica-san-martin";
+export const CLINIC_WELCOME_MESSAGE =
+  "Buenas, somos la Clínica San Martín de Porres. Un gusto, ¿en qué puedo ayudarte hoy? 😊";
 
 const defaultClinicConfig = {
   slug: DEFAULT_BUSINESS_SLUG,
@@ -52,7 +54,7 @@ const defaultClinicConfig = {
   },
 
   welcomeMessage:
-    "Bienvenido a la Clínica San Martín de Porres, ¿en qué podemos ayudarle?",
+    CLINIC_WELCOME_MESSAGE,
 
   qrImageUrl: "https://whatsapp-ai-chi.vercel.app/qr-bnb.jpg",
   paymentMethods: ["QR", "Efectivo"],
@@ -131,8 +133,7 @@ const defaultClinicConfig = {
     /hablar con (una persona|alguien|un humano)|quiero hablar con|no quiero hablar con (un bot|una máquina|un robot)|persona real|atención humana|\breclamo\b|\bqueja\b|estoy molest[oa]|p[eé]sim[oa] (servicio|atención)/i,
 
   replies: {
-    welcome:
-      "Bienvenido a la Clínica San Martín de Porres, ¿en qué podemos ayudarle?",
+    welcome: CLINIC_WELCOME_MESSAGE,
     proofButNoBooking:
       "¡Gracias! 🙏 Recibimos su comprobante. Si el pago era por una consulta, escríbanos *cita* y le reservamos el horario; si era por otro servicio, el equipo de la clínica lo verifica y le responde por aquí 😊",
     noActiveAppointment:
@@ -156,7 +157,8 @@ QUÉ HACES:
   pidas datos por tu cuenta, solo invítala a agendar.
 
 SALUDO Y CONTEXTO:
-- Usa el saludo "Bienvenido a la Clínica San Martín de Porres, ¿en qué podemos ayudarle?"
+- Usa el saludo "Buenas, somos la Clínica San Martín de Porres. Un gusto, ¿en qué puedo
+  ayudarte hoy? 😊"
   únicamente cuando la persona saluda sin pedir nada concreto o cuando su mensaje no
   especifica qué servicio, información o ayuda necesita.
 - Si la persona saluda y también explica directamente lo que necesita (por ejemplo,
