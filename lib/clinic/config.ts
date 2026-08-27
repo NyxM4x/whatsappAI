@@ -47,7 +47,7 @@ const defaultClinicConfig = {
   generalInfo: {
     address: "Av. Moscú, a una cuadra del Mercado La Cuchilla",
     phone: "+591 773 85 200",
-    mapsUrl: "https://maps.app.goo.gl/RcMqdE3z8NX1ZULG6",
+    mapsUrl: "https://maps.app.goo.gl/cZcqhWE9LGhWifvo7?g_st=ic",
     hours: "Lunes a Sábado, 8:00 a 20:00",
   },
 
@@ -120,6 +120,9 @@ const defaultClinicConfig = {
   // "qr" suelto es señal suficiente: quien lo escribe lo está pidiendo.
   qrRequestIntentPatterns:
     /\bqr\b|c[oó]digo (de|para el|para) pago|escanear para pagar|datos para (pagar|transferir)|n[uú]mero de cuenta|d[oó]nde (pago|deposito|transfiero)/i,
+
+  locationRequestIntentPatterns:
+    /\b(ubicaci[oó]n|direcci[oó]n|gps|mapa|google maps|c[oó]mo llego|d[oó]nde est[aá]n|d[oó]nde queda|localizaci[oó]n)\b/i,
 
   // Dispara la derivación a un humano: reclamos, o el paciente pide explícitamente
   // hablar con una persona / no quiere seguir con el bot. Pausa el bot (ver

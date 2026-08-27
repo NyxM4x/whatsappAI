@@ -325,6 +325,13 @@ export async function POST(request: Request) {
     return new Response("ok", { status: 200 });
   }
 
+  // Ubicación/GPS: respuesta determinista para entregar siempre ambos datos.
+  if (clinic.locationRequestIntentPatterns.test(newText)) {
+    replyText = `📍 Nuestra dirección es: ${clinic.generalInfo.address}\n\n🗺️ Ubicación en Google Maps:\n${clinic.generalInfo.mapsUrl}`;
+    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
+    return new Response("ok", { status: 200 });
+  }
+
   // ── 2. Cargar sesión de reserva ───────────────────────────────────────────
   const session = await getBookingSession(conversationId);
 
