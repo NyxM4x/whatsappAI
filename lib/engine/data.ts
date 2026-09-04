@@ -9,7 +9,8 @@
 // ============================================================================
 
 import { getSupabaseClient } from "@/lib/engine/clients";
-import { logSystemEvent, maskPhone } from "@/lib/engine/logging";
+import { logSystemEvent, maskPhone, getErrorMessage } from "@/lib/engine/logging";
+import { normalizePhone } from "@/lib/engine/phone";
 import type {
   GroupKey,
   HistoryMessage,
@@ -25,134 +26,548 @@ export type BotPauseState = {
   expired: boolean;
   reason?: string | null;
   expiresAt?: string | null;
+  mode?: string | null;
+  // De dónde salió la respuesta: la identidad durable (teléfono) o la fila
+  // legacy de conversación. Solo para diagnóstico en logs.
+  source?: "durable" | "conversation" | "none";
 };
 
-const DEFAULT_HUMAN_TAKEOVER_MINUTES = 30;
+export const DEFAULT_HUMAN_TAKEOVER_MINUTES = 30;
 
-function getHumanTakeoverMinutes(): number {
+// HUMAN_TAKEOVER_PAUSE_MINUTES: entero en [1, 1440]; cualquier otra cosa cae al
+// default de 30 minutos.
+export function getHumanTakeoverMinutes(): number {
   const value = Number(process.env.HUMAN_TAKEOVER_PAUSE_MINUTES);
   return Number.isInteger(value) && value >= 1 && value <= 1440 ? value : DEFAULT_HUMAN_TAKEOVER_MINUTES;
 }
 
-function autoPauseFields(nowMs: number, minutes: number) {
+// ─── Identidad durable de la pausa ────────────────────────────────────────────
+// El `conversation.id` de Kapso NO es estable: el mismo paciente puede aparecer
+// con ids distintos (conversación cerrada y reabierta). Antes la pausa se
+// ESCRIBÍA buscando por teléfono y se LEÍA por conversation.id, así que un
+// cambio de id hacía que el bot "perdiera" la pausa y siguiera respondiendo.
+//
+// A partir de acá la identidad durable es el TELÉFONO NORMALIZADO y vive en
+// public.bot_pause_state (una fila por teléfono, PK). `kapso_conversations`
+// sigue siendo metadata técnica y se mantiene espejada por compatibilidad,
+// pero ya no es la fuente de verdad.
+
+export type DurablePauseRow = {
+  contact_phone_normalized: string;
+  contact_phone?: string | null;
+  bot_paused: boolean;
+  bot_paused_at?: string | null;
+  bot_resumed_at?: string | null;
+  bot_pause_expires_at?: string | null;
+  bot_paused_reason?: string | null;
+  bot_pause_mode?: string | null;
+  bot_pause_duration_minutes?: number | null;
+  last_kapso_conversation_id?: string | null;
+  last_provider_message_id?: string | null;
+  updated_at?: string | null;
+};
+
+export type LegacyPauseRow = {
+  bot_paused?: boolean | null;
+  bot_pause_expires_at?: string | null;
+  bot_paused_reason?: string | null;
+  bot_pause_mode?: string | null;
+};
+
+function toMs(iso?: string | null): number | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// Resolución canónica del estado de pausa. La fila durable (por teléfono) manda;
+// la fila de conversación solo se usa si todavía no hay identidad durable.
+export function resolveBotPauseState(params: {
+  durable?: DurablePauseRow | null;
+  legacy?: LegacyPauseRow | null;
+  nowMs?: number;
+}): BotPauseState {
+  const nowMs = params.nowMs ?? Date.now();
+  const row: DurablePauseRow | LegacyPauseRow | null = params.durable ?? params.legacy ?? null;
+  const source: BotPauseState["source"] = params.durable
+    ? "durable"
+    : params.legacy
+      ? "conversation"
+      : "none";
+
+  if (!row?.bot_paused) return { paused: false, expired: false, source };
+
+  const expiresAt = row.bot_pause_expires_at ?? null;
+  const expiresMs = toMs(expiresAt);
+  // Sin vencimiento = pausa indefinida (manual): nunca expira.
+  const expired = expiresMs !== null ? expiresMs <= nowMs : false;
+
   return {
-    bot_pause_expires_at: new Date(nowMs + minutes * 60_000).toISOString(),
-    bot_pause_duration_minutes: minutes,
+    paused: true,
+    expired,
+    reason: row.bot_paused_reason ?? null,
+    expiresAt,
+    mode: row.bot_pause_mode ?? null,
+    source,
+  };
+}
+
+export type TakeoverPauseDecision =
+  | { kind: "keep_manual_pause"; expiresAt: string | null; durationMinutes: number | null }
+  | { kind: "apply"; expiresAt: string; durationMinutes: number };
+
+// Decide la nueva ventana de pausa ante un mensaje humano.
+export function computeTakeoverPause(params: {
+  current?: DurablePauseRow | null;
+  eventTimestamp?: string | null;
+  nowMs: number;
+  minutes: number;
+}): TakeoverPauseDecision {
+  const current = params.current ?? null;
+  const currentExpiryMs = toMs(current?.bot_pause_expires_at ?? null);
+
+  // 1) Una pausa manual / indefinida NO se degrada a temporal.
+  if (current?.bot_paused && (current.bot_pause_mode === "manual" || currentExpiryMs === null)) {
+    return {
+      kind: "keep_manual_pause",
+      expiresAt: current.bot_pause_expires_at ?? null,
+      durationMinutes: current.bot_pause_duration_minutes ?? null,
+    };
+  }
+
+  // 2) La ventana se ancla al timestamp DEL MENSAJE humano, no a "ahora": así
+  //    una reentrega del mismo WAMID calcula exactamente el mismo expiry y no
+  //    puede renovar el TTL ni aunque se cuele por delante del dedupe.
+  const baseMs = toMs(params.eventTimestamp ?? null) ?? params.nowMs;
+  const candidateMs = baseMs + params.minutes * 60_000;
+
+  // 3) Monotonía: un evento viejo nunca acorta una pausa vigente.
+  const finalMs = currentExpiryMs !== null ? Math.max(currentExpiryMs, candidateMs) : candidateMs;
+
+  return {
+    kind: "apply",
+    expiresAt: new Date(finalMs).toISOString(),
+    durationMinutes: params.minutes,
+  };
+}
+
+// ─── Takeover humano ──────────────────────────────────────────────────────────
+
+export type HumanTakeoverParams = {
+  conversationId: string;
+  customerPhone: string;
+  customerPhoneNormalized?: string | null;
+  providerMessageId: string;
+  messageTimestamp: string | null;
+};
+
+export type HumanTakeoverResult = {
+  applied: boolean;
+  duplicate: boolean;
+  identity: string | null;
+  expiresAt: string | null;
+  outcome: "applied" | "duplicate_wamid" | "manual_pause_kept" | "unresolved_identity";
+};
+
+// Puerto de persistencia del takeover. Existe para poder probar orden,
+// idempotencia y TTL sin base de datos real (ver scripts/test-human-takeover.ts).
+export type HumanTakeoverRepo = {
+  hasPauseEventForWamid(identity: string, providerMessageId: string): Promise<boolean>;
+  getDurablePause(identity: string): Promise<DurablePauseRow | null>;
+  writeDurablePause(row: DurablePauseRow): Promise<void>;
+  mirrorConversationPause(params: {
+    identity: string;
+    conversationId: string;
+    contactPhone: string;
+    fields: LegacyPauseRow & {
+      bot_paused_at?: string | null;
+      bot_pause_duration_minutes?: number | null;
+    };
+  }): Promise<void>;
+  insertPauseControlEvent(params: {
+    identity: string;
+    conversationId: string;
+    contactPhone: string;
+    providerMessageId: string;
+    expiresAt: string | null;
+  }): Promise<{ duplicate: boolean }>;
+  saveHumanMessage(params: {
+    identity: string;
+    conversationId: string;
+    contactPhone: string;
+    providerMessageId: string;
+    messageTimestamp: string | null;
+  }): Promise<void>;
+};
+
+// Orden deliberado (la pausa pesa más que el almacenamiento auxiliar):
+//   1. resolver identidad durable
+//   2. comprobar WAMID duplicado
+//   3. leer el estado humano actual
+//   4. aplicar / renovar la pausa      ← lo crítico
+//   5. registrar el control event
+//   6. persistir el mensaje humano     ← best-effort, nunca tumba la pausa
+export async function applyHumanTakeover(
+  repo: HumanTakeoverRepo,
+  params: HumanTakeoverParams,
+  options?: { nowMs?: number; minutes?: number },
+): Promise<HumanTakeoverResult> {
+  const nowMs = options?.nowMs ?? Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const minutes = options?.minutes ?? getHumanTakeoverMinutes();
+
+  // 1. Identidad durable.
+  const identity = params.customerPhoneNormalized ?? normalizePhone(params.customerPhone);
+  if (!identity) {
+    return {
+      applied: false,
+      duplicate: false,
+      identity: null,
+      expiresAt: null,
+      outcome: "unresolved_identity",
+    };
+  }
+
+  // 2. Dedupe por WAMID, alineado con el índice único
+  //    (contact_phone_normalized, action, provider_message_id).
+  if (await repo.hasPauseEventForWamid(identity, params.providerMessageId)) {
+    return {
+      applied: false,
+      duplicate: true,
+      identity,
+      expiresAt: null,
+      outcome: "duplicate_wamid",
+    };
+  }
+
+  // 3. Estado humano actual.
+  const current = await repo.getDurablePause(identity);
+
+  // 4. Aplicar o renovar la pausa.
+  const decision = computeTakeoverPause({
+    current,
+    eventTimestamp: params.messageTimestamp,
+    nowMs,
+    minutes,
+  });
+
+  const keepManual = decision.kind === "keep_manual_pause";
+
+  const pauseFields = keepManual
+    ? {
+        bot_paused: true,
+        bot_paused_at: current?.bot_paused_at ?? nowIso,
+        bot_paused_reason: current?.bot_paused_reason ?? "manual",
+        bot_pause_mode: current?.bot_pause_mode ?? "manual",
+        bot_pause_expires_at: decision.expiresAt,
+        bot_pause_duration_minutes: decision.durationMinutes,
+      }
+    : {
+        bot_paused: true,
+        bot_paused_at: params.messageTimestamp ?? nowIso,
+        bot_paused_reason: "human_whatsapp_business_app",
+        bot_pause_mode: "auto",
+        bot_pause_expires_at: decision.expiresAt,
+        bot_pause_duration_minutes: decision.durationMinutes,
+      };
+
+  await repo.writeDurablePause({
+    contact_phone_normalized: identity,
+    contact_phone: params.customerPhone,
+    ...pauseFields,
+    last_kapso_conversation_id: params.conversationId,
+    last_provider_message_id: params.providerMessageId,
+    updated_at: nowIso,
+  });
+
+  // Espejo en kapso_conversations: mantiene coherentes al panel y al fallback
+  // legacy. Best-effort — la verdad ya quedó escrita en bot_pause_state.
+  try {
+    await repo.mirrorConversationPause({
+      identity,
+      conversationId: params.conversationId,
+      contactPhone: params.customerPhone,
+      fields: pauseFields,
+    });
+  } catch (err) {
+    console.error("human takeover: mirror to kapso_conversations failed", getErrorMessage(err));
+  }
+
+  // 5. Control event (cierra la idempotencia también contra carreras).
+  let duplicate = false;
+  try {
+    const inserted = await repo.insertPauseControlEvent({
+      identity,
+      conversationId: params.conversationId,
+      contactPhone: params.customerPhone,
+      providerMessageId: params.providerMessageId,
+      expiresAt: decision.expiresAt,
+    });
+    duplicate = inserted.duplicate;
+  } catch (err) {
+    console.error("human takeover: control event insert failed", getErrorMessage(err));
+  }
+
+  // 6. Mensaje humano — auxiliar. Un fallo acá NO puede perder la pausa.
+  try {
+    await repo.saveHumanMessage({
+      identity,
+      conversationId: params.conversationId,
+      contactPhone: params.customerPhone,
+      providerMessageId: params.providerMessageId,
+      messageTimestamp: params.messageTimestamp,
+    });
+  } catch (err) {
+    console.error("human takeover: message persistence failed", getErrorMessage(err));
+  }
+
+  return {
+    applied: true,
+    duplicate,
+    identity,
+    expiresAt: decision.expiresAt,
+    outcome: keepManual ? "manual_pause_kept" : "applied",
+  };
+}
+
+function getSupabaseHumanTakeoverRepo(): HumanTakeoverRepo {
+  const supabase = getSupabaseClient();
+
+  return {
+    async hasPauseEventForWamid(identity, providerMessageId) {
+      // `.limit(1)` en vez de `.maybeSingle()`: la consulta ya calca el índice
+      // único, pero así ni siquiera es posible un PGRST116 por varias filas
+      // (que antes devolvía 500 y descartaba la pausa entera).
+      const { data, error } = await supabase
+        .from("bot_control_events")
+        .select("id")
+        .eq("contact_phone_normalized", identity)
+        .eq("action", "pause")
+        .eq("provider_message_id", providerMessageId)
+        .limit(1);
+      if (error) throw error;
+      return (data?.length ?? 0) > 0;
+    },
+
+    async getDurablePause(identity) {
+      const { data, error } = await supabase
+        .from("bot_pause_state")
+        .select(
+          "contact_phone_normalized, contact_phone, bot_paused, bot_paused_at, bot_resumed_at, bot_pause_expires_at, bot_paused_reason, bot_pause_mode, bot_pause_duration_minutes, last_kapso_conversation_id",
+        )
+        .eq("contact_phone_normalized", identity)
+        .maybeSingle();
+      if (error) throw error;
+      return (data as DurablePauseRow | null) ?? null;
+    },
+
+    async writeDurablePause(row) {
+      const { error } = await supabase
+        .from("bot_pause_state")
+        .upsert(row, { onConflict: "contact_phone_normalized" });
+      if (error) throw error;
+    },
+
+    async mirrorConversationPause({ identity, conversationId, contactPhone, fields }) {
+      const nowIso = new Date().toISOString();
+
+      // Asegura que exista la fila técnica (contact_phone_normalized es columna
+      // generada: se calcula sola, no se escribe a mano).
+      const { error: upsertError } = await supabase.from("kapso_conversations").upsert(
+        {
+          kapso_conversation_id: conversationId,
+          contact_phone: contactPhone,
+          updated_at: nowIso,
+        },
+        { onConflict: "kapso_conversation_id" },
+      );
+      if (upsertError) throw upsertError;
+
+      // Espeja sobre TODAS las conversaciones del mismo teléfono, no solo la del
+      // evento: es lo que evita que un conversation.id nuevo "resucite" al bot.
+      const { error } = await supabase
+        .from("kapso_conversations")
+        .update({ ...fields, updated_at: nowIso })
+        .eq("contact_phone_normalized", identity);
+      if (error) throw error;
+    },
+
+    async insertPauseControlEvent({
+      identity,
+      conversationId,
+      contactPhone,
+      providerMessageId,
+      expiresAt,
+    }) {
+      const { error } = await supabase.from("bot_control_events").insert({
+        kapso_conversation_id: conversationId,
+        contact_phone_normalized: identity,
+        contact_phone_masked: maskPhone(contactPhone),
+        action: "pause",
+        actor_source: "whatsapp_business_app",
+        reason: "human_whatsapp_business_app",
+        expires_at: expiresAt,
+        provider_message_id: providerMessageId,
+        metadata: { takeover_completed: true, kapso_conversation_id: conversationId },
+      });
+      if (error) {
+        if (error.code === "23505") return { duplicate: true };
+        throw error;
+      }
+      return { duplicate: false };
+    },
+
+    async saveHumanMessage({ conversationId, contactPhone, providerMessageId, messageTimestamp }) {
+      const { error } = await supabase.from("kapso_messages").insert({
+        kapso_message_id: providerMessageId,
+        kapso_conversation_id: conversationId,
+        contact_phone: contactPhone,
+        direction: "outbound",
+        role: "assistant",
+        content: "[HUMAN_TAKEOVER]",
+        message_timestamp: messageTimestamp ?? new Date().toISOString(),
+        raw_payload: null,
+      });
+      if (error && error.code !== "23505") throw error;
+    },
   };
 }
 
 // Auto-pausa el bot cuando un humano responde desde la app de WhatsApp Business
-// (origin=business_app). Llamado desde la normalización del evento saliente.
-export async function autoPauseBotFromBusinessApp(params: {
-  conversationId: string;
-  customerPhone: string;
-  providerMessageId: string;
-  messageTimestamp: string | null;
-}) {
+// (origin=business_app). Llamado desde el webhook, antes de cualquier IA.
+export async function autoPauseBotFromBusinessApp(
+  params: HumanTakeoverParams,
+): Promise<HumanTakeoverResult> {
+  return applyHumanTakeover(getSupabaseHumanTakeoverRepo(), params);
+}
+
+// Teléfono normalizado asociado a un conversation.id, para los callers que solo
+// tienen el id técnico (hoy: /api/bot-control).
+export async function resolveConversationPhone(
+  conversationId?: string | null,
+): Promise<string | null> {
+  if (!conversationId) return null;
+
   const supabase = getSupabaseClient();
-  const nowIso = new Date().toISOString();
-  const eventMs = params.messageTimestamp ? new Date(params.messageTimestamp).getTime() : Date.now();
-  const baseMs = Number.isFinite(eventMs) ? eventMs : Date.now();
-  const minutes = getHumanTakeoverMinutes();
-  const expiresAt = new Date(baseMs + minutes * 60_000).toISOString();
-
-  const { data: completedEvent, error: completedLookupError } = await supabase
-    .from("bot_control_events")
-    .select("id")
-    .eq("action", "pause")
-    .eq("provider_message_id", params.providerMessageId)
-    .maybeSingle();
-  if (completedLookupError) throw completedLookupError;
-  if (completedEvent) return { applied: false, duplicate: true };
-
-  const { data: existingConversation, error: lookupError } = await supabase
+  const { data, error } = await supabase
     .from("kapso_conversations")
-    .select("kapso_conversation_id, bot_paused, bot_pause_mode, bot_pause_expires_at")
-    .eq("contact_phone", params.customerPhone)
-    .maybeSingle();
-  if (lookupError) throw lookupError;
+    .select("contact_phone")
+    .eq("kapso_conversation_id", conversationId)
+    .limit(1);
 
-  const durableConversationId = existingConversation?.kapso_conversation_id ?? params.conversationId;
-  if (!existingConversation) {
-    const { error } = await supabase.from("kapso_conversations").upsert({
-      kapso_conversation_id: durableConversationId,
-      contact_phone: params.customerPhone,
-      updated_at: nowIso,
-    }, { onConflict: "kapso_conversation_id" });
-    if (error) throw error;
+  if (error) {
+    console.error("resolveConversationPhone failed", error);
+    return null;
   }
 
-  const { error: messageError } = await supabase.from("kapso_messages").insert({
-    kapso_message_id: params.providerMessageId,
-    kapso_conversation_id: durableConversationId,
-    contact_phone: params.customerPhone,
-    direction: "outbound",
-    role: "assistant",
-    content: "[HUMAN_TAKEOVER]",
-    message_timestamp: params.messageTimestamp ?? nowIso,
-    raw_payload: null,
-  });
-  if (messageError && messageError.code !== "23505") throw messageError;
-
-  if (!(existingConversation?.bot_paused && existingConversation.bot_pause_mode === "manual")) {
-    const oldExpiry = existingConversation?.bot_pause_expires_at
-      ? new Date(existingConversation.bot_pause_expires_at).getTime() : 0;
-    const finalExpiry = Math.max(Number.isFinite(oldExpiry) ? oldExpiry : 0, new Date(expiresAt).getTime());
-    const { error } = await supabase.from("kapso_conversations").update({
-      bot_paused: true,
-      bot_paused_at: params.messageTimestamp ?? nowIso,
-      bot_paused_reason: "human_whatsapp_business_app",
-      bot_pause_mode: "auto",
-      bot_pause_expires_at: new Date(finalExpiry).toISOString(),
-      bot_pause_duration_minutes: minutes,
-      updated_at: nowIso,
-    }).eq("kapso_conversation_id", durableConversationId);
-    if (error) throw error;
-  }
-
-  const eventPayload = {
-    kapso_conversation_id: durableConversationId,
-    contact_phone_masked: maskPhone(params.customerPhone),
-    action: "pause",
-    actor_source: "whatsapp_business_app",
-    reason: "human_whatsapp_business_app",
-    expires_at: expiresAt,
-    provider_message_id: params.providerMessageId,
-    metadata: { takeover_completed: true, kapso_conversation_id: params.conversationId },
-  };
-  const { error: eventError } = await supabase.from("bot_control_events").insert(eventPayload);
-  if (eventError && eventError.code !== "23505") throw eventError;
-
-  if (eventError?.code === "23505") return { applied: false, duplicate: true };
-  return { applied: true, duplicate: false };
+  return normalizePhone(data?.[0]?.contact_phone ?? null);
 }
 
 // Pausa el bot cuando el propio paciente pide hablar con una persona (reclamos,
 // temas fuera de alcance, o simplemente no querer seguir con el bot). Vence a
-// las 12h (AUTO_PAUSE_MINUTES); antes de eso el equipo puede retomarla a mano
-// desde el panel / bot-control cuando ya atendió al paciente.
-export async function pauseBotForHumanHandoff(conversationId: string) {
+// los HUMAN_TAKEOVER_PAUSE_MINUTES; antes de eso el equipo puede retomarla a
+// mano desde el panel / bot-control cuando ya atendió al paciente.
+export async function pauseBotForHumanHandoff(conversationId: string, phone?: string | null) {
   const supabase = getSupabaseClient();
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
+  const minutes = getHumanTakeoverMinutes();
+
+  const fields = {
+    bot_paused: true,
+    bot_paused_at: nowIso,
+    bot_paused_reason: "human_handoff_requested",
+    bot_pause_mode: "auto",
+    bot_pause_expires_at: new Date(now + minutes * 60_000).toISOString(),
+    bot_pause_duration_minutes: minutes,
+  };
+
+  const identity = normalizePhone(phone) ?? (await resolveConversationPhone(conversationId));
+
+  if (identity) {
+    const { error } = await supabase.from("bot_pause_state").upsert(
+      {
+        contact_phone_normalized: identity,
+        contact_phone: phone ?? null,
+        ...fields,
+        last_kapso_conversation_id: conversationId,
+        updated_at: nowIso,
+      },
+      { onConflict: "contact_phone_normalized" },
+    );
+    if (error) console.error("pauseBotForHumanHandoff durable write failed", error);
+  }
 
   const { error } = await supabase
     .from("kapso_conversations")
-    .update({
-      bot_paused: true,
-      bot_paused_at: nowIso,
-      bot_paused_reason: "human_handoff_requested",
-      bot_pause_mode: "auto",
-      ...autoPauseFields(now, getHumanTakeoverMinutes()),
-      updated_at: nowIso,
-    })
+    .update({ ...fields, updated_at: nowIso })
     .eq("kapso_conversation_id", conversationId);
 
   if (error) {
     console.error("pauseBotForHumanHandoff failed", error);
   } else {
-    console.log("bot paused: human handoff requested", { conversationId });
+    console.log("bot paused: human handoff requested", { conversationId, identity });
   }
+}
+
+// Pausa manual (indefinida) desde el panel / API de bot-control.
+export async function setManualBotPause(params: {
+  conversationId: string;
+  phone?: string | null;
+  reason: string;
+}): Promise<void> {
+  const supabase = getSupabaseClient();
+  const nowIso = new Date().toISOString();
+  const identity =
+    normalizePhone(params.phone) ?? (await resolveConversationPhone(params.conversationId));
+  if (!identity) return;
+
+  const { error } = await supabase.from("bot_pause_state").upsert(
+    {
+      contact_phone_normalized: identity,
+      contact_phone: params.phone ?? null,
+      bot_paused: true,
+      bot_paused_at: nowIso,
+      bot_pause_expires_at: null,
+      bot_paused_reason: params.reason,
+      bot_pause_mode: "manual",
+      bot_pause_duration_minutes: null,
+      last_kapso_conversation_id: params.conversationId,
+      updated_at: nowIso,
+    },
+    { onConflict: "contact_phone_normalized" },
+  );
+  if (error) console.error("setManualBotPause failed", error);
+}
+
+// Reanudación manual desde el panel / API de bot-control.
+export async function clearBotPause(params: {
+  conversationId: string;
+  phone?: string | null;
+  reason: string;
+}): Promise<void> {
+  const supabase = getSupabaseClient();
+  const nowIso = new Date().toISOString();
+  const identity =
+    normalizePhone(params.phone) ?? (await resolveConversationPhone(params.conversationId));
+  if (!identity) return;
+
+  const { error } = await supabase.from("bot_pause_state").upsert(
+    {
+      contact_phone_normalized: identity,
+      contact_phone: params.phone ?? null,
+      bot_paused: false,
+      bot_resumed_at: nowIso,
+      bot_pause_expires_at: null,
+      bot_paused_reason: params.reason,
+      bot_pause_mode: "manual",
+      bot_pause_duration_minutes: null,
+      last_kapso_conversation_id: params.conversationId,
+      updated_at: nowIso,
+    },
+    { onConflict: "contact_phone_normalized" },
+  );
+  if (error) console.error("clearBotPause failed", error);
 }
 
 export async function saveContactAndConversation(message: IncomingMessage) {
@@ -499,16 +914,55 @@ export async function isWithinServiceWindow(
   return Date.now() - last.getTime() < windowMs;
 }
 
-export async function getBotPauseState(conversationId?: string): Promise<BotPauseState> {
-  if (!conversationId) {
-    return { paused: false, expired: false };
+// Estado de pausa del bot para ESTA conversación.
+//
+// `phone` es la identidad durable y tiene prioridad: si existe fila en
+// bot_pause_state para ese teléfono, esa es la respuesta, sin importar con qué
+// conversation.id llegó el mensaje. La lectura por kapso_conversation_id queda
+// solo como fallback para conversaciones que aún no tienen identidad durable.
+export async function getBotPauseState(
+  conversationId?: string,
+  phone?: string | null,
+): Promise<BotPauseState> {
+  const identity = normalizePhone(phone);
+
+  if (!conversationId && !identity) {
+    return { paused: false, expired: false, source: "none" };
   }
 
   const supabase = getSupabaseClient();
 
+  if (identity) {
+    const { data, error } = await supabase
+      .from("bot_pause_state")
+      .select(
+        "contact_phone_normalized, bot_paused, bot_paused_at, bot_pause_expires_at, bot_paused_reason, bot_pause_mode",
+      )
+      .eq("contact_phone_normalized", identity)
+      .maybeSingle();
+
+    if (error) {
+      console.error("supabase select durable bot pause state failed", error);
+      await logSystemEvent({
+        level: "error",
+        eventType: "bot_pause_state_durable_select_failed",
+        conversationId,
+        errorMessage: error.message,
+        metadata: { code: error.code, details: error.details },
+      });
+      // Cae al fallback legacy en vez de asumir "no pausado".
+    } else if (data) {
+      return resolveBotPauseState({ durable: data as DurablePauseRow });
+    }
+  }
+
+  if (!conversationId) {
+    return { paused: false, expired: false, source: "none" };
+  }
+
   const { data, error } = await supabase
     .from("kapso_conversations")
-    .select("bot_paused, bot_pause_expires_at, bot_paused_reason")
+    .select("bot_paused, bot_pause_expires_at, bot_paused_reason, bot_pause_mode")
     .eq("kapso_conversation_id", conversationId)
     .maybeSingle();
 
@@ -526,33 +980,42 @@ export async function getBotPauseState(conversationId?: string): Promise<BotPaus
       },
     });
 
-    return { paused: false, expired: false };
+    return { paused: false, expired: false, source: "none" };
   }
 
-  if (!data?.bot_paused) {
-    return { paused: false, expired: false };
-  }
-
-  const expiresAt = data.bot_pause_expires_at
-    ? new Date(data.bot_pause_expires_at).getTime()
-    : null;
-
-  const expired = expiresAt ? expiresAt <= Date.now() : false;
-
-  return {
-    paused: true,
-    expired,
-    reason: data.bot_paused_reason,
-    expiresAt: data.bot_pause_expires_at,
-  };
+  return resolveBotPauseState({ legacy: (data as LegacyPauseRow | null) ?? null });
 }
 
-export async function resumeBotIfPauseExpired(conversationId?: string) {
-  if (!conversationId) return;
+// Reanuda una pausa TEMPORAL ya vencida. Limpia la identidad durable y la fila
+// de conversación; nunca toca una pausa sin vencimiento (manual/indefinida),
+// porque el filtro exige bot_pause_expires_at not null.
+export async function resumeBotIfPauseExpired(conversationId?: string, phone?: string | null) {
+  const identity = normalizePhone(phone);
+  if (!conversationId && !identity) return;
 
   const supabase = getSupabaseClient();
 
   const nowIso = new Date().toISOString();
+
+  if (identity) {
+    const { error: durableError } = await supabase
+      .from("bot_pause_state")
+      .update({
+        bot_paused: false,
+        bot_resumed_at: nowIso,
+        bot_pause_expires_at: null,
+        bot_paused_reason: "auto_resume_expired",
+        updated_at: nowIso,
+      })
+      .eq("contact_phone_normalized", identity)
+      .eq("bot_paused", true)
+      .not("bot_pause_expires_at", "is", null)
+      .lte("bot_pause_expires_at", nowIso);
+    if (durableError) console.error("supabase durable auto resume failed", durableError);
+  }
+
+  if (!conversationId) return;
+
   const { error } = await supabase
     .from("kapso_conversations")
     .update({
@@ -564,7 +1027,8 @@ export async function resumeBotIfPauseExpired(conversationId?: string) {
     })
     .eq("kapso_conversation_id", conversationId)
     .eq("bot_paused", true)
-    .not("bot_pause_expires_at", "is", null);
+    .not("bot_pause_expires_at", "is", null)
+    .lte("bot_pause_expires_at", nowIso);
 
   if (error) {
     console.error("supabase auto resume bot failed", error);

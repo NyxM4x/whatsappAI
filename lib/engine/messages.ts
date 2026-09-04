@@ -5,6 +5,8 @@
 // No contiene lógica de negocio: solo extrae y tipifica los campos del evento.
 // ============================================================================
 
+import { normalizePhone } from "@/lib/engine/phone";
+
 // Transcribe un audio usando OpenAI Whisper. Descarga el archivo desde la URL
 // (con la API key de Kapso si es necesario) y lo envía a la API de Whisper.
 async function transcribeAudio(audioUrl: string): Promise<string | null> {
@@ -43,6 +45,9 @@ export type MediaType = "image" | "document" | "audio" | null;
 
 export type IncomingMessage = {
   from: string;
+  // Identidad durable del contacto: `from` sin diferencias de formato. Es la
+  // clave con la que se resuelve la pausa del bot (ver lib/engine/phone.ts).
+  fromNormalized: string | null;
   text: string;
   messageId?: string;
   conversationId?: string;
@@ -60,8 +65,12 @@ export type IncomingMessage = {
 };
 
 export type HumanTakeoverEvent = {
+  // Referencia técnica de Kapso. Puede cambiar entre conversaciones del MISMO
+  // paciente, por eso NO es la identidad durable — solo metadata.
   conversationId: string;
   customerPhone: string;
+  // Identidad durable del paciente (ver lib/engine/phone.ts).
+  customerPhoneNormalized: string;
   providerMessageId: string;
   messageTimestamp: string | null;
 };
@@ -188,20 +197,48 @@ function extractMediaUrl(
   return { url: null, type: null };
 }
 
+// El evento que dispara la pausa por intervención humana. Es el ÚNICO nombre
+// aceptado: `delivered`, `read`, `failed` o cualquier otro NO pausan el bot.
+export const HUMAN_TAKEOVER_EVENT_NAME = "whatsapp.message.sent";
+
+// ¿El request trae varios eventos en `payload.data`?
+function isBatchPayload(payload: Record<string, any>, request?: Request | null): boolean {
+  return payload.batch === true || request?.headers?.get("x-webhook-batch") === "true";
+}
+
 function getWebhookEvents(payload: Record<string, any>, request: Request): Record<string, any>[] {
-  const isBatch =
-    payload.batch === true || request.headers.get("x-webhook-batch") === "true";
-  if (isBatch && Array.isArray(payload.data)) return payload.data;
+  if (isBatchPayload(payload, request) && Array.isArray(payload.data)) return payload.data;
   return [payload];
 }
 
-function getEventName(event: Record<string, any>): string | null {
-  const value = event.type ?? event.event ?? event.name;
-  return typeof value === "string" ? value : null;
+// Kapso puede anunciar el tipo de evento SOLO en el header `X-Webhook-Event`
+// (igual que ya hace con `X-Webhook-Batch`), sin repetirlo dentro del body.
+// Sin este fallback, un webhook real de intervención humana quedaba sin
+// clasificar y el bot nunca se pausaba.
+function getHeaderEventName(request?: Request | null): string | null {
+  const value = request?.headers?.get("x-webhook-event");
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-export function extractHumanTakeoverEvent(event: Record<string, any>): HumanTakeoverEvent | null {
-  if (getEventName(event) !== "whatsapp.message.sent") return null;
+// El body manda; el header es solo fallback (no rompe payloads existentes).
+function getEventName(
+  event: Record<string, any>,
+  headerEventName?: string | null,
+): string | null {
+  const value = event.type ?? event.event ?? event.name;
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return headerEventName && headerEventName.trim() ? headerEventName.trim() : null;
+}
+
+// Clasificador de intervención humana. Estrictamente estructural: NO mira el
+// contenido del mensaje. Pausa solo con la terna exacta
+//   whatsapp.message.sent + direction=outbound + origin=business_app
+// (`cloud_api` es el propio bot, así que jamás debe pausar).
+export function extractHumanTakeoverEvent(
+  event: Record<string, any>,
+  headerEventName?: string | null,
+): HumanTakeoverEvent | null {
+  if (getEventName(event, headerEventName) !== HUMAN_TAKEOVER_EVENT_NAME) return null;
 
   const message = event.message;
   const customerPhone = event.conversation?.phone_number;
@@ -215,9 +252,15 @@ export function extractHumanTakeoverEvent(event: Record<string, any>): HumanTake
     typeof providerMessageId !== "string" || !providerMessageId.trim()
   ) return null;
 
+  // Sin identidad durable no hay pausa posible: la pausa se guarda y se lee por
+  // teléfono normalizado, no por conversation.id.
+  const customerPhoneNormalized = normalizePhone(customerPhone);
+  if (!customerPhoneNormalized) return null;
+
   return {
     conversationId: conversationId.trim(),
     customerPhone: customerPhone.trim(),
+    customerPhoneNormalized,
     providerMessageId: providerMessageId.trim(),
     messageTimestamp: parseKapsoTimestamp(message.timestamp),
   };
@@ -227,8 +270,12 @@ export function extractHumanTakeoverEvents(
   payload: Record<string, any>,
   request: Request,
 ): HumanTakeoverEvent[] {
+  // En batch cada elemento se clasifica por su PROPIO body: un header de
+  // envoltorio no puede promover a `message.sent` a todos los eventos del lote.
+  const headerEventName = isBatchPayload(payload, request) ? null : getHeaderEventName(request);
+
   return getWebhookEvents(payload, request)
-    .map(extractHumanTakeoverEvent)
+    .map((event) => extractHumanTakeoverEvent(event, headerEventName))
     .filter((event): event is HumanTakeoverEvent => Boolean(event));
 }
 
@@ -272,6 +319,7 @@ async function extractIncomingFromEvent(
 
   return {
     from,
+    fromNormalized: normalizePhone(from),
     text: finalText || "",
     messageId,
     conversationId,

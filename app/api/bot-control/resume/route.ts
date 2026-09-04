@@ -1,5 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 
+import { clearBotPause } from "@/lib/engine/data";
+
 function getRequiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing ${name}`);
@@ -66,6 +68,10 @@ export async function POST(request: Request) {
         { status: 500 },
       );
     }
+
+    // Limpia también la identidad durable; si no, el bot seguiría pausado por
+    // teléfono aunque el panel mostrara la conversación reanudada.
+    await clearBotPause({ conversationId, phone, reason });
 
     await supabase.from("bot_control_events").insert({
       kapso_conversation_id: conversationId,

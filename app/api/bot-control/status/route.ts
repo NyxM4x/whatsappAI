@@ -1,5 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 
+import { getBotPauseState } from "@/lib/engine/data";
+
 function getRequiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing ${name}`);
@@ -39,9 +41,9 @@ export async function GET(request: Request) {
 
     const { data, error } = await supabase
       .from("kapso_conversations")
-      .select("bot_paused, bot_pause_expires_at, bot_paused_reason")
+      .select("contact_phone")
       .eq("kapso_conversation_id", conversationId)
-      .maybeSingle();
+      .limit(1);
 
     if (error) {
       return Response.json(
@@ -50,39 +52,28 @@ export async function GET(request: Request) {
       );
     }
 
-    if (!data) {
-      return Response.json({
-        ok: true,
-        conversation_id: conversationId,
-        bot_paused: false,
-        bot_enabled: true,
-        enabled: true,
-        is_active: true,
-        agent_active: true,
-        exists: false,
-      });
-    }
+    const contactPhone = data?.[0]?.contact_phone ?? searchParams.get("phone");
 
-    const expiresAt = data.bot_pause_expires_at;
-    const expired = expiresAt
-      ? new Date(expiresAt).getTime() <= Date.now()
-      : false;
+    // Misma resolución canónica que usa el webhook: identidad durable primero
+    // (teléfono), fila de conversación solo como fallback.
+    const state = await getBotPauseState(conversationId, contactPhone);
 
-    const isPaused = Boolean(data.bot_paused) && !expired;
+    const isPaused = state.paused && !state.expired;
     const isAgentEnabled = !isPaused;
 
     return Response.json({
       ok: true,
-      exists: true,
+      exists: (data?.length ?? 0) > 0 || state.source === "durable",
       conversation_id: conversationId,
       bot_paused: isPaused,
       bot_enabled: isAgentEnabled,
       enabled: isAgentEnabled,
       is_active: isAgentEnabled,
       agent_active: isAgentEnabled,
-      expired,
-      expires_at: expiresAt,
-      reason: data.bot_paused_reason,
+      expired: state.expired,
+      expires_at: state.expiresAt ?? null,
+      reason: state.reason ?? null,
+      identity_source: state.source,
     });
   } catch (error) {
     return Response.json(

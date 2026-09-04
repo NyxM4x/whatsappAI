@@ -1,5 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 
+import { setManualBotPause } from "@/lib/engine/data";
+
 function getRequiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) throw new Error(`Missing ${name}`);
@@ -72,6 +74,11 @@ export async function POST(request: Request) {
         { status: 500 },
       );
     }
+
+    // Identidad durable: la pausa manual también se escribe por teléfono, que es
+    // lo que lee el webhook. Sin esto el panel pausaba una fila que el bot ya no
+    // consulta cuando cambia el conversation.id.
+    await setManualBotPause({ conversationId, phone, reason });
 
     await supabase.from("bot_control_events").insert({
       kapso_conversation_id: conversationId,
