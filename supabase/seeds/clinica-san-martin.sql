@@ -3,7 +3,7 @@
 -- ----------------------------------------------------------------------------
 -- Carga especialidades y doctores. Idempotente: las especialidades hacen upsert
 -- por (business, slug); los doctores se recargan (delete + insert) para este
--- negocio. Correr en Supabase → SQL Editor DESPUÉS de las migraciones.
+-- neg  ocio. Correr en Supabase → SQL Editor DESPUÉS de las migraciones.
 --
 -- Roster (12 doctores). Cada uno con su google_calendar_id propio; el calendario
 -- DEBE estar compartido con el email de la cuenta de servicio
