@@ -151,14 +151,30 @@ export async function POST(request: Request) {
   }
 
   // Takeover humano: se procesa antes de debounce, OpenAI o cualquier respuesta.
+  // Cada evento se aísla: un fallo en uno no puede tumbar el webhook entero
+  // (antes un 500 acá también impedía guardar el inbound del paciente, y el
+  // reintento de Kapso volvía a fallar igual).
   const humanTakeovers = extractHumanTakeoverEvents(payload, request);
-  try {
-    for (const takeover of humanTakeovers) {
-      await autoPauseBotFromBusinessApp(takeover);
+  for (const takeover of humanTakeovers) {
+    try {
+      const result = await autoPauseBotFromBusinessApp(takeover);
+      console.log("human takeover processed", {
+        phone: maskPhone(takeover.customerPhone),
+        outcome: result.outcome,
+        duplicate: result.duplicate,
+        expiresAt: result.expiresAt,
+      });
+    } catch (err) {
+      console.error("human takeover failed", getErrorMessage(err));
+      await logSystemEvent({
+        level: "critical",
+        eventType: "human_takeover_failed",
+        conversationId: takeover.conversationId,
+        contactPhone: takeover.customerPhone,
+        messageId: takeover.providerMessageId,
+        errorMessage: getErrorMessage(err),
+      });
     }
-  } catch (err) {
-    console.error("human takeover failed", getErrorMessage(err));
-    return new Response("takeover failed", { status: 500 });
   }
 
   const incomingMessages = await normalizeIncomingMessages(payload, request);
@@ -240,14 +256,15 @@ export async function POST(request: Request) {
   if (!canReply) return new Response("reply already processed", { status: 200 });
 
   // ── Pausa del bot ─────────────────────────────────────────────────────────
-  const pauseState = await getBotPauseState(lastMessage.conversationId);
+  // La identidad durable es el teléfono; conversationId queda como referencia.
+  const pauseState = await getBotPauseState(lastMessage.conversationId, lastMessage.from);
 
   if (pauseState.paused && !pauseState.expired) {
     return new Response("bot paused", { status: 200 });
   }
 
   if (pauseState.paused && pauseState.expired) {
-    await resumeBotIfPauseExpired(lastMessage.conversationId);
+    await resumeBotIfPauseExpired(lastMessage.conversationId, lastMessage.from);
   }
 
   // ── Marcar como leído ─────────────────────────────────────────────────────
@@ -293,10 +310,15 @@ export async function POST(request: Request) {
       : newMessages.map((m) => m.text ?? "").filter((t) => t.trim().length > 0).join("\n")
   ).trim();
 
-  // Barrera 1 reforzada: la pausa puede haber llegado durante el debounce.
-  const currentPauseState = await getBotPauseState(conversationId);
-  if (currentPauseState.paused) {
-    console.log("ai turn omitted because bot is paused", { conversationId });
+  // Barrera A (antes de OpenAI): la pausa puede haber llegado durante el
+  // debounce. Se distingue una pausa VIGENTE de una temporal ya expirada.
+  const currentPauseState = await getBotPauseState(conversationId, contactPhone);
+  if (currentPauseState.paused && !currentPauseState.expired) {
+    console.log("ai turn omitted because bot is paused", {
+      conversationId,
+      reason: currentPauseState.reason,
+      expiresAt: currentPauseState.expiresAt,
+    });
     return new Response("bot paused", { status: 200 });
   }
 
@@ -323,7 +345,7 @@ export async function POST(request: Request) {
   // Prioridad alta: corta cualquier flujo (incluso una reserva en curso) y
   // pausa el bot para que el equipo retome la conversación manualmente.
   if (clinic.humanHandoffIntentPatterns.test(newText)) {
-    await pauseBotForHumanHandoff(conversationId);
+    await pauseBotForHumanHandoff(conversationId, contactPhone);
     replyText = clinic.replies.humanHandoff;
     await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
     return new Response("ok", { status: 200 });
@@ -405,7 +427,7 @@ export async function POST(request: Request) {
         draft: {},
         hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
       });
-      await pauseBotForHumanHandoff(conversationId);
+      await pauseBotForHumanHandoff(conversationId, contactPhone);
       await logSystemEvent({
         level: "info",
         eventType: "service_handoff_requested",
@@ -652,7 +674,7 @@ export async function POST(request: Request) {
     });
     // Si el modelo no responde no dejamos al paciente sin salida ni le damos un
     // teléfono: se deriva de verdad, pausando el bot para que lo tome el equipo.
-    await pauseBotForHumanHandoff(conversationId);
+    await pauseBotForHumanHandoff(conversationId, contactPhone);
     replyText =
       "Disculpe, tuve un problema para procesar su consulta 🙏 Ya estamos derivando su petición a un asesor de la clínica, que le atenderá en un momento.";
   }
@@ -676,10 +698,16 @@ async function sendAndPersist(params: {
 }) {
   const { kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, clinic } = params;
 
-  // Segunda barrera: una persona puede tomar el control mientras OpenAI procesa.
-  const pauseState = await getBotPauseState(conversationId);
-  if (pauseState.paused) {
-    console.log("ai response omitted because bot is paused", { conversationId });
+  // Barrera B (justo antes de enviar): una persona puede tomar el control
+  // mientras OpenAI procesa. Solo frena una pausa VIGENTE — una pausa temporal
+  // ya expirada no debe silenciar esta respuesta.
+  const pauseState = await getBotPauseState(conversationId, contactPhone);
+  if (pauseState.paused && !pauseState.expired) {
+    console.log("ai response omitted because bot is paused", {
+      conversationId,
+      reason: pauseState.reason,
+      expiresAt: pauseState.expiresAt,
+    });
     return;
   }
 
