@@ -8,7 +8,9 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "prompt:check": "tsx scripts/prompt-check.ts"
+    "prompt:check": "tsx scripts/prompt-check.ts",
+    "check:intenciones": "tsx scripts/check-intenciones.ts",
+    "check:analisis": "tsx scripts/check-analisis.ts"
   },
   "keywords": [],
   "author": "",

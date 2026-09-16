@@ -54,6 +54,8 @@ const KIND_LABEL: Record<string, string> = {
   reprogramar: "🔁 Pide reprogramar",
   consulta_cita: "❓ Pregunta por su cita",
   pago: "💳 Quiere pagar",
+  no_disponible: "🚫 Pide algo que no ofrecemos",
+  accion: "🔔 Pide que se le avise o confirme algo",
 };
 
 const CLOSED_LABEL: Record<string, string> = {

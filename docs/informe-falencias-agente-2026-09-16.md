@@ -7,6 +7,11 @@ Este documento es autocontenido: incluye el contexto del sistema, el estado real
 una conversación de producción que falló, el diagnóstico línea por línea y las preguntas
 concretas que necesitamos resolver.
 
+> **Estado al 2026-09-16, después de la primera tanda de correcciones.**
+> El diagnóstico de las secciones 1 a 5 se conserva tal como se escribió, para que se
+> entienda de dónde salió cada arreglo. Lo ya resuelto está en la sección 7 al final.
+> Resueltos: F1, F4, F5, F6 y —por decisión de negocio— F3. Pendientes: F2, F7, F8, F9.
+
 ---
 
 ## 1. Qué es el sistema
@@ -275,3 +280,86 @@ En orden de prioridad:
 
 Si necesitás ver código, todo está en el repo y las referencias de este documento apuntan al
 archivo y la línea exactos.
+
+---
+
+## 7. Lo ya corregido (rama `feat/leads-recoleccion`)
+
+### Decisión de negocio que cambió el diagnóstico
+
+**El bot nunca propone médicos ni horarios.** Solo reúne los datos; el asesor humano propone
+médico y confirma horario cuando revisa la solicitud en el panel. Esto **cierra F3**: las 17
+especialidades sin plantel dejan de ser un problema, porque el bot cotiza y recolecta, y es
+una persona quien resuelve con qué médico. La lista única que alimenta al bot es la Lista B
+(`CONSULTATION_SPECIALTIES`, 20 ítems).
+
+### F1 — Especialidad no disponible · resuelto
+
+- `TurnAnalysis` gana `unavailableRequest: string | null`. La regla del prompt es explícita:
+  el fallback a `medicina-general` vale **solo para síntomas**, nunca para una especialidad
+  que el paciente nombró.
+- La garantía no se deja en manos del modelo: `sanitizeAnalysis()` fuerza
+  `specialtyKey = null` cuando `unavailableRequest` trae valor. Si el modelo devolviera las
+  dos cosas, gana la honestidad.
+- Rama nueva en el webhook, **antes** de servicio y ficha: responde
+  *"No contamos con [X] en la clínica"* + alarma `no_disponible` + pausa.
+- El prompt de `clinic_settings` incorpora la sección "LO QUE LA CLÍNICA NO OFRECE".
+
+### F4 — Médico como dato, no como reemplazo · resuelto
+
+`missingFields()` ahora exige `specialtyKey` **siempre** para una ficha. Antes bastaba con
+nombrar un médico (`!specialtyKey && !doctorPreference`) y la solicitud se cerraba sin
+especialidad, con un nombre que nadie validaba contra el plantel. El médico se sigue
+guardando en `doctor_preference` como dato adicional para el asesor.
+
+### F5 — Red de seguridad conversacional · resuelto
+
+`needsHumanAction: boolean` detecta gestiones y hechos físicos ("dígale a la licenciada",
+"ya llegué", "me confirma", "pago llegando"). La rama va **después** de servicio y ficha
+—para no robarle mensajes a la recolección, ej. "quiero una ficha, me confirma"— y **antes**
+del Q&A, que es donde estaba el agujero: deriva con alarma `accion` en vez de contestar "Ok".
+
+Esto **no** se implementó como regla de prompt, a diferencia de lo propuesto: `answerQuestion()`
+solo devuelve un string y no puede disparar `registerEscalation()` ni la pausa. Una regla de
+prompt habría cambiado "Ok" por *"le aviso a la doctora"*, que es peor: una promesa falsa.
+
+### F6 — Identidad · resuelto
+
+`CLINIC_WELCOME_MESSAGE` pasa a *"soy el asistente virtual de la Clínica San Martín de
+Porres"*, y el prompt gana una sección "QUIÉN ERES" que le prohíbe hacerse pasar por la
+doctora o prometer gestiones.
+
+### Extra: robustez de `analyzeTurn`
+
+`getActiveDoctorsWithSpecialty()` se llamaba fuera del `try`, así que un fallo de Supabase
+hacía lanzar a `analyzeTurn` (→ 500 y reintento de Kapso) en vez de degradar. Ahora la lista
+de médicos es contexto opcional con `.catch()`. Importa justamente porque quedarse sin
+`analyzeTurn` devuelve al paciente al Q&A libre, que es el agujero recién tapado.
+
+### Verificación
+
+- `npm run typecheck` → limpio.
+- `npm run check:intenciones` → sin fallos (regex, tarifario y franjas de precio; no usa OpenAI).
+- `npm run check:analisis` → **script nuevo**, reproduce los mensajes reales de la conversación
+  fallida contra `analyzeTurn`. Necesita `OPENAI_API_KEY` en `.env.local`, así que **todavía no
+  se corrió**. Incluye el invariante: si un caso devuelve `unavailableRequest` y `specialtyKey`
+  a la vez, falla con "¡SUSTITUCIÓN SILENCIOSA!".
+
+### Migraciones — orden de aplicación
+
+| Orden | Migración | Cuándo |
+|---|---|---|
+| 1 | `20260915000000` | Segura ya: solo `create table` e `add column` |
+| 2 | `20260915010000` | **Junto con el deploy**: reescribe `system_prompt_base` y `services`, que el código viejo lee |
+| 3 | `20260916000000` | Junto con el deploy: amplía el CHECK de `kind` y actualiza prompt y saludo |
+
+### Sigue pendiente
+
+- **F2** — que el bot no liste especialidades no pedidas. En el flujo nuevo no hay menú, pero
+  falta revisar que `askMissing` no repregunte lo que el paciente ya dijo.
+- **F7** — la forma de pago ("voy a pagar llegando") no se guarda como dato de la ficha.
+- **F8** — trazabilidad. Ojo con la promesa flotante propuesta: en Vercel el runtime puede
+  congelar la instancia al devolver la respuesta y el insert nunca llega, y un reject sin
+  catch es unhandled rejection. Va con `waitUntil` de `@vercel/functions`, o directamente
+  `await` (el webhook ya duerme 6 s en el debounce).
+- **F9** — precios de pediatría en fin de semana; lo resuelve `pricing.ts` al desplegar.

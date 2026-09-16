@@ -1,0 +1,127 @@
+// ============================================================================
+// Verificación de analyzeTurn contra mensajes reales de pacientes.
+// ----------------------------------------------------------------------------
+// SÍ necesita OpenAI (OPENAI_API_KEY en .env.local): llama al modelo una vez por
+// caso. Supabase es opcional — sin él se usa la config estática y la lista de
+// médicos queda vacía.
+//
+// Los casos salen de conversaciones que no terminaron en nada. El de
+// fisioterapia es el que motivó todo esto: el bot le ofreció Medicina General y
+// cinco médicos que el paciente nunca mencionó.
+//
+//   npx tsx scripts/check-analisis.ts
+// ============================================================================
+
+import { existsSync, readFileSync } from "node:fs";
+
+if (existsSync(".env.local")) {
+  for (const line of readFileSync(".env.local", "utf8").split("\n")) {
+    const m = line.match(/^([A-Z_]+)=(.*)$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^"|"$/g, "");
+  }
+}
+
+if (!process.env.OPENAI_API_KEY) {
+  console.error("Falta OPENAI_API_KEY (ponela en .env.local). Este script llama al modelo.");
+  process.exit(1);
+}
+
+const { getClinicConfig } = await import("../lib/clinic/config");
+const { analyzeTurn } = await import("../lib/clinic/leads");
+const { findSpecialty } = await import("../lib/clinic/pricing");
+
+type Expectation = {
+  text: string;
+  // Qué esperamos del análisis. Solo se comprueba lo que se declara.
+  unavailable?: boolean;      // pidió algo que no ofrecemos
+  needsAction?: boolean;      // pide una gestión humana
+  specialtyKey?: string | null;
+  wantsLead?: boolean;
+};
+
+const CASES: Expectation[] = [
+  // ── El caso que rompió: especialidad que la clínica no tiene ──────────────
+  { text: "Para fisioterapia", unavailable: true, specialtyKey: null },
+  { text: "buenas, hacen odontologia?", unavailable: true, specialtyKey: null },
+  { text: "necesito un oftalmologo para mi mama", unavailable: true, specialtyKey: null },
+  { text: "quiero una ficha para rehabilitacion de rodilla", unavailable: true, specialtyKey: null },
+
+  // ── Gestiones que solo hace una persona (antes contestaba "Ok") ───────────
+  { text: "Por favor doctora me lo dice a la licen para las 5:10 llegó", needsAction: true },
+  { text: "Me confirma", needsAction: true },
+  { text: "ya llegué a la clínica, avise por favor", needsAction: true },
+  { text: "voy a cancelar llegando nomas", needsAction: true },
+
+  // ── Lo que SÍ debe seguir funcionando: no sobre-derivar ───────────────────
+  { text: "quiero una ficha para pediatria mañana a las 10", unavailable: false, needsAction: false, specialtyKey: "pediatria", wantsLead: true },
+  { text: "me duele mucho la barriga desde ayer", unavailable: false, specialtyKey: "medicina-general" },
+  { text: "necesito un ginecologo", unavailable: false, specialtyKey: "ginecologia", wantsLead: true },
+  { text: "cuanto cuesta la consulta de neurologia?", unavailable: false, specialtyKey: "neurologia" },
+  { text: "a que hora abren?", unavailable: false, needsAction: false, wantsLead: false },
+];
+
+const clinic = await getClinicConfig();
+const ctx = {
+  clinic,
+  conversationId: "check-analisis",
+  contactPhone: "+59100000000",
+  contactName: null,
+  step: "idle" as const,
+  draft: null,
+};
+
+let failures = 0;
+
+console.log("\nANÁLISIS DE MENSAJES  (modelo: " + (process.env.OPENAI_MODEL ?? "gpt-4o-mini") + ")\n");
+
+for (const c of CASES) {
+  const a = await analyzeTurn({ ...ctx, text: c.text });
+
+  if (!a) {
+    console.log(`  ✗ "${c.text}"\n      el análisis devolvió null`);
+    failures++;
+    continue;
+  }
+
+  const problems: string[] = [];
+  if (c.unavailable !== undefined) {
+    const got = Boolean(a.unavailableRequest);
+    if (got !== c.unavailable) {
+      problems.push(`unavailableRequest=${a.unavailableRequest ?? "null"} (esperado ${c.unavailable ? "con valor" : "null"})`);
+    }
+  }
+  if (c.needsAction !== undefined && a.needsHumanAction !== c.needsAction) {
+    problems.push(`needsHumanAction=${a.needsHumanAction} (esperado ${c.needsAction})`);
+  }
+  if (c.specialtyKey !== undefined && a.specialtyKey !== c.specialtyKey) {
+    problems.push(`specialtyKey=${a.specialtyKey ?? "null"} (esperado ${c.specialtyKey ?? "null"})`);
+  }
+  if (c.wantsLead !== undefined && a.wantsLead !== c.wantsLead) {
+    problems.push(`wantsLead=${a.wantsLead} (esperado ${c.wantsLead})`);
+  }
+
+  // Invariante del arreglo: nunca las dos cosas a la vez. Si esto falla, el bot
+  // volvió a poder sustituir en silencio una especialidad que no tenemos.
+  if (a.unavailableRequest && a.specialtyKey) {
+    problems.push(`¡SUSTITUCIÓN SILENCIOSA! pidió "${a.unavailableRequest}" y devolvió ${a.specialtyKey}`);
+  }
+
+  const resumen = [
+    a.unavailableRequest ? `no-ofrecemos:"${a.unavailableRequest}"` : null,
+    a.needsHumanAction ? "gestión" : null,
+    a.specialtyKey ? findSpecialty(a.specialtyKey)?.name ?? a.specialtyKey : null,
+    a.wantsLead ? "quiere-ficha" : null,
+  ].filter(Boolean).join(" · ") || "—";
+
+  if (problems.length) {
+    failures++;
+    console.log(`  ✗ "${c.text}"`);
+    for (const p of problems) console.log(`      ${p}`);
+  } else {
+    console.log(`  ✓ "${c.text}"`.padEnd(66) + resumen);
+  }
+}
+
+console.log("\n" + "─".repeat(72));
+console.log(failures ? `✗ ${failures} caso(s) con fallos.` : "✓ Sin fallos.");
+process.exit(failures ? 1 : 0);

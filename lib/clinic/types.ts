@@ -127,7 +127,9 @@ export type LeadKind =
   | "cancelar"
   | "reprogramar"
   | "consulta_cita" // "¿cuándo es mi cita?"
-  | "pago";         // pidió el QR o datos de pago
+  | "pago"          // pidió el QR o datos de pago
+  | "no_disponible" // pidió algo que la clínica no ofrece (fisioterapia, odontología…)
+  | "accion";       // pide una gestión: "avísele a la doctora", "ya llegué", "me confirma"
 
 export type LeadStatus = "pending" | "attended" | "withdrawn";
 

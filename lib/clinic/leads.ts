@@ -61,7 +61,17 @@ export const LEAD_REPLIES = {
   technicalError: "Disculpe, tuve un problema para procesar su consulta 🙏 Ya le paso con un asesor de la clínica, que le atenderá en un momento.",
   receipt: "¡Gracias! 🙏 Recibimos su comprobante. Un asesor de la clínica lo revisará y le confirmará por aquí.",
   file: "¡Gracias! 🙏 Recibimos su archivo. Un asesor de la clínica lo revisará.",
+  // El paciente pide algo que solo resuelve alguien de la clínica ("avísele a
+  // la doctora", "ya llegué", "me confirma"). Antes esto caía en el Q&A, que
+  // contestaba "Ok" sin que nadie se enterara.
+  action: "Entendido 🙏 Eso se lo tiene que confirmar una persona de la clínica: ya le aviso para que le escriba por aquí en un momento.",
 };
+
+// Pidió por su nombre algo que la clínica no ofrece. Se lo decimos y lo pasamos
+// a un asesor: nunca se sustituye en silencio por otra especialidad.
+export function unavailableReply(request: string): string {
+  return `Disculpe 🙏 No contamos con *${request}* en la clínica. Le paso con un asesor por si podemos ofrecerle alguna alternativa; en un momento le escribe por aquí.`;
+}
 
 export type LeadContext = {
   clinic: ClinicConfig;
@@ -86,6 +96,8 @@ export type TurnAnalysis = {
   preferredDate: string | null;
   preferredHour: string | null;
   visitType: VisitType | null;
+  unavailableRequest: string | null;
+  needsHumanAction: boolean;
   wantsLead: boolean;
   wantsHuman: boolean;
   frustrated: boolean;
@@ -95,12 +107,15 @@ export type TurnAnalysis = {
 };
 
 const ANALYSIS_SYSTEM = `Analizás mensajes de WhatsApp de pacientes de una clínica en Bolivia. Respondés ÚNICAMENTE con un JSON válido, sin texto extra:
-{"patientName": string|null, "specialtyKey": string|null, "doctorName": string|null, "preferredTime": string|null, "preferredDate": "YYYY-MM-DD"|null, "preferredHour": "HH:MM"|null, "visitType": "nueva"|"reconsulta"|null, "wantsLead": boolean, "wantsHuman": boolean, "frustrated": boolean, "confirms": boolean, "wantsOut": boolean, "isQuestion": boolean}
+{"patientName": string|null, "specialtyKey": string|null, "doctorName": string|null, "preferredTime": string|null, "preferredDate": "YYYY-MM-DD"|null, "preferredHour": "HH:MM"|null, "visitType": "nueva"|"reconsulta"|null, "unavailableRequest": string|null, "needsHumanAction": boolean, "wantsLead": boolean, "wantsHuman": boolean, "frustrated": boolean, "confirms": boolean, "wantsOut": boolean, "isQuestion": boolean}
 
 Reglas:
 - Solo extraés lo que el mensaje dice de verdad. Ante la duda, null o false. Nunca inventes.
 - patientName: nombre del PACIENTE que se va a atender, tal como lo escribió. Si la ficha es para otra persona (un hijo, la mamá), es el nombre de esa persona. Nunca es el nombre de un médico.
-- specialtyKey: la clave de la lista si nombra la especialidad o un sinónimo ("pediatra" → pediatria, "ginecólogo" → ginecologia, "médico general" → medicina-general). Si nombra a un médico de la lista, usá la especialidad de ese médico. Si solo describe un síntoma, elegí la especialidad más apropiada de la lista y ante la duda medicina-general. Si no hay ninguna pista, null.
+- specialtyKey: la clave de la lista si nombra la especialidad o un sinónimo ("pediatra" → pediatria, "ginecólogo" → ginecologia, "médico general" → medicina-general). Si nombra a un médico de la lista, usá la especialidad de ese médico. Si SOLO describe un síntoma o malestar y no nombra ninguna especialidad, elegí la especialidad más apropiada de la lista y ante la duda medicina-general. Si no hay ninguna pista, null.
+- unavailableRequest: si el paciente PIDE POR SU NOMBRE una especialidad, un servicio o una atención que NO está en la lista de especialidades ni en el tarifario (por ejemplo fisioterapia, odontología, oftalmología, psiquiatría, oncología, rehabilitación, kinesiología, nutrición), poné acá eso que pidió, tal como lo escribió. Si lo que pide SÍ está en la lista, null.
+- REGLA DURA: cuando unavailableRequest tiene valor, specialtyKey es SIEMPRE null. Que el paciente nombre algo que no ofrecemos NUNCA se traduce a medicina-general ni a ninguna otra especialidad de la lista: el fallback a medicina-general vale solo para síntomas, jamás para una especialidad que el paciente nombró.
+- needsHumanAction: true si el mensaje pide una GESTIÓN o avisa de un HECHO FÍSICO que solo puede resolver una persona de la clínica: que se avise a alguien ("dígale a la doctora", "avise a la licenciada"), que se le confirme algo ("me confirma", "confírmeme"), que ya llegó o está por llegar ("ya llegué", "estoy en la puerta", "llego a las 5"), que ya pagó o va a pagar al llegar, o cualquier pedido de que alguien haga algo fuera de este chat. false si solo pide una ficha, un servicio o información.
 - doctorName: el médico que pide el paciente, tal como lo escribió. null si no nombra a ninguno.
 - preferredTime: el día y/o la hora que prefiere, en pocas palabras y como lo dijo ("mañana a las 10", "el sábado en la tarde", "lo antes posible"). null si no dijo nada de horario.
 - preferredDate: la fecha de ese día en formato YYYY-MM-DD, calculada con la fecha actual ("hoy", "ahora", "mañana", "el lunes", "20 de septiembre"). null si no dijo un día claro.
@@ -133,14 +148,21 @@ function sanitizeAnalysis(raw: any): TurnAnalysis {
   const date = typeof raw?.preferredDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.preferredDate)
     ? raw.preferredDate
     : null;
+  // El paciente nombró algo que no ofrecemos: la especialidad se descarta acá,
+  // en código, y no solo por la regla del prompt. Si el modelo devuelve las dos
+  // cosas ("fisioterapia" + medicina-general), lo que mandaba antes era el
+  // fallback silencioso — el error que se le ofreció a un paciente real.
+  const unavailableRequest = cleanText(raw?.unavailableRequest, 80);
   return {
     patientName: cleanText(raw?.patientName, 80),
-    specialtyKey: findSpecialty(raw?.specialtyKey)?.key ?? null,
+    specialtyKey: unavailableRequest ? null : findSpecialty(raw?.specialtyKey)?.key ?? null,
     doctorName: cleanText(raw?.doctorName, 80),
     preferredTime: cleanText(raw?.preferredTime),
     preferredDate: date,
     preferredHour: cleanHour(raw?.preferredHour),
     visitType: raw?.visitType === "nueva" || raw?.visitType === "reconsulta" ? raw.visitType : null,
+    unavailableRequest,
+    needsHumanAction: raw?.needsHumanAction === true,
     wantsLead: raw?.wantsLead === true,
     wantsHuman: raw?.wantsHuman === true,
     frustrated: raw?.frustrated === true,
@@ -158,7 +180,14 @@ export async function analyzeTurn(
   if (!ctx.text.trim()) return null;
 
   const now = localNow(ctx.clinic.timezone);
-  const doctors = await getActiveDoctorsWithSpecialty(ctx.clinic.slug);
+  // La lista de médicos es contexto opcional (sirve para mapear "quiero con la
+  // Dra. Rosmery" a su especialidad). Si Supabase no responde, el análisis
+  // sigue sin ella: quedarse sin analyzeTurn deja al paciente en el Q&A, que es
+  // exactamente el agujero que estamos cerrando.
+  const doctors = await getActiveDoctorsWithSpecialty(ctx.clinic.slug).catch((err) => {
+    console.error("analyzeTurn: doctors lookup failed, continuing without them", getErrorMessage(err));
+    return [] as { name: string; specialtyKey: string | null }[];
+  });
   const context =
     ctx.step === "confirming_lead"
       ? "El asistente acaba de enviarle al paciente un RESUMEN de su solicitud y le preguntó si los datos están correctos."
@@ -233,14 +262,18 @@ type Field = "specialty" | "name" | "time" | "visit";
 function needsVisitType(draft: LeadDraft): boolean {
   if (draft.kind !== "ficha") return false;
   const spec = findSpecialty(draft.specialtyKey);
-  // Sin especialidad (solo nombró un médico) no se sabe si aplica: se pregunta.
+  // Todavía sin especialidad: no se sabe si aplica, así que se pregunta junto
+  // con el resto y el paciente contesta todo en un mensaje.
   return spec ? Boolean(spec.reconsultaDays) : true;
 }
 
 function missingFields(draft: LeadDraft | null): Field[] {
   if (!draft) return [];
   const missing: Field[] = [];
-  if (draft.kind === "ficha" && !draft.specialtyKey && !draft.doctorPreference) missing.push("specialty");
+  // La especialidad es obligatoria SIEMPRE. Antes bastaba con nombrar un médico
+  // y la ficha se cerraba sin especialidad, con un nombre que nadie validaba
+  // contra el plantel: el médico es un dato extra, nunca un reemplazo.
+  if (draft.kind === "ficha" && !draft.specialtyKey) missing.push("specialty");
   if (!draft.patientName) missing.push("name");
   if (!draft.preferredTime) missing.push("time");
   if (needsVisitType(draft) && !draft.visitType) missing.push("visit");
@@ -286,13 +319,13 @@ function leadRowFields(draft: LeadDraft): LeadFields {
 function askMissing(draft: LeadDraft, missing: Field[], intro?: string): string {
   const pediatric = draft.specialtyKey === "pediatria";
   const items: Record<Field, string> = {
-    specialty: "🩺 La *especialidad* (o el nombre del médico de su preferencia)",
+    specialty: "🩺 La *especialidad* que necesita",
     name: pediatric ? "👶 El *nombre completo del niño o niña* que será atendido" : "👤 El *nombre completo del paciente*",
     time: "🗓️ El *día y la hora* que le quedarían cómodos",
     visit: "🔁 Si es *consulta nueva* o *reconsulta*",
   };
   const questions: Record<Field, string> = {
-    specialty: "¿Para qué *especialidad* es la consulta? Si tiene un médico de preferencia, dígame su nombre 😊",
+    specialty: "¿Para qué *especialidad* es la consulta? Si además tiene un médico de preferencia, dígame su nombre y lo anoto 😊",
     name: pediatric
       ? "¿Cuál es el *nombre completo del niño o niña* que será atendido? 😊"
       : "¿Cuál es el *nombre completo del paciente*? 😊",

@@ -12,9 +12,11 @@
 //   4. Pide hablar con una persona → alarma + pausa
 //   5. Solicitud en curso (collecting_lead / confirming_lead) → continueLead
 //   6. Cancelar / reprogramar / "¿cuándo es mi cita?" / pedir QR → alarma + pausa
-//   7. analyzeTurn: pide persona, frustración (3 veces → alarma + pausa)
+//   7. analyzeTurn: pide persona, pide algo que no ofrecemos, frustración
+//      (3 veces → alarma + pausa)
 //   8. Servicio del tarifario o ficha → startLead
-//   9. Si no → Q&A con OpenAI
+//   9. Pide una gestión ("avísele a la doctora", "ya llegué") → alarma + pausa
+//  10. Si no → Q&A con OpenAI
 // Toda derivación pausa el bot DESPUÉS de enviar la respuesta: la barrera de
 // pausa de sendAndPersist descartaría el aviso al paciente si se pausara antes.
 // ============================================================================
@@ -57,6 +59,7 @@ import {
   LEAD_REPLIES,
   registerEscalation,
   startLead,
+  unavailableReply,
   type LeadContext,
   type TurnAnalysis,
 } from "@/lib/clinic/leads";
@@ -419,6 +422,14 @@ export async function POST(request: Request) {
   const analysis = await analyzeTurn({ ...leadCtx, text: newText, step: "idle", draft: null });
   if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff);
 
+  // Pidió por su nombre algo que la clínica no ofrece (fisioterapia,
+  // odontología…). Va ANTES de servicio y ficha: si no, el mensaje seguiría de
+  // largo y se le abriría una solicitud de otra cosa. Nunca se sustituye en
+  // silencio por otra especialidad.
+  if (analysis?.unavailableRequest) {
+    return escalate("no_disponible", unavailableReply(analysis.unavailableRequest));
+  }
+
   const tracked = await trackFailedAttempts(leadCtx, session, analysis);
   if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts);
 
@@ -438,7 +449,16 @@ export async function POST(request: Request) {
     return ok();
   }
 
-  // ── 12. Q&A general con OpenAI ────────────────────────────────────────────
+  // ── 12. Red de seguridad: pide una gestión, no información ────────────────
+  // "Avísele a la doctora", "ya llegué", "me confirma": nada de eso lo puede
+  // hacer el bot. Va acá, después de servicio y ficha, para no robarle mensajes
+  // a la recolección ("quiero una ficha, me confirma") y justo antes del Q&A,
+  // que es donde el agujero existía: el modelo contestaba "Ok" y nadie se
+  // enteraba. Tiene que ser una rama del código, no una regla del prompt: el
+  // Q&A solo devuelve texto, no puede dejar la alarma en el panel.
+  if (analysis?.needsHumanAction) return escalate("accion", LEAD_REPLIES.action);
+
+  // ── 13. Q&A general con OpenAI ────────────────────────────────────────────
   // Si el modelo no responde no dejamos al paciente sin salida: se deriva de
   // verdad, con alarma en el panel.
   const answer = await answerQuestion(leadCtx, newText);
