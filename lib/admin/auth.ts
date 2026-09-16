@@ -22,7 +22,12 @@ export type StaffSession = {
 };
 
 export const ADMIN_COOKIE_NAME = "clinic_admin_session";
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
+// 400 días: el panel de recepción queda abierto para que la alarma de
+// solicitudes nunca deje de sonar por una sesión vencida. Es el máximo que los
+// navegadores aceptan para una cookie; "Cerrar sesión" sigue funcionando y
+// rotar ADMIN_SESSION_SECRET invalida todas las sesiones de una vez.
+export const SESSION_TTL_SECONDS = 400 * 24 * 60 * 60;
+const SESSION_TTL_MS = SESSION_TTL_SECONDS * 1000;
 
 function getSecret(): string {
   const secret = process.env.ADMIN_SESSION_SECRET;

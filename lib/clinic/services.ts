@@ -11,16 +11,14 @@
 // consultorio) y el % que se lleva el médico: nada de eso entra acá, el bot no
 // debe conocerlo ni poder citarlo.
 //
-// bookable=true SOLO en consultas: son las únicas que entran al flujo de
-// agenda + pago (el monto real lo calcula getPriceForDoctorSlot en
-// lib/clinic/data.ts, según médico + día + hora del turno — ver
-// clinic_doctor_price_rules; los precios de acá son solo el texto informativo
-// para el Q&A libre). Todo lo demás requiere valoración previa → el webhook
-// informa el precio y deriva a un asesor humano.
+// Las consultas por especialidad NO están acá: su precio depende del día y la
+// hora y vive en lib/clinic/pricing.ts. Un servicio de este catálogo abre una
+// solicitud de servicio (lib/clinic/leads.ts), salvo las emergencias, que solo
+// se informan.
 // ============================================================================
 
 export type ServiceCategory =
-  | "consulta"
+  | "emergencia"
   | "procedimiento"
   | "ecografia"
   | "enfermeria"
@@ -41,14 +39,13 @@ export type ServiceItem = {
   priceMax?: number;  // rangos del tarifario (ej. cesárea multigesta 3800/4200)
   promo?: ServicePromo;
   category: ServiceCategory;
-  bookable?: boolean; // true solo para consultas (flujo de agenda + pago)
   note?: string;      // "L-V", "Sáb/Dom", aclaraciones del tarifario
   aliases?: string[]; // cómo lo escribe la gente por WhatsApp
 };
 
 // Títulos de cada sección en el system prompt, en el orden en que se muestran.
 export const SERVICE_CATEGORY_LABELS: Record<ServiceCategory, string> = {
-  consulta: "CONSULTAS",
+  emergencia: "CONSULTAS DE EMERGENCIA",
   procedimiento: "PROCEDIMIENTOS",
   ecografia: "ECOGRAFÍAS",
   enfermeria: "ENFERMERÍA",
@@ -57,7 +54,7 @@ export const SERVICE_CATEGORY_LABELS: Record<ServiceCategory, string> = {
 };
 
 export const SERVICE_CATEGORY_ORDER: ServiceCategory[] = [
-  "consulta",
+  "emergencia",
   "procedimiento",
   "ecografia",
   "enfermeria",
@@ -66,26 +63,26 @@ export const SERVICE_CATEGORY_ORDER: ServiceCategory[] = [
 ];
 
 export const defaultServices: ServiceItem[] = [
-  // ── Consultas (agendables) ──────────────────────────────────────────────
-  // Precios de consulta reales (lo que efectivamente cobra el flujo de agenda,
-  // ver clinic_doctor_price_rules): varían por día/hora, así que el número de
-  // acá es el diurno y la nota explica el recargo. El bot no calcula la hora
-  // exacta en el Q&A libre — solo cita este texto.
-  { name: "Consulta médica general", price: 60, category: "consulta", bookable: true, note: "lunes a viernes 7:00-19:00 y sábado 7:00-12:00; 80 Bs el resto (noche, sábado tarde y domingo)", aliases: ["consulta general", "medicina general", "consulta medica"] },
-  { name: "Consulta de Ginecología o Pediatría", price: 80, category: "consulta", bookable: true, note: "lunes a viernes 7:00-19:00", aliases: ["consulta ginecologia", "consulta pediatria", "ginecologo", "pediatra"] },
-  { name: "Consulta de Pediatría o Ginecología (fin de semana)", price: 120, category: "consulta", bookable: true, note: "sábado y domingo", aliases: ["pediatria fin de semana", "pediatra de noche", "pediatria sabado", "pediatria domingo", "ginecologia fin de semana", "ginecologia sabado", "ginecologia domingo"] },
-  { name: "Emergencia o accidente de tránsito", price: 150, category: "consulta", bookable: true, aliases: ["transito", "accidente de transito", "certificado de transito", "examen de transito", "consulta de emergencia", "emergencia general"] },
-  { name: "Consulta ginecológica de emergencia a llamado", price: 200, category: "consulta", bookable: true, aliases: ["ginecologia de emergencia", "emergencia ginecologica"] },
+  // ── Consultas de emergencia (tarifario de la clínica) ─────────────────────
+  // Se informan pero no abren una solicitud: la emergencia no espera a que un
+  // asesor confirme un horario.
+  { name: "Consulta de emergencia (medicina general)", price: 80, category: "emergencia", aliases: ["consulta de emergencia", "emergencia general"] },
+  { name: "Consulta por accidente de tránsito", price: 150, category: "emergencia", aliases: ["transito", "accidente de transito", "certificado de transito", "examen de transito"] },
+  { name: "Consulta ginecológica de emergencia a llamado", price: 200, category: "emergencia", aliases: ["ginecologia de emergencia", "emergencia ginecologica"] },
+  { name: "Consulta de emergencia de cardiología", price: 150, category: "emergencia", aliases: ["emergencia cardiologica", "emergencia de cardiologia"] },
+  { name: "Consulta de emergencia de cirugía", price: 250, category: "emergencia", aliases: ["emergencia de cirugia", "emergencia quirurgica"] },
+  { name: "Consulta de emergencia de traumatología", price: 250, category: "emergencia", aliases: ["emergencia de traumatologia", "emergencia traumatologica"] },
+  { name: "Consulta de emergencia de urología", price: 150, category: "emergencia", aliases: ["emergencia de urologia", "emergencia urologica"] },
 
   // ── Procedimientos ──────────────────────────────────────────────────────
   { name: "Papanicolaou", price: 100, category: "procedimiento", aliases: ["papanicolau", "papanicolao", "pap", "citologia"] },
   { name: "Colocación de DIU", price: 150, category: "procedimiento", aliases: ["poner diu", "colocacion diu", "diu"] },
   { name: "Retiro de DIU", price: 100, category: "procedimiento", aliases: ["sacar diu", "sacar el diu", "quitar diu", "quitar el diu", "retirar el diu"] },
-  // Campaña de planificación familiar: 400 Bs en vez de los 480 de lista. Los
-  // alias NO incluyen genéricos ("anticonceptivo", "planificación familiar"):
-  // engancharían preguntas sobre pastillas o inyectables, que la clínica no
-  // ofrece, y dispararían la derivación a un asesor por nada.
-  { name: "Colocación de implante subdérmico", price: 480, promo: { price: 400, label: "precio de campaña" }, category: "procedimiento", aliases: ["poner implante", "implante anticonceptivo", "implante subdermico", "implante hormonal", "subdermico", "implante"] },
+  // 480 Bs confirmado por el cliente el 2026-09-15 (terminó la campaña de 400).
+  // Los alias NO incluyen genéricos ("anticonceptivo", "planificación
+  // familiar"): engancharían preguntas sobre pastillas o inyectables, que la
+  // clínica no ofrece, y abrirían una solicitud por nada.
+  { name: "Colocación de implante subdérmico", price: 480, category: "procedimiento", aliases: ["poner implante", "implante anticonceptivo", "implante subdermico", "implante hormonal", "subdermico", "implante"] },
   { name: "Retiro de implante subdérmico", price: 100, category: "procedimiento", aliases: ["sacar implante", "sacar el implante", "quitar implante", "quitar el implante", "retirar el implante"] },
   { name: "Cirugía menor", price: 300, category: "procedimiento", aliases: ["cirugia pequeña", "operacion menor"] },
   { name: "Cirugía mediana", price: 600, category: "procedimiento", aliases: ["operacion mediana"] },
@@ -131,8 +128,8 @@ export const defaultServices: ServiceItem[] = [
   // ── Partos y cesáreas ───────────────────────────────────────────────────
   { name: "Parto normal", price: 2200, category: "obstetricia", aliases: ["parto"] },
   { name: "Parto multigesta", price: 2000, category: "obstetricia", aliases: ["parto multigesta"] },
-  { name: "Cesárea primigesta", price: 3600, category: "obstetricia", aliases: ["cesarea primigesta", "primera cesarea"] },
-  { name: "Cesárea multigesta", price: 3800, priceMax: 4200, category: "obstetricia", aliases: ["cesarea multigesta", "cesarea", "cesaria"] },
+  { name: "Cesárea programada", price: 4000, category: "obstetricia", aliases: ["cesarea programada", "cesarea", "cesaria"] },
+  { name: "Cesárea de emergencia", price: 4200, category: "obstetricia", aliases: ["cesarea de emergencia", "cesaria de emergencia"] },
   { name: "Ligadura", price: 400, category: "obstetricia", aliases: ["ligadura de trompas", "ligarme"] },
 ];
 

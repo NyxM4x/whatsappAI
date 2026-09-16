@@ -5,14 +5,22 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import {
   ADMIN_COOKIE_NAME,
+  SESSION_TTL_SECONDS,
   createSessionToken,
   isLoginRateLimited,
   recordLoginAttempt,
   requireStaff,
   verifyStaffCredentials,
 } from "@/lib/admin/auth";
-import { updateAppointment, getAppointmentStatus, getAppointmentById, logAdminAudit } from "@/lib/clinic/data";
-import { getClinicConfig } from "@/lib/clinic/config";
+import {
+  updateAppointment,
+  getAppointmentStatus,
+  getAppointmentById,
+  logAdminAudit,
+  markPaymentProofReviewed,
+} from "@/lib/clinic/data";
+import { getClinicConfig, setClinicHolidayDate } from "@/lib/clinic/config";
+import { localDateISO } from "@/lib/clinic/pricing";
 import { getKapsoClient } from "@/lib/engine/clients";
 import { isWithinServiceWindow } from "@/lib/engine/data";
 import { getErrorMessage } from "@/lib/engine/logging";
@@ -58,7 +66,7 @@ export async function loginAction(formData: FormData) {
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
     path: "/",
-    maxAge: 60 * 60 * 12, // 12h, igual al TTL del token
+    maxAge: SESSION_TTL_SECONDS, // igual al TTL del token
   });
   redirect("/admin");
 }
@@ -167,6 +175,50 @@ export async function confirmAppointmentAction(formData: FormData) {
       entityId: id,
       before: { status: before },
       after: { status: "confirmed" },
+    });
+  }
+  revalidatePath("/admin");
+}
+
+// Feriado del día: lo activa la enfermera desde el panel. Se guarda la FECHA
+// de hoy (no un sí/no), así se apaga sola a medianoche sin ningún cron. Mientras
+// está activo, el bot no cotiza precios para hoy (ver lib/clinic/pricing.ts).
+export async function toggleHolidayAction(formData: FormData) {
+  const staff = await requireStaff();
+  const clinic = await getClinicConfig(staff.business);
+  const enable = String(formData.get("enable") ?? "") === "1";
+  const today = localDateISO(new Date(), clinic.timezone);
+  const holidayDate = enable ? today : null;
+
+  await setClinicHolidayDate(staff.business, holidayDate, staff.staffId);
+  await logAdminAudit({
+    business: staff.business,
+    actorId: staff.staffId,
+    actorName: staff.name,
+    action: enable ? "holiday.enable" : "holiday.disable",
+    entity: "clinic_settings",
+    entityId: staff.business,
+    before: { holidayDate: clinic.holidayDate },
+    after: { holidayDate },
+  });
+
+  revalidatePath("/admin");
+}
+
+// Marca un comprobante del listado de pagos como revisado por el staff.
+export async function markPaymentReviewedAction(formData: FormData) {
+  const staff = await requireStaff();
+  const id = String(formData.get("id") ?? "");
+  if (id && (await markPaymentProofReviewed(staff.business, id, staff.name))) {
+    await logAdminAudit({
+      business: staff.business,
+      actorId: staff.staffId,
+      actorName: staff.name,
+      action: "payment_proof.review",
+      entity: "payment_proof",
+      entityId: id,
+      before: { reviewed: false },
+      after: { reviewed: true },
     });
   }
   revalidatePath("/admin");

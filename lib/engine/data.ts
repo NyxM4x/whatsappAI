@@ -32,10 +32,12 @@ export type BotPauseState = {
   source?: "durable" | "conversation" | "none";
 };
 
-export const DEFAULT_HUMAN_TAKEOVER_MINUTES = 30;
+// 12 h: la clínica pidió que, una vez derivado, el bot no vuelva a hablar por
+// encima del asesor durante el día (2026-09-15).
+export const DEFAULT_HUMAN_TAKEOVER_MINUTES = 720;
 
 // HUMAN_TAKEOVER_PAUSE_MINUTES: entero en [1, 1440]; cualquier otra cosa cae al
-// default de 30 minutos.
+// default de 720 minutos.
 export function getHumanTakeoverMinutes(): number {
   const value = Number(process.env.HUMAN_TAKEOVER_PAUSE_MINUTES);
   return Number.isInteger(value) && value >= 1 && value <= 1440 ? value : DEFAULT_HUMAN_TAKEOVER_MINUTES;

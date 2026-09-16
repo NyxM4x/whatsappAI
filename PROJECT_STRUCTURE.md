@@ -8,10 +8,14 @@
 ## 1. Qué es el proyecto
 
 Bot de WhatsApp **multi-tenant** para clínicas: atiende pacientes, responde preguntas
-(especialidades, precios, labs, medicamentos) y **agenda citas de punta a punta**
-(elegir especialidad → doctor → horario → datos → pago → confirmación + evento en
-Google Calendar). Incluye un **panel interno** (`/admin`) para la secretaría y
-**crons** de recordatorio/confirmación.
+(especialidades, precios, labs, medicamentos) y **recopila solicitudes de ficha**
+(paciente, especialidad o médico, día y hora cómodos, consulta nueva o reconsulta)
+que un asesor confirma por WhatsApp. Desde 2026-09-15 el bot **no ofrece horarios,
+médicos ni cobra**: el plantel no cumple los turnos cargados. Cada solicitud hace
+sonar una **alarma en el panel interno** (`/admin`) hasta que alguien la atiende.
+
+El agendamiento anterior (`lib/clinic/booking.ts`, holds, Google Calendar, QR con
+comprobante, crons) sigue en el repo pero el webhook ya no lo usa.
 
 Cliente inicial y slug por defecto: `clinica-san-martin`
 (`DEFAULT_BUSINESS_SLUG` en [lib/clinic/config.ts:28](lib/clinic/config.ts#L28)).
@@ -178,32 +182,37 @@ Migraciones en orden cronológico (nombre = timestamp, se aplican en orden):
 
 ## 4. Flujos clave
 
-**A. Mensaje entrante → cita creada**
+**A. Mensaje entrante → solicitud con alarma** (ver cabecera de `app/api/webhooks/clinica/route.ts`)
 
 ```
 WhatsApp → Kapso → POST /api/webhooks/clinica
-  verificar firma → normalizeIncomingMessages() → filtro TEST_PHONE
-  → saveContactAndConversation() → saveInboundMessage() → debounce
-  → acquireReplyLock() → getBotPauseState()
-  → getClinicConfig(business)   (business vía getBusinessByPhoneNumberId)
-  → getBookingSession()
-     ├─ sesión activa           → advanceBooking()
-     ├─ intención cancelar/reag → cancelActiveAppointment / rescheduleActiveAppointment
-     ├─ intención agendar       → advanceBooking(step=idle)
-     └─ resto                   → generateText() con buildClinicSystemPrompt()
-  → enviar respuesta (+ QR si action="send_qr") → saveOutboundMessage() → markReplyLockSent()
+  verificar firma → takeover humano → normalizeIncomingMessages() → filtro TEST_PHONE
+  → saveContactAndConversation() → saveInboundMessage() → acquireReplyLock()
+  → getBotPauseState()
+     └─ en pausa → watchWhilePaused(): comprobantes al listado de pagos y alarma
+                   si pide cancelar/reprogramar, sin responder
+  → debounce → registerIncomingProof() (lib/clinic/payments.ts)
+  → pide persona (regex) → registerEscalation() + pausa
+  → sesión collecting_lead / confirming_lead → analyzeTurn() → continueLead()
+  → cancelar / reprogramar / "¿mi cita?" / QR → registerEscalation() + pausa
+  → analyzeTurn(): pide persona · frustración (3 → derivar) · servicio o ficha → startLead()
+  → resto → answerQuestion() con buildClinicSystemPrompt()
+  → sendAndPersist(): enviar → guardar outbound → lock; si deriva, pausa DESPUÉS de enviar
 ```
 
-Dentro de `advanceBooking`, al elegir horario: `getBusyIntervals()` + holds + citas activas →
-`computeAvailableSlots()` → `writeHold()` (30 min). Al confirmar: `createAppointment()` y,
-si el pago es en efectivo, `createAppointmentEvent()` de inmediato.
+`lib/clinic/leads.ts` junta los datos, crea la fila en `clinic_leads` (dispara la
+alarma) y manda el resumen con el precio de `lib/clinic/pricing.ts` (por especialidad,
+día y hora; feriado desde el panel), la reconsulta y el recordatorio del carnet.
+Al confirmar, el bot se pausa 12 h (`HUMAN_TAKEOVER_PAUSE_MINUTES`).
 
-**B. Comprobante de pago** — con `step = awaiting_proof` y llega imagen/documento →
-`handlePaymentProof()` confirma la cita y crea el evento (protegido por
-`claimAppointmentForEventCreation()` para no duplicarlo).
+**B. Comprobantes** — toda imagen/PDF entrante pasa por GPT-vision
+(`registerIncomingProof`) y, si es un comprobante o no se pudo verificar, queda en
+`clinic_payment_proofs` para revisarlo en la pestaña Pagos del panel.
 
-**C. Panel** — la secretaría confirma, cancela (con motivo) o edita datos; toda mutación
-pasa por `requireStaff()` y queda en `logAdminAudit()`.
+**C. Panel** — pestañas Solicitudes (alarma en bucle, `app/admin/LeadsBoard.tsx`, sondeo
+cada 5 s desde un Web Worker; botón "Atender" por solicitud que abre WhatsApp Web),
+Pagos y Citas (sistema anterior). Botón de feriado del día. Toda mutación pasa por
+`requireStaff()` / `getStaffSession()` y queda en `logAdminAudit()`.
 
 **D. Crons** — recordatorios diarios y reconciliación de eventos de Calendar.
 

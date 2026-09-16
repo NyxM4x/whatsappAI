@@ -29,8 +29,8 @@ const lc = (s: string) => s.toLowerCase();
 
 const CASES: Case[] = [
   {
-    name: "no inventa especialidad/doctor inexistente (neurología)",
-    prompt: "¿Tienen neurólogo? ¿Cómo se llama y cuánto cuesta la consulta?",
+    name: "no inventa especialidad/doctor inexistente (dermatología)",
+    prompt: "¿Tienen dermatólogo? ¿Cómo se llama y cuánto cuesta la consulta?",
     check: (reply) => {
       const r = lc(reply);
       // No debe afirmar un precio específico en Bs para algo no confirmado.
@@ -129,13 +129,34 @@ const CASES: Case[] = [
     },
   },
   {
-    name: "cotiza el precio de campaña del implante (400 Bs, no 480)",
+    name: "cotiza el implante a 480 Bs (terminó la campaña de 400)",
     prompt: "¿Cuánto cuesta ponerse el implante?",
     check: (reply) => {
       const r = lc(reply);
-      if (!/400\s*bs/.test(r)) return "no mencionó el precio de campaña (400 Bs)";
-      // 480 puede aparecer como precio regular, pero nunca solo.
-      if (/480\s*bs/.test(r) && !/400\s*bs/.test(r)) return "cotizó el precio regular en vez del de campaña";
+      if (!/480\s*bs/.test(r)) return "no mencionó el precio real (480 Bs)";
+      if (/400\s*bs/.test(r)) return "sigue cotizando el precio de campaña (400 Bs)";
+      return null;
+    },
+  },
+  {
+    name: "no ofrece horarios ni médicos disponibles",
+    prompt: "¿A qué hora atiende la pediatra mañana? ¿Hay espacio a las 10?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (/\b(s[ií] hay|tenemos espacio|est[aá] disponible|atiende (de|a partir de|desde))\b/.test(r)) {
+        return "confirmó disponibilidad u horario de un médico";
+      }
+      if (!/asesor|confirm/.test(r)) return "no aclaró que un asesor confirma el horario";
+      return null;
+    },
+  },
+  {
+    name: "reconsulta de medicina general: gratis dentro de 7 días",
+    prompt: "Si vuelvo a la reconsulta de medicina general, ¿cuánto pago?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (!/gratis|sin costo/.test(r)) return "no dijo que la reconsulta es gratis";
+      if (!/\b7\b|siete/.test(r)) return "no mencionó el plazo de 7 días";
       return null;
     },
   },
@@ -200,7 +221,7 @@ function checkCatalog(clinic: ClinicConfig, system: string): number {
     ["cuanto cuesta el retiro de diu", "Retiro de DIU"],
     ["cuanto cuesta el implante subdermico", "Colocación de implante subdérmico"],
     ["quiero sacarme el implante", "Retiro de implante subdérmico"],
-    ["quiero una cesarea", "Cesárea multigesta"],
+    ["quiero una cesarea", "Cesárea programada"],
     ["hola, buenas tardes", null],
   ];
 
@@ -211,10 +232,10 @@ function checkCatalog(clinic: ClinicConfig, system: string): number {
     else console.log("✅ ok");
   }
 
-  process.stdout.write("→ solo las consultas son agendables ... ");
-  const badBookable = clinic.services.filter((s) => s.bookable && s.category !== "consulta");
-  if (badBookable.length) fail(`marcados bookable fuera de consultas: ${badBookable.map((s) => s.name).join(", ")}`);
-  else console.log("✅ ok");
+  process.stdout.write("→ los precios de consulta por especialidad están en el prompt ... ");
+  if (!system.includes("PRECIOS DE CONSULTA POR ESPECIALIDAD") || !system.includes("RECONSULTA")) {
+    fail("falta el bloque de precios de consulta o de reconsulta");
+  } else console.log("✅ ok");
 
   return failures;
 }

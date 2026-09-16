@@ -582,16 +582,16 @@ const iso = (ms: number) => new Date(ms).toISOString();
   assert.equal(after.paused, true);
   assert.equal(after.expired, true, "vencida debe reportarse como expirada, no como vigente");
 
-  // HUMAN_TAKEOVER_PAUSE_MINUTES: default 30, rango 1–1440.
+  // HUMAN_TAKEOVER_PAUSE_MINUTES: default 720, rango 1–1440.
   const original = process.env.HUMAN_TAKEOVER_PAUSE_MINUTES;
   try {
     for (const [value, expected] of [
-      [undefined, 30],
-      ["", 30],
-      ["0", 30],
-      ["1441", 30],
-      ["abc", 30],
-      ["12.5", 30],
+      [undefined, 720],
+      ["", 720],
+      ["0", 720],
+      ["1441", 720],
+      ["abc", 720],
+      ["12.5", 720],
       ["1", 1],
       ["45", 45],
       ["1440", 1440],
@@ -605,7 +605,7 @@ const iso = (ms: number) => new Date(ms).toISOString();
     else process.env.HUMAN_TAKEOVER_PAUSE_MINUTES = original;
   }
 
-  pass("L. expiración correcta y TTL configurable (default 30, rango 1–1440)");
+  pass("L. expiración correcta y TTL configurable (default 720, rango 1–1440)");
 }
 
 console.log(results.map((r) => `  ✓ ${r}`).join("\n"));

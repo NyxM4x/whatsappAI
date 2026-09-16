@@ -12,8 +12,13 @@ import type {
   BookingStep,
   Doctor,
   DoctorWorkSchedule,
+  Lead,
+  LeadKind,
+  LeadStatus,
+  PaymentProof,
   Specialty,
   TimeSlot,
+  VisitType,
 } from "@/lib/clinic/types";
 import { ACTIVE_APPOINTMENT_STATUSES, PAYMENT_WINDOW_MINUTES } from "@/lib/clinic/types";
 
@@ -771,4 +776,321 @@ export async function getCanceledAppointmentsWithEvent(
     return [];
   }
   return (data ?? []).map(mapAppointment);
+}
+
+// Médicos activos con la clave de su especialidad. El flujo de solicitudes lo
+// usa solo para deducir la especialidad cuando el paciente nombra a un médico;
+// nunca para confirmarle nada sobre ese médico.
+export async function getActiveDoctorsWithSpecialty(
+  business: string,
+): Promise<{ name: string; specialtyKey: string | null }[]> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clinic_doctors")
+    .select("name, specialty:clinic_specialties(slug)")
+    .eq("business", business)
+    .eq("is_active", true);
+
+  if (error) {
+    console.error("getActiveDoctorsWithSpecialty failed", error);
+    return [];
+  }
+  return (data ?? []).map((row: any) => {
+    const specialty = Array.isArray(row.specialty) ? row.specialty[0] : row.specialty;
+    return { name: String(row.name ?? ""), specialtyKey: specialty?.slug ?? null };
+  });
+}
+
+// ─── Solicitudes (clinic_leads) ──────────────────────────────────────────────
+// Lo que el bot deriva a una persona. status='pending' hace sonar la alarma del
+// panel hasta que alguien pulsa "Atender" (attendLead).
+
+export type LeadFields = {
+  patientName?: string | null;
+  specialty?: string | null;
+  doctorPreference?: string | null;
+  preferredTime?: string | null;
+  visitType?: VisitType | null;
+  serviceName?: string | null;
+  priceQuote?: string | null;
+  summary?: string | null;
+  lastMessage?: string | null;
+};
+
+const LEAD_COLUMNS: Record<keyof LeadFields, string> = {
+  patientName: "patient_name",
+  specialty: "specialty",
+  doctorPreference: "doctor_preference",
+  preferredTime: "preferred_time",
+  visitType: "visit_type",
+  serviceName: "service_name",
+  priceQuote: "price_quote",
+  summary: "summary",
+  lastMessage: "last_message",
+};
+
+// Solo los campos presentes: `undefined` = no tocar esa columna.
+function leadFieldsToRow(fields: LeadFields): Record<string, any> {
+  const row: Record<string, any> = {};
+  for (const [key, column] of Object.entries(LEAD_COLUMNS)) {
+    const value = fields[key as keyof LeadFields];
+    if (value !== undefined) row[column] = value;
+  }
+  return row;
+}
+
+function mapLead(row: any): Lead {
+  return {
+    id: String(row.id),
+    business: String(row.business),
+    conversationId: row.kapso_conversation_id ?? null,
+    contactPhone: String(row.contact_phone),
+    contactName: row.contact_name ?? null,
+    kind: row.kind as LeadKind,
+    status: row.status as LeadStatus,
+    patientName: row.patient_name ?? null,
+    specialty: row.specialty ?? null,
+    doctorPreference: row.doctor_preference ?? null,
+    preferredTime: row.preferred_time ?? null,
+    visitType: (row.visit_type as VisitType) ?? null,
+    serviceName: row.service_name ?? null,
+    priceQuote: row.price_quote ?? null,
+    summary: row.summary ?? null,
+    lastMessage: row.last_message ?? null,
+    attendedByName: row.attended_by_name ?? null,
+    attendedAt: row.attended_at ?? null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+export async function createLead(
+  params: LeadFields & {
+    business: string;
+    conversationId?: string | null;
+    contactPhone: string;
+    contactName?: string | null;
+    kind: LeadKind;
+  },
+): Promise<string | null> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clinic_leads")
+    .insert({
+      business: params.business,
+      kapso_conversation_id: params.conversationId ?? null,
+      contact_phone: params.contactPhone,
+      contact_name: params.contactName ?? null,
+      kind: params.kind,
+      ...leadFieldsToRow(params),
+    })
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    console.error("createLead failed", error);
+    return null;
+  }
+  return data?.id ? String(data.id) : null;
+}
+
+export async function updateLead(
+  id: string,
+  patch: LeadFields & { status?: LeadStatus },
+): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  const row = { ...leadFieldsToRow(patch), updated_at: new Date().toISOString() } as Record<string, any>;
+  if (patch.status !== undefined) row.status = patch.status;
+
+  const { error } = await supabase.from("clinic_leads").update(row).eq("id", id);
+  if (error) {
+    console.error("updateLead failed", error);
+    return false;
+  }
+  return true;
+}
+
+// Solicitud pendiente del mismo tipo y paciente desde `sinceIso` (para no
+// abrir una alarma nueva cada vez que el paciente insiste con lo mismo).
+export async function findRecentPendingLead(
+  business: string,
+  contactPhone: string,
+  kind: LeadKind,
+  sinceIso: string,
+): Promise<Lead | null> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clinic_leads")
+    .select("*")
+    .eq("business", business)
+    .eq("contact_phone", contactPhone)
+    .eq("kind", kind)
+    .eq("status", "pending")
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error("findRecentPendingLead failed", error);
+    return null;
+  }
+  return data?.[0] ? mapLead(data[0]) : null;
+}
+
+// Pendientes (las más viejas primero: se atienden por orden de llegada) y las
+// últimas cerradas, para el panel.
+export async function listLeadsForAdmin(
+  business: string,
+  recentLimit = 30,
+): Promise<{ pending: Lead[]; recent: Lead[] }> {
+  const supabase = getSupabaseClient();
+  const [pendingRes, recentRes] = await Promise.all([
+    supabase
+      .from("clinic_leads")
+      .select("*")
+      .eq("business", business)
+      .eq("status", "pending")
+      .order("created_at", { ascending: true })
+      .limit(200),
+    supabase
+      .from("clinic_leads")
+      .select("*")
+      .eq("business", business)
+      .neq("status", "pending")
+      .order("updated_at", { ascending: false })
+      .limit(recentLimit),
+  ]);
+
+  if (pendingRes.error) console.error("listLeadsForAdmin pending failed", pendingRes.error);
+  if (recentRes.error) console.error("listLeadsForAdmin recent failed", recentRes.error);
+
+  return {
+    pending: (pendingRes.data ?? []).map(mapLead),
+    recent: (recentRes.data ?? []).map(mapLead),
+  };
+}
+
+// Marca la solicitud como atendida. Solo gana si seguía pendiente, así dos
+// personas que pulsan "Atender" a la vez no se pisan. null si ya estaba atendida.
+export async function attendLead(
+  business: string,
+  id: string,
+  staff: { staffId: string; name: string },
+): Promise<Lead | null> {
+  const supabase = getSupabaseClient();
+  const nowIso = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("clinic_leads")
+    .update({
+      status: "attended",
+      attended_by_id: staff.staffId,
+      attended_by_name: staff.name,
+      attended_at: nowIso,
+      updated_at: nowIso,
+    })
+    .eq("id", id)
+    .eq("business", business)
+    .eq("status", "pending")
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    console.error("attendLead failed", error);
+    return null;
+  }
+  return data ? mapLead(data) : null;
+}
+
+// ─── Comprobantes de pago (clinic_payment_proofs) ───────────────────────────
+
+function mapPaymentProof(row: any): PaymentProof {
+  return {
+    id: String(row.id),
+    business: String(row.business),
+    conversationId: row.kapso_conversation_id ?? null,
+    contactPhone: String(row.contact_phone),
+    contactName: row.contact_name ?? null,
+    mediaUrl: String(row.media_url),
+    mediaType: row.media_type ?? null,
+    detectedAmount: row.detected_amount != null ? Number(row.detected_amount) : null,
+    aiNote: row.ai_note ?? null,
+    reviewed: Boolean(row.reviewed),
+    reviewedByName: row.reviewed_by_name ?? null,
+    reviewedAt: row.reviewed_at ?? null,
+    createdAt: String(row.created_at),
+  };
+}
+
+// false si no se guardó (error, o el mismo mensaje ya estaba registrado).
+export async function recordPaymentProof(params: {
+  business: string;
+  conversationId?: string | null;
+  messageId?: string | null;
+  contactPhone: string;
+  contactName?: string | null;
+  mediaUrl: string;
+  mediaType?: string | null;
+  detectedAmount?: number | null;
+  aiNote?: string | null;
+}): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  const { error } = await supabase.from("clinic_payment_proofs").insert({
+    business: params.business,
+    kapso_conversation_id: params.conversationId ?? null,
+    kapso_message_id: params.messageId ?? null,
+    contact_phone: params.contactPhone,
+    contact_name: params.contactName ?? null,
+    media_url: params.mediaUrl,
+    media_type: params.mediaType ?? null,
+    detected_amount: params.detectedAmount ?? null,
+    ai_note: params.aiNote ?? null,
+  });
+
+  if (error) {
+    if (error.code !== "23505") console.error("recordPaymentProof failed", error);
+    return false;
+  }
+  return true;
+}
+
+export async function listPaymentProofsForAdmin(
+  business: string,
+  page = 1,
+): Promise<{ rows: PaymentProof[]; total: number }> {
+  const supabase = getSupabaseClient();
+  const from = (Math.max(1, page) - 1) * ADMIN_PAGE_SIZE;
+  const { data, error, count } = await supabase
+    .from("clinic_payment_proofs")
+    .select("*", { count: "exact" })
+    .eq("business", business)
+    .order("created_at", { ascending: false })
+    .range(from, from + ADMIN_PAGE_SIZE - 1);
+
+  if (error) {
+    console.error("listPaymentProofsForAdmin failed", error);
+    return { rows: [], total: 0 };
+  }
+  return { rows: (data ?? []).map(mapPaymentProof), total: count ?? 0 };
+}
+
+export async function markPaymentProofReviewed(
+  business: string,
+  id: string,
+  reviewedByName: string,
+): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("clinic_payment_proofs")
+    .update({ reviewed: true, reviewed_by_name: reviewedByName, reviewed_at: new Date().toISOString() })
+    .eq("id", id)
+    .eq("business", business)
+    .eq("reviewed", false)
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    console.error("markPaymentProofReviewed failed", error);
+    return false;
+  }
+  return Boolean(data);
 }

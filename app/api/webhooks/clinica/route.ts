@@ -2,20 +2,23 @@
 // Webhook — Clínica San Martín de Porres
 // ----------------------------------------------------------------------------
 // Ruta: POST /api/webhooks/clinica
-// Orquesta:
-//   1. Normalizar evento Kapso → filtrar test phone → guardar inbound → lock
-//   2. Detectar emergencias (respuesta inmediata)
-//   3. Si step=awaiting_proof y llega imagen/doc → comprobante de pago
-//   4. Si hay sesión activa → advanceBooking
-//   5. Si intención de cancelar/reprogramar → flujo correspondiente
-//   5c. Si piden el QR sin agendar (pago suelto) → enviar QR y listo
-//   6. Si intención de agendar → iniciar flujo (advanceBooking con step=idle)
-//   7. Si no → Q&A con OpenAI (catálogos + info clínica)
-//   8. Enviar respuesta + QR si action=send_qr → guardar outbound → lock → sesión
+// Desde 2026-09-15 el bot NO agenda: recopila solicitudes y las deja en el
+// panel con alarma para que un asesor confirme por WhatsApp (ver
+// lib/clinic/leads.ts). Orquesta:
+//   1. Normalizar evento Kapso → takeover humano → guardar inbound → lock
+//   2. Bot en pausa: no responde, pero anota comprobantes y deja alarma si el
+//      paciente pide cancelar o reprogramar
+//   3. Comprobantes de pago (imagen/PDF) → listado de pagos del panel
+//   4. Pide hablar con una persona → alarma + pausa
+//   5. Solicitud en curso (collecting_lead / confirming_lead) → continueLead
+//   6. Cancelar / reprogramar / "¿cuándo es mi cita?" / pedir QR → alarma + pausa
+//   7. analyzeTurn: pide persona, frustración (3 veces → alarma + pausa)
+//   8. Servicio del tarifario o ficha → startLead
+//   9. Si no → Q&A con OpenAI
+// Toda derivación pausa el bot DESPUÉS de enviar la respuesta: la barrera de
+// pausa de sendAndPersist descartaría el aviso al paciente si se pausara antes.
 // ============================================================================
 
-import { openai } from "@ai-sdk/openai";
-import { generateText } from "ai";
 import { verifySignature } from "@kapso/whatsapp-cloud-api/server";
 
 import { getKapsoClient, getRequiredEnv } from "@/lib/engine/clients";
@@ -28,37 +31,42 @@ import {
   markReplyLockSent,
   getBotPauseState,
   resumeBotIfPauseExpired,
-  getRecentConversationHistory,
   isLatestInboundMessage,
   getUnansweredInboundText,
   pauseBotForHumanHandoff,
   autoPauseBotFromBusinessApp,
 } from "@/lib/engine/data";
-import { extractHumanTakeoverEvents, normalizeIncomingMessages } from "@/lib/engine/messages";
+import {
+  extractHumanTakeoverEvents,
+  normalizeIncomingMessages,
+  type IncomingMessage,
+} from "@/lib/engine/messages";
 
 import {
   getClinicConfig,
-  buildClinicSystemPrompt,
   getBusinessByPhoneNumberId,
   DEFAULT_BUSINESS_SLUG,
   CLINIC_WELCOME_MESSAGE,
-  type ClinicConfig,
 } from "@/lib/clinic/config";
-import { matchService, formatServicePrice } from "@/lib/clinic/services";
-import { PAYMENT_WINDOW_MINUTES } from "@/lib/clinic/types";
+import { matchService } from "@/lib/clinic/services";
 import {
-  advanceBooking,
-  handlePaymentProof,
-  cancelActiveAppointment,
-  rescheduleActiveAppointment,
-  checkActiveAppointment,
-} from "@/lib/clinic/booking";
+  analyzeTurn,
+  answerQuestion,
+  continueLead,
+  isLeadStep,
+  LEAD_REPLIES,
+  registerEscalation,
+  startLead,
+  type LeadContext,
+  type TurnAnalysis,
+} from "@/lib/clinic/leads";
+import { registerIncomingProof, type IncomingProofResult } from "@/lib/clinic/payments";
 import {
   getBookingSession,
   saveBookingSession,
   expireStalePaymentAppointments,
-  getAppointmentStatus,
 } from "@/lib/clinic/data";
+import type { BookingSession, LeadKind } from "@/lib/clinic/types";
 
 // Node runtime y ventana amplia: el debounce duerme unos segundos dentro de la
 // invocación, así que subimos el límite por defecto de Vercel (10s).
@@ -69,22 +77,13 @@ export const maxDuration = 30;
 const DEBOUNCE_MS = Number(process.env.MESSAGE_DEBOUNCE_MS ?? 6000);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// El cliente quiere salir del flujo en curso (sea una reserva o la coordinación
-// de un servicio). OJO: no incluir "para" ni "nada" sueltos — son palabras
-// comunes ("para las 5", "no es nada grave") y cerraban el flujo por error.
-const WANTS_OUT_PATTERN =
-  /\b(no quiero|ya no quiero|cancela|cancelar|salir|déjalo|dejalo|olvíd\w+|olvida|olvidalo|mejor no|stop|no gracias)\b/i;
-
-// ¿La respuesta del paciente es una preferencia de horario y no otra duda?
-// Cubre horas ("a las 3", "15:30"), franjas, días y comodines ("cuando sea").
-// Si no coincide, el mensaje se trata como pregunta y se le vuelve a preguntar.
-// Un número suelto NO cuenta como hora: "tengo 40 años y fumo" es una duda, no
-// un horario. Se exige contexto ("a las 3", "15:30", "9 am").
-const TIME_PREFERENCE_PATTERN =
-  /\b(a las \d{1,2}|\d{1,2}[:.]\d{2}|\d{1,2}\s*(am|pm|hrs?|horas?)|ma[ñn]ana|tarde|noche|mediod[ií]a|hoy|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|fin de semana|feriado|cualquier\w*|cuando (sea|pueda|guste|usted)|el que sea|lo antes posible|cuanto antes)\b/i;
-
 const GREETING_ONLY_PATTERN =
   /^(?:hola|holaa+|buenas(?: tardes| d[ií]as| noches)?|buen(?:os|as)\s+(?:d[ií]as|tardes|noches)|saludos|hey)[.!\s😊👋]*$/i;
+
+// "Intentos fallidos": veces que el paciente dice que no se le está ayudando.
+// Al llegar al límite dentro de la ventana, se deriva a una persona.
+const FAILED_ATTEMPTS_LIMIT = 3;
+const FAILED_ATTEMPTS_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 // ─── GET: verificación del webhook de Kapso ───────────────────────────────────
 
@@ -201,10 +200,9 @@ export async function POST(request: Request) {
     : DEFAULT_BUSINESS_SLUG;
   const clinic = await getClinicConfig(business);
 
-  // Liberar reservas de pago vencidas antes de tocar disponibilidad: una cita
-  // en `awaiting_payment` bloquea el slot, y el plan Hobby de Vercel solo
-  // permite un cron diario — así que la expiración se hace acá, en cada mensaje
-  // entrante. Es un solo UPDATE con filtro y no debe tumbar el webhook.
+  // Liberar reservas de pago vencidas del agendamiento anterior: una cita en
+  // `awaiting_payment` bloquea el slot. Es un solo UPDATE con filtro y no debe
+  // tumbar el webhook.
   try {
     const freed = await expireStalePaymentAppointments(clinic.slug);
     if (freed.length) {
@@ -255,11 +253,18 @@ export async function POST(request: Request) {
 
   if (!canReply) return new Response("reply already processed", { status: 200 });
 
+  const conversationId = lastMessage.conversationId ?? firstMessage.conversationId ?? lastMessage.from;
+  const contactPhone = lastMessage.from;
+  const contactName = lastMessage.contactName ?? firstMessage.contactName ?? null;
+  const leadCtx: LeadContext = { clinic, conversationId, contactPhone, contactName };
+
   // ── Pausa del bot ─────────────────────────────────────────────────────────
   // La identidad durable es el teléfono; conversationId queda como referencia.
+  // En pausa el bot no responde, pero sigue mirando (ver watchWhilePaused).
   const pauseState = await getBotPauseState(lastMessage.conversationId, lastMessage.from);
 
   if (pauseState.paused && !pauseState.expired) {
+    await watchWhilePaused(leadCtx, newMessages);
     return new Response("bot paused", { status: 200 });
   }
 
@@ -286,14 +291,11 @@ export async function POST(request: Request) {
     }
   }
 
-  const conversationId = lastMessage.conversationId ?? firstMessage.conversationId ?? lastMessage.from;
-  const contactPhone = lastMessage.from;
-
   // ── Debounce: agrupar mensajes seguidos del mismo cliente ─────────────────
   // Kapso entrega cada mensaje en un webhook aparte. Esperamos una ventana
   // corta; si mientras tanto llega otro mensaje, esta invocación cede el turno
   // a la más reciente (que ya verá el texto completo). Así respondemos UNA vez.
-  // Se omite para mensajes con media (comprobantes) para no demorar el pago.
+  // Se omite para mensajes con media (comprobantes) para no demorarlos.
   if (DEBOUNCE_MS > 0 && lastMessage.messageId && !lastMessage.mediaUrl) {
     await sleep(DEBOUNCE_MS);
     const stillLatest = await isLatestInboundMessage(conversationId, lastMessage.messageId);
@@ -319,371 +321,191 @@ export async function POST(request: Request) {
       reason: currentPauseState.reason,
       expiresAt: currentPauseState.expiresAt,
     });
+    await watchWhilePaused(leadCtx, newMessages);
     return new Response("bot paused", { status: 200 });
   }
 
-  const textLc = newText.toLowerCase();
+  const send = (replyText: string, options: { pauseAfter?: boolean } = {}) =>
+    sendAndPersist({
+      kapso,
+      phoneNumberId,
+      contactPhone,
+      conversationId,
+      replyText,
+      lastMessage,
+      pauseAfter: options.pauseAfter,
+    });
+  const ok = () => new Response("ok", { status: 200 });
 
-  let replyText: string;
-  let action: "send_qr" | "none" = "none";
+  const session = normalizeSession(await getBookingSession(conversationId));
 
-  // ── 1. Emergencias ────────────────────────────────────────────────────────
+  // Derivar a una persona: alarma en el panel, sesión limpia, aviso al
+  // paciente y pausa del bot.
+  const escalate = async (kind: LeadKind, replyText: string) => {
+    await registerEscalation({ ...leadCtx, kind, lastMessage: newText, lead: session.draft.lead ?? null });
+    await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {} });
+    await send(replyText, { pauseAfter: true });
+    return ok();
+  };
+
+  // ── 1. Comprobantes y archivos ────────────────────────────────────────────
+  let proof: IncomingProofResult = null;
+  for (const message of newMessages) {
+    const result = await registerIncomingProof({ ...leadCtx, message });
+    if (result === "receipt" || (result === "unverified" && proof !== "receipt")) proof = result;
+  }
+
+  // ── 2. Emergencias ────────────────────────────────────────────────────────
   // Desactivado por defecto (los clientes no lo quieren habilitado). Para
   // reactivarlo en una clínica: CLINIC_EMERGENCY_DETECTION=true.
   const emergencyDetectionEnabled = process.env.CLINIC_EMERGENCY_DETECTION === "true";
-  const isEmergency =
-    emergencyDetectionEnabled &&
-    clinic.emergencyKeywords.some((kw) => textLc.includes(kw.toLowerCase()));
-
-  if (isEmergency) {
-    replyText = clinic.emergencyResponse;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-    return new Response("ok", { status: 200 });
+  const textLc = newText.toLowerCase();
+  if (emergencyDetectionEnabled && clinic.emergencyKeywords.some((kw) => textLc.includes(kw.toLowerCase()))) {
+    await send(clinic.emergencyResponse);
+    return ok();
   }
 
-  // ── 1b. Derivación a humano (reclamos / "quiero hablar con una persona") ──
-  // Prioridad alta: corta cualquier flujo (incluso una reserva en curso) y
-  // pausa el bot para que el equipo retome la conversación manualmente.
+  // ── 3. Pide hablar con una persona ────────────────────────────────────────
+  // Prioridad alta: corta cualquier flujo, incluso una solicitud en curso.
   if (clinic.humanHandoffIntentPatterns.test(newText)) {
-    await pauseBotForHumanHandoff(conversationId, contactPhone);
-    replyText = clinic.replies.humanHandoff;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-    return new Response("ok", { status: 200 });
+    return escalate("humano", clinic.replies.humanHandoff);
   }
 
-  // Ubicación/GPS: respuesta determinista para entregar siempre ambos datos.
+  // ── 4. Ubicación / GPS: respuesta determinista con ambos datos ────────────
   if (clinic.locationRequestIntentPatterns.test(newText)) {
-    replyText = `📍 Nuestra dirección es: ${clinic.generalInfo.address}\n\n🗺️ Ubicación en Google Maps:\n${clinic.generalInfo.mapsUrl}`;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-    return new Response("ok", { status: 200 });
+    await send(`📍 Nuestra dirección es: ${clinic.generalInfo.address}\n\n🗺️ Ubicación en Google Maps:\n${clinic.generalInfo.mapsUrl}`);
+    return ok();
   }
 
-  // ── 2. Cargar sesión de reserva ───────────────────────────────────────────
-  const session = await getBookingSession(conversationId);
-
-  if (session.step === "idle" && GREETING_ONLY_PATTERN.test(newText)) {
-    replyText = CLINIC_WELCOME_MESSAGE;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-    return new Response("ok", { status: 200 });
+  // ── 5. Llegó un comprobante o un archivo ──────────────────────────────────
+  if (proof) {
+    await send(proof === "receipt" ? LEAD_REPLIES.receipt : LEAD_REPLIES.file);
+    return ok();
   }
 
-  // ── 2b. Servicio del tarifario que NO es consulta ─────────────────────────
-  // Ecografías, procedimientos, cirugías, partos, enfermería y certificados no
-  // se agendan por WhatsApp: requieren valoración previa y el precio final
-  // puede variar. Se informa el precio del tarifario y se le pregunta qué
-  // horario le acomoda; con esa respuesta (paso 2c) se deriva a un asesor, que
-  // es quien confirma la disponibilidad real. Las consultas (bookable) NO se
-  // interceptan: siguen al flujo de agenda + pago de siempre.
-  //
-  // Va después de cargar la sesión a propósito: con una reserva en curso el
-  // paciente puede escribir "ecografía" respondiendo otra cosa, y cortarle el
-  // flujo ahí sería peor que no detectar el servicio.
-  if (session.step === "idle" && newText.trim()) {
-    const service = matchService(newText, clinic.services);
-    if (service && !service.bookable) {
-      const quote = formatServicePrice(service);
-      await saveBookingSession({
-        conversationId,
-        business: clinic.slug,
-        step: "awaiting_service_time",
-        draft: { serviceName: service.name, serviceQuote: quote },
-        hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
-      });
-      replyText =
-        `*${service.name}*: ${quote} 😊` +
-        (service.note ? `\n_${service.note}_` : "") +
-        "\n\n¿Qué día y en qué horario le quedaría cómodo? Con ese dato lo coordinamos con un asesor de la clínica. 🙏";
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-      return new Response("ok", { status: 200 });
-    }
+  // ── 6. Solicitud en curso ─────────────────────────────────────────────────
+  if (isLeadStep(session.step)) {
+    const analysis = newText
+      ? await analyzeTurn({ ...leadCtx, text: newText, step: session.step, draft: session.draft.lead ?? null })
+      : null;
+    if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff);
+
+    const tracked = await trackFailedAttempts(leadCtx, session, analysis);
+    if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts);
+
+    const result = await continueLead({ ...leadCtx, session: tracked.session, analysis, text: newText });
+    await send(result.reply, { pauseAfter: result.pauseAfterReply });
+    return ok();
   }
 
-  // ── 2c. Respuesta al horario preferido de un servicio no agendable ────────
-  // Va ANTES del bloque de sesión activa a propósito: advanceBooking no conoce
-  // este paso. Tres salidas: se arrepintió, dio un horario (→ asesor), o hizo
-  // otra pregunta (se le responde y se le repregunta el horario).
-  if (session.step === "awaiting_service_time" && newText.trim()) {
-    const serviceName = session.draft.serviceName ?? "el servicio consultado";
-    const serviceQuote = session.draft.serviceQuote;
-
-    if (WANTS_OUT_PATTERN.test(newText)) {
-      await saveBookingSession({
-        conversationId,
-        business: clinic.slug,
-        step: "idle",
-        draft: {},
-        hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
-      });
-      replyText = "Entendido 😊 Si más adelante desea coordinarlo, con gusto le ayudo. ¿Puedo ayudarle en algo más?";
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-      return new Response("ok", { status: 200 });
-    }
-
-    if (TIME_PREFERENCE_PATTERN.test(newText)) {
-      await saveBookingSession({
-        conversationId,
-        business: clinic.slug,
-        step: "idle",
-        draft: {},
-        hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
-      });
-      await pauseBotForHumanHandoff(conversationId, contactPhone);
-      await logSystemEvent({
-        level: "info",
-        eventType: "service_handoff_requested",
-        business: clinic.slug,
-        conversationId,
-        contactPhone,
-        metadata: { service: serviceName, preferredTime: newText.slice(0, 200) },
-      });
-      replyText =
-        `¡Perfecto! 😊 Anoté *${serviceName}*${serviceQuote ? ` (${serviceQuote})` : ""} para *${newText.trim()}*.` +
-        "\n\nLe paso toda la información a un asesor de la clínica para confirmarle la disponibilidad. En un momento se comunica con usted 🙏";
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-      return new Response("ok", { status: 200 });
-    }
-
-    // No dio un horario: es una duda. Se responde con el Q&A general y se
-    // mantiene el paso (la sesión expira sola por TTL si abandona).
-    try {
-      const history = await getRecentConversationHistory(conversationId, 8);
-      const { text } = await generateText({
-        model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
-        system: buildClinicSystemPrompt(clinic),
-        messages: [
-          ...history.map((h) => ({ role: h.role as "user" | "assistant", content: h.content })),
-          { role: "user", content: newText },
-        ],
-        temperature: 0.35,
-        abortSignal: AbortSignal.timeout(15000),
-      });
-      replyText =
-        (text.trim() || `Con gusto le ayudo con *${serviceName}* 😊`) +
-        "\n\n_¿Qué día y en qué horario le quedaría cómodo? Así lo coordinamos con un asesor._";
-    } catch {
-      replyText = `Para coordinar *${serviceName}* dígame qué día y en qué horario le quedaría cómodo 😊`;
-    }
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-    return new Response("ok", { status: 200 });
+  // ── 7. Archivo o audio sin texto, o saludo solo ───────────────────────────
+  if (!newText) {
+    await send(clinic.replies.welcome);
+    return ok();
+  }
+  if (GREETING_ONLY_PATTERN.test(newText)) {
+    await send(CLINIC_WELCOME_MESSAGE);
+    return ok();
   }
 
-  // ── 3. Comprobante de pago (media entrante) ───────────────────────────────
-  const hasMedia = Boolean(lastMessage.mediaUrl) && (lastMessage.mediaType === "image" || lastMessage.mediaType === "document");
+  // ── 8. Pedidos que solo resuelve una persona ──────────────────────────────
+  // El bot ya no cancela, reprograma, consulta citas ni envía el QR.
+  if (clinic.cancelIntentPatterns.test(newText)) return escalate("cancelar", LEAD_REPLIES.toAdvisor);
+  if (clinic.rescheduleIntentPatterns.test(newText)) return escalate("reprogramar", LEAD_REPLIES.toAdvisor);
+  if (clinic.checkAppointmentIntentPatterns.test(newText)) return escalate("consulta_cita", LEAD_REPLIES.toAdvisor);
+  if (clinic.qrRequestIntentPatterns.test(newText)) return escalate("pago", LEAD_REPLIES.payment);
 
-  if (session.step === "awaiting_proof" && hasMedia && lastMessage.mediaUrl) {
-    const result = await handlePaymentProof({
-      conversationId,
-      business: clinic.slug,
-      contactPhone,
-      mediaUrl: lastMessage.mediaUrl,
-      session,
-      clinic,
-    });
-    replyText = result.reply;
-    action = result.action;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session, clinic });
-    return new Response("ok", { status: 200 });
+  // ── 9. Análisis del mensaje ───────────────────────────────────────────────
+  const analysis = await analyzeTurn({ ...leadCtx, text: newText, step: "idle", draft: null });
+  if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff);
+
+  const tracked = await trackFailedAttempts(leadCtx, session, analysis);
+  if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts);
+
+  // ── 10. Servicio del tarifario → solicitud de servicio ────────────────────
+  // Las consultas de emergencia solo se informan (Q&A): no esperan a un asesor.
+  const service = matchService(newText, clinic.services);
+  if (service && service.category !== "emergencia") {
+    const result = await startLead({ ...leadCtx, session: tracked.session, kind: "servicio", service, analysis });
+    await send(result.reply);
+    return ok();
   }
 
-  // ── 4a. awaiting_proof + texto (sin media) → reenviar QR o Q&A ───────────
-  if (session.step === "awaiting_proof" && !hasMedia && newText.trim()) {
-    const asksForQr = /qr|pago|código|codigo|envía|envia|manda|pásame|pasame|comparte/i.test(newText);
-
-    // La reserva pudo vencer mientras el paciente iba a pagar: reenviarle el QR
-    // sería cobrarle por un horario que ya se liberó.
-    const appointmentGone =
-      session.draft.appointmentId
-        ? (await getAppointmentStatus(session.draft.appointmentId)) === "canceled"
-        : false;
-
-    if (asksForQr && appointmentGone) {
-      replyText = [
-        `Su reserva ya venció: el horario se aparta ${PAYMENT_WINDOW_MINUTES} minutos esperando el pago y luego vuelve a quedar disponible 😕`,
-        ``,
-        `Escríbanos *cita* y le buscamos un nuevo horario 😊`,
-      ].join("\n");
-      await saveBookingSession({
-        conversationId,
-        business: clinic.slug,
-        step: "idle",
-        draft: {},
-        hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null },
-      });
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-    } else if (asksForQr && clinic.qrImageUrl) {
-      replyText = "Aquí le reenvío el QR de pago 😊 Una vez realizado el pago, envíe el comprobante (foto o PDF) y lo validamos. ¡Gracias! 🙏";
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "send_qr", lastMessage, clinic });
-    } else {
-      try {
-        const history = await getRecentConversationHistory(conversationId, 8);
-        const { text } = await generateText({
-          model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
-          system: buildClinicSystemPrompt(clinic),
-          messages: [
-            ...history.map((h) => ({ role: h.role as "user" | "assistant", content: h.content })),
-            { role: "user", content: newText },
-          ],
-          temperature: 0.35,
-          abortSignal: AbortSignal.timeout(15000),
-        });
-        replyText = (text.trim() || clinic.replies.welcome) +
-          "\n\n_Recuerde que para confirmar su cita debe enviarnos el comprobante de pago (foto o PDF) 😊_";
-      } catch {
-        replyText = "Estamos esperando el *comprobante de pago* (imagen o PDF) para confirmar su cita 😊";
-      }
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-    }
-    return new Response("ok", { status: 200 });
+  // ── 11. Pide ficha / consulta ─────────────────────────────────────────────
+  if (clinic.bookingIntentPatterns.test(newText) || analysis?.wantsLead) {
+    const result = await startLead({ ...leadCtx, session: tracked.session, kind: "ficha", analysis });
+    await send(result.reply);
+    return ok();
   }
 
-  // ── 4b. Sesión de reserva activa ──────────────────────────────────────────
-  if (session.step !== "idle" && newText.trim()) {
-    // Detectar si el cliente quiere salir del flujo o hacer otra cosa.
-    if (WANTS_OUT_PATTERN.test(newText)) {
-      await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {}, hold: { heldDoctorId: null, heldSlotStart: null, holdExpiresAt: null } });
-      replyText = "Entendido 😊 Si en algún momento desea agendar una cita, con gusto le ayudo. ¿Puedo ayudarle en algo más?";
-      await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-      return new Response("ok", { status: 200 });
-    }
+  // ── 12. Q&A general con OpenAI ────────────────────────────────────────────
+  // Si el modelo no responde no dejamos al paciente sin salida: se deriva de
+  // verdad, con alarma en el panel.
+  const answer = await answerQuestion(leadCtx, newText);
+  if (!answer) return escalate("humano", LEAD_REPLIES.technicalError);
 
-    const result = await advanceBooking({
-      conversationId,
-      business: clinic.slug,
-      contactPhone,
-      incomingText: newText,
-      session,
-      clinic,
-    });
-    replyText = result.reply;
-    action = result.action;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session, clinic });
-    return new Response("ok", { status: 200 });
-  }
-
-  // ── 5. Intenciones de cancelar / reprogramar ──────────────────────────────
-  if (clinic.cancelIntentPatterns.test(newText)) {
-    const result = await cancelActiveAppointment({ conversationId, business: clinic.slug, contactPhone, session, clinic });
-    replyText = result.reply;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, updatedSession: result.session, clinic });
-    return new Response("ok", { status: 200 });
-  }
-
-  if (clinic.rescheduleIntentPatterns.test(newText)) {
-    const result = await rescheduleActiveAppointment({ conversationId, business: clinic.slug, contactPhone, session, clinic });
-    replyText = result.reply;
-    action = result.action;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session, clinic });
-    return new Response("ok", { status: 200 });
-  }
-
-  // ── 5b. Intención de consultar la cita ("¿cuándo es mi cita?") ───────────
-  if (clinic.checkAppointmentIntentPatterns.test(newText)) {
-    const result = await checkActiveAppointment({ business: clinic.slug, contactPhone, session, clinic });
-    replyText = result.reply;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-    return new Response("ok", { status: 200 });
-  }
-
-  // ── 5c. Piden el QR sin estar agendando ───────────────────────────────────
-  // Se llega acá solo con la sesión en idle (los pasos activos del flujo
-  // retornan antes), así que es alguien que quiere pagar algo que no es
-  // necesariamente una consulta. Se le manda el QR y NO se le abre un flujo de
-  // cita que no pidió.
-  if (clinic.qrRequestIntentPatterns.test(newText) && clinic.qrImageUrl) {
-    replyText = [
-      `Aquí tiene nuestro QR para el pago 😊`,
-      ``,
-      `Cuando realice el pago, envíenos la *foto del comprobante* por aquí y lo verificamos.`,
-      ``,
-      `Si el pago es para una consulta médica, escríbanos *cita* y le reservamos su horario.`,
-    ].join("\n");
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "send_qr", lastMessage, clinic });
-    return new Response("ok", { status: 200 });
-  }
-
-  // ── 6. Intención de agendar — detección con GPT ───────────────────────────
-  // El patrón rígido se usa como fast-path. Si no coincide, GPT decide.
-  let wantsBooking = clinic.bookingIntentPatterns.test(newText);
-
-  if (!wantsBooking) {
-    try {
-      const { generateText: gt } = await import("ai");
-      const { openai: oai } = await import("@ai-sdk/openai");
-      const { text: intent } = await gt({
-        model: oai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
-        system: `Determina si el siguiente mensaje de WhatsApp expresa intención de agendar/reservar una cita médica, ver horarios disponibles, o hablar con un doctor. Responde SOLO "si" o "no".`,
-        prompt: newText,
-        temperature: 0,
-        abortSignal: AbortSignal.timeout(8000),
-      });
-      wantsBooking = intent.trim().toLowerCase().startsWith("si");
-    } catch {
-      wantsBooking = false;
-    }
-  }
-
-  if (wantsBooking) {
-    const result = await advanceBooking({
-      conversationId,
-      business: clinic.slug,
-      contactPhone,
-      incomingText: newText,
-      session: { ...session, step: "idle" },
-      clinic,
-    });
-    replyText = result.reply;
-    action = result.action;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, updatedSession: result.session, clinic });
-    return new Response("ok", { status: 200 });
-  }
-
-  // ── 7. Q&A general con OpenAI ─────────────────────────────────────────────
-  if (!newText.trim()) {
-    // Media sin texto y sin flujo activo → respuesta de bienvenida.
-    replyText = clinic.replies.welcome;
-    await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-    return new Response("ok", { status: 200 });
-  }
-
-  try {
-    const history = await getRecentConversationHistory(conversationId, 10);
-    const systemPrompt = buildClinicSystemPrompt(clinic);
-
-    const messages: { role: "user" | "assistant"; content: string }[] = [
-      ...history.map((h) => ({ role: h.role as "user" | "assistant", content: h.content })),
-      { role: "user", content: newText },
-    ];
-
-    const { text } = await generateText({
-      model: openai(process.env.OPENAI_MODEL ?? "gpt-4o-mini"),
-      system: systemPrompt,
-      messages,
-      temperature: 0.35,
-      abortSignal: AbortSignal.timeout(15000),
-    });
-
-    replyText = text.trim() || clinic.replies.welcome;
-  } catch (err) {
-    console.error("openai generateText failed", err);
-    await logSystemEvent({
-      level: "error",
-      eventType: "openai_generate_failed",
-      conversationId,
-      contactPhone,
-      errorMessage: getErrorMessage(err),
-    });
-    // Si el modelo no responde no dejamos al paciente sin salida ni le damos un
-    // teléfono: se deriva de verdad, pausando el bot para que lo tome el equipo.
-    await pauseBotForHumanHandoff(conversationId, contactPhone);
-    replyText =
-      "Disculpe, tuve un problema para procesar su consulta 🙏 Ya estamos derivando su petición a un asesor de la clínica, que le atenderá en un momento.";
-  }
-
-  await sendAndPersist({ kapso, phoneNumberId, contactPhone, conversationId, replyText, action: "none", lastMessage, clinic });
-  return new Response("ok", { status: 200 });
+  await send(answer);
+  return ok();
 }
 
-// ─── Helper: enviar mensaje + persistir ──────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// Las sesiones que quedaron en un paso del agendamiento anterior se tratan como
+// idle: esos flujos ya no existen.
+function normalizeSession(session: BookingSession): BookingSession {
+  if (session.step === "idle" || isLeadStep(session.step)) return session;
+  return { ...session, step: "idle", draft: { failedAttempts: session.draft.failedAttempts } };
+}
+
+// Cuenta las veces que el paciente dice que no se le ayuda. Devuelve la sesión
+// con el conteo actualizado para que el paso siguiente no lo pise.
+async function trackFailedAttempts(
+  ctx: LeadContext,
+  session: BookingSession,
+  analysis: TurnAnalysis | null,
+): Promise<{ limitReached: boolean; session: BookingSession }> {
+  if (!analysis?.frustrated) return { limitReached: false, session };
+
+  const cutoff = Date.now() - FAILED_ATTEMPTS_WINDOW_MS;
+  const attempts = [
+    ...(session.draft.failedAttempts ?? []).filter((iso) => new Date(iso).getTime() > cutoff),
+    new Date().toISOString(),
+  ];
+  const updated: BookingSession = { ...session, draft: { ...session.draft, failedAttempts: attempts } };
+
+  if (attempts.length >= FAILED_ATTEMPTS_LIMIT) return { limitReached: true, session: updated };
+
+  await saveBookingSession({
+    conversationId: ctx.conversationId,
+    business: ctx.clinic.slug,
+    step: session.step,
+    draft: updated.draft,
+  });
+  return { limitReached: false, session: updated };
+}
+
+// Con el bot en pausa (lo atiende una persona) no se responde nada, pero:
+//   - los comprobantes se anotan en el listado de pagos del panel;
+//   - si el paciente pide cancelar o reprogramar, salta una alarma nueva.
+// Así se cubre al paciente ya confirmado por un humano y al que cambió de idea
+// antes de que lo atiendan, sin que el bot se despierte.
+async function watchWhilePaused(ctx: LeadContext, messages: IncomingMessage[]) {
+  try {
+    for (const message of messages) await registerIncomingProof({ ...ctx, message });
+
+    const text = messages.map((m) => m.text ?? "").filter((t) => t.trim()).join("\n");
+    if (!text) return;
+
+    const kind: LeadKind | null = ctx.clinic.cancelIntentPatterns.test(text)
+      ? "cancelar"
+      : ctx.clinic.rescheduleIntentPatterns.test(text)
+        ? "reprogramar"
+        : null;
+    if (kind) await registerEscalation({ ...ctx, kind, lastMessage: text });
+  } catch (err) {
+    console.error("watchWhilePaused failed", getErrorMessage(err));
+  }
+}
 
 async function sendAndPersist(params: {
   kapso: ReturnType<typeof getKapsoClient>;
@@ -691,69 +513,58 @@ async function sendAndPersist(params: {
   contactPhone: string;
   conversationId: string;
   replyText: string;
-  action: "send_qr" | "none";
-  lastMessage: Awaited<ReturnType<typeof normalizeIncomingMessages>>[number];
-  updatedSession?: any;
-  clinic: ClinicConfig;
+  lastMessage: IncomingMessage;
+  // Pausar el bot después de enviar (derivación a una persona).
+  pauseAfter?: boolean;
 }) {
-  const { kapso, phoneNumberId, contactPhone, conversationId, replyText, action, lastMessage, clinic } = params;
-
-  // Barrera B (justo antes de enviar): una persona puede tomar el control
-  // mientras OpenAI procesa. Solo frena una pausa VIGENTE — una pausa temporal
-  // ya expirada no debe silenciar esta respuesta.
-  const pauseState = await getBotPauseState(conversationId, contactPhone);
-  if (pauseState.paused && !pauseState.expired) {
-    console.log("ai response omitted because bot is paused", {
-      conversationId,
-      reason: pauseState.reason,
-      expiresAt: pauseState.expiresAt,
-    });
-    return;
-  }
+  const { kapso, phoneNumberId, contactPhone, conversationId, replyText, lastMessage } = params;
 
   try {
-    await kapso.messages.sendText({
-      phoneNumberId,
-      to: contactPhone,
-      body: replyText,
-    });
-  } catch (err) {
-    console.error("kapso sendText failed", err);
-    await logSystemEvent({
-      level: "critical",
-      eventType: "kapso_send_text_failed",
-      conversationId,
-      contactPhone,
-      errorMessage: getErrorMessage(err),
-    });
-    return;
-  }
+    // Barrera B (justo antes de enviar): una persona puede tomar el control
+    // mientras OpenAI procesa. Solo frena una pausa VIGENTE — una pausa temporal
+    // ya expirada no debe silenciar esta respuesta.
+    const pauseState = await getBotPauseState(conversationId, contactPhone);
+    if (pauseState.paused && !pauseState.expired) {
+      console.log("ai response omitted because bot is paused", {
+        conversationId,
+        reason: pauseState.reason,
+        expiresAt: pauseState.expiresAt,
+      });
+      return;
+    }
 
-  // Enviar QR si se solicitó.
-  if (action === "send_qr" && clinic.qrImageUrl) {
     try {
-      await kapso.messages.sendImage({
+      await kapso.messages.sendText({
         phoneNumberId,
         to: contactPhone,
-        image: {
-          link: clinic.qrImageUrl,
-          caption: "Escanee este QR para realizar el pago 😊",
-        },
+        body: replyText,
       });
     } catch (err) {
-      console.error("kapso sendImage (QR) failed", err);
+      console.error("kapso sendText failed", err);
+      await logSystemEvent({
+        level: "critical",
+        eventType: "kapso_send_text_failed",
+        conversationId,
+        contactPhone,
+        errorMessage: getErrorMessage(err),
+      });
+      return;
     }
-  }
 
-  try {
-    await saveOutboundMessage({ conversationId, phone: contactPhone, content: replyText });
-    await markReplyLockSent({
-      lastMessageId: lastMessage.messageId,
-      conversationId,
-      phone: contactPhone,
-      responseText: replyText,
-    });
-  } catch (err) {
-    console.error("post-send persistence failed", err);
+    try {
+      await saveOutboundMessage({ conversationId, phone: contactPhone, content: replyText });
+      await markReplyLockSent({
+        lastMessageId: lastMessage.messageId,
+        conversationId,
+        phone: contactPhone,
+        responseText: replyText,
+      });
+    } catch (err) {
+      console.error("post-send persistence failed", err);
+    }
+  } finally {
+    // Aunque el envío falle, la derivación se mantiene: la alarma ya está en
+    // el panel y el asesor va a escribir.
+    if (params.pauseAfter) await pauseBotForHumanHandoff(conversationId, contactPhone);
   }
 }

@@ -25,6 +25,7 @@ import {
   SERVICE_CATEGORY_ORDER,
   type ServiceItem,
 } from "@/lib/clinic/services";
+import { buildConsultationPricingBlock, isHolidayToday } from "@/lib/clinic/pricing";
 
 export type CatalogItem = { name: string; price: number };
 
@@ -45,6 +46,10 @@ const defaultClinicConfig = {
   // una clínica, cada una debe tener el suyo en clinic_settings para responder
   // desde su propio número.
   kapsoPhoneNumberId: null as string | null,
+
+  // Fecha "YYYY-MM-DD" marcada como feriado desde el panel. Solo cuenta si es
+  // la de hoy (ver isHolidayToday): así se apaga sola al cambiar el día.
+  holidayDate: null as string | null,
 
   generalInfo: {
     address: "Av. Moscú, a una cuadra del Mercado La Cuchilla",
@@ -126,11 +131,15 @@ const defaultClinicConfig = {
   locationRequestIntentPatterns:
     /\b(ubicaci[oó]n|direcci[oó]n|gps|mapa|google maps|c[oó]mo llego|d[oó]nde est[aá]n|d[oó]nde queda|localizaci[oó]n)\b/i,
 
-  // Dispara la derivación a un humano: reclamos, o el paciente pide explícitamente
-  // hablar con una persona / no quiere seguir con el bot. Pausa el bot (ver
-  // pauseBotForHumanHandoff) para que el equipo retome la conversación.
+  // Dispara la derivación a un humano: reclamos, o el paciente pide hablar con
+  // una persona (doctora, enfermera, recepcionista, secretaria, alguien) o no
+  // quiere seguir con el bot. Alarma en el panel + pausa del bot.
+  //
+  // OJO: exige el verbo ("hablar/comunicarme con…"). "Quiero una ficha con la
+  // doctora Rosmery" NO es derivación: es un dato de la solicitud. Antes el
+  // patrón era "quiero hablar con" suelto y atrapaba cualquier cosa.
   humanHandoffIntentPatterns:
-    /hablar con (una persona|alguien|un humano)|quiero hablar con|no quiero hablar con (un bot|una máquina|un robot)|persona real|atención humana|\breclamo\b|\bqueja\b|estoy molest[oa]|p[eé]sim[oa] (servicio|atención)/i,
+    /\b(?:hablar|comunicarme|conversar|contactarme)\s+con\s+(?:el|la|los|las|un|una|alg[uú]n|alguna|su)?\s*(?:persona|humano|alguien|doctora?|dra?\b|m[eé]dic[oa]|enfermer[oa]|recepcionista|recepci[oó]n|secretari[oa]|asesor[a]?|encargad[oa]|operador[a]?|responsable)|persona real|atenci[oó]n humana|no quiero (?:hablar con|que me atienda|seguir con) (?:un|una|el|la)?\s*(?:bot|robot|m[aá]quina|contestadora|asistente)|\breclamo\b|\bqueja\b|estoy molest[oa]|p[eé]sim[oa] (?:servicio|atenci[oó]n)/i,
 
   replies: {
     welcome: CLINIC_WELCOME_MESSAGE,
@@ -151,10 +160,17 @@ Mensajes cortos y naturales, nunca suenes a robot. Puedes usar "señor/a" con re
 algún emoji (😊, 👍) sin exagerar.
 
 QUÉ HACES:
-- Resuelves dudas generales: especialidades, precios de consulta, dirección, horarios,
+- Resuelves dudas generales: especialidades, precios de consultas y servicios, dirección,
   formas de pago, exámenes de laboratorio y medicamentos.
-- Si la persona quiere AGENDAR, el sistema la guía paso a paso: NO inventes el flujo ni
-  pidas datos por tu cuenta, solo invítala a agendar.
+- Si la persona quiere una FICHA (consulta) o un servicio, el sistema le pide los datos y
+  un asesor de la clínica le confirma el horario y el médico por este mismo chat. NO pidas
+  datos por tu cuenta ni inventes ese proceso: solo invitala a pedir su ficha.
+
+HORARIOS Y MÉDICOS: nunca ofrezcas ni confirmes un horario, un día, una franja, un médico
+ni si un médico atiende o está disponible. Eso lo confirma siempre un asesor de la clínica.
+
+PAGOS: nunca envíes ni prometas el QR de pago. Los datos de pago los da el asesor después
+de confirmar la ficha o el servicio.
 
 SALUDO Y CONTEXTO:
 - Usa el saludo "Buenas, somos la Clínica San Martín de Porres. Un gusto, ¿en qué puedo
@@ -171,11 +187,11 @@ sobre qué especialidad le corresponde, eligiendo SIEMPRE una de las que la clí
 listadas. Nunca digas qué le pasa ni por qué: no es un diagnóstico, es solo orientarla.
 Ante la duda, Medicina General.
 
-PLANIFICACIÓN FAMILIAR: la clínica tiene una campaña vigente de implante subdérmico
-anticonceptivo. Podés dar tal cual estos datos del método: protección de larga duración
-(5 años), 99% de efectividad, es reversible (se retira cuando la paciente lo decida) y la
-colocación es rápida, ambulatoria y la realiza personal profesional. El precio de campaña
-está en el tarifario: citalo de ahí, nunca de memoria.
+PLANIFICACIÓN FAMILIAR: la clínica coloca el implante subdérmico anticonceptivo. Podés dar
+tal cual estos datos del método: protección de larga duración (5 años), 99% de efectividad,
+es reversible (se retira cuando la paciente lo decida) y la colocación es rápida,
+ambulatoria y la realiza personal profesional. El precio está en el tarifario: citalo de
+ahí, nunca de memoria.
 
 MÉTODOS ANTICONCEPTIVOS QUE OFRECE LA CLÍNICA: implante subdérmico (colocación y retiro),
 DIU (colocación y retiro), ligadura, y consejería anticonceptiva dentro de la consulta de
@@ -187,10 +203,6 @@ DUDAS MÉDICAS del método (si le conviene, efectos secundarios, sangrados, si p
 con alguna condición, embarazo o lactancia): no respondas con criterio propio. Decí con
 calidez que eso lo evalúa la ginecóloga en la valoración previa. Nunca describas el
 procedimiento paso a paso ni afirmes que es indoloro o que no tiene riesgos.
-
-DISPONIBILIDAD: nunca prometas un horario, un día, una franja ni "el médico que atiende
-más temprano". Eso lo resuelve el sistema al agendar, no vos: invitá a agendar y el
-sistema le muestra los turnos reales.
 
 BREVEDAD: mensajes cortos y directos, no tipo catálogo. Primero resolvé exactamente lo
 que preguntó la persona; ampliá información solo si la vuelve a pedir. Evitá listas
@@ -227,6 +239,7 @@ function mapClinicSettingsRow(row: any): ClinicConfig {
     ...defaultClinicConfig, // conserva los patrones de intención (regex, iguales para todas)
     slug: String(row.business),
     kapsoPhoneNumberId: row.kapso_phone_number_id ?? null,
+    holidayDate: row.holiday_date ? String(row.holiday_date).slice(0, 10) : null,
     clinicName: String(row.clinic_name ?? defaultClinicConfig.clinicName),
     timezone: String(row.timezone ?? defaultClinicConfig.timezone),
     generalInfo: {
@@ -290,6 +303,28 @@ export async function getClinicConfig(business: string = DEFAULT_BUSINESS_SLUG):
   return value;
 }
 
+// Marca (o quita, con null) el feriado del día desde el panel. Invalida la
+// caché de esta instancia para que el panel lo vea al instante; el webhook, en
+// otra instancia, lo toma en ≤45 s (CONFIG_CACHE_TTL_MS).
+export async function setClinicHolidayDate(
+  business: string,
+  holidayDate: string | null,
+  updatedBy: string,
+): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  const { error } = await supabase
+    .from("clinic_settings")
+    .update({ holiday_date: holidayDate, updated_by: updatedBy })
+    .eq("business", business);
+
+  invalidateClinicConfigCache(business);
+  if (error) {
+    console.error("setClinicHolidayDate failed", error);
+    return false;
+  }
+  return true;
+}
+
 // Resuelve qué clínica es dueña de un número de WhatsApp (Kapso
 // phone_number_id) — usado por el webhook para saber a quién le escribieron.
 // null si no hay ninguna fila con ese número (fallback: DEFAULT_BUSINESS_SLUG
@@ -337,6 +372,7 @@ function buildServicesBlock(services: ServiceItem[]): string {
 export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
   const labs = clinic.labs.map((l) => `- ${l.name}: ${l.price} Bs`).join("\n");
   const meds = clinic.medications.map((m) => `- ${m.name}: ${m.price} Bs`).join("\n");
+  const holidayToday = isHolidayToday(clinic.holidayDate, clinic.timezone);
 
   return [
     clinic.systemPromptBase,
@@ -346,7 +382,9 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
     `- Teléfono: ${clinic.generalInfo.phone}`,
     `- Google Maps: ${clinic.generalInfo.mapsUrl}`,
     `- Horario de atención: ${clinic.generalInfo.hours}`,
-    `- Formas de pago: ${clinic.paymentMethods.join(", ")}`,
+    `- Formas de pago: ${clinic.paymentMethods.join(", ")} (los datos de pago y el QR los envía un asesor después de confirmar la ficha o el servicio)`,
+    "",
+    buildConsultationPricingBlock(holidayToday),
     "",
     "EXÁMENES DE LABORATORIO (precios):",
     labs,
@@ -357,11 +395,13 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
     "TARIFARIO DE SERVICIOS (precios exactos, cítalos tal cual):",
     buildServicesBlock(clinic.services),
     "",
-    "Si preguntan por una especialidad o doctor en particular y no lo tienes, invita a agendar para verificar disponibilidad.",
-    "Si preguntan por un servicio del tarifario que NO es una consulta (ecografías, procedimientos, cirugías, partos, enfermería, certificados): informa el precio, pregúntale qué día y horario le quedaría cómodo, y aclara que con ese dato un asesor del equipo le confirma la disponibilidad. No confirmes vos el horario ni intentes agendarlo.",
+    "CARNET: para la consulta el paciente debe traer su carnet de identidad; solo si no lo tiene, puede mostrar una foto del carnet en recepción. Nunca pidas el número de carnet.",
+    "Si preguntan por una especialidad que no está en la lista de precios, decí con calidez que un asesor le confirma si la clínica la tiene; nunca inventes especialidades ni nombres de médicos.",
+    "Si preguntan por un servicio del tarifario: informá el precio; si lo quiere hacer, el sistema le pide sus datos y un asesor le confirma el horario. No confirmes vos ningún horario.",
     "",
     "REGLAS CRÍTICAS (repetidas por prioridad — nunca las rompas):",
     "- No inventes precios, doctores, especialidades, horarios ni disponibilidad que no estén arriba. Si no está en los datos provistos, no existe para vos. Nunca estimes ni redondees un precio que no figure en el tarifario.",
+    "- Nunca ofrezcas ni confirmes horarios, turnos ni médicos disponibles: eso lo confirma un asesor de la clínica.",
     "- Para urgencias médicas reales indica acudir a Emergencias / llamar a la clínica; nunca des diagnósticos ni consejo médico.",
     "- Nunca menciones que sos un bot, IA o automatización, aunque te lo pregunten directamente.",
   ].join("\n");

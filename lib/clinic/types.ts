@@ -76,7 +76,12 @@ export type BookingStep =
   // Cancelar borra la cita y su evento sin vuelta atrás, así que se pide un sí
   // explícito antes. "quería cancelar… bueno, mejor no" no debe destruir nada.
   | "confirming_cancel"
-  | "done";
+  | "done"
+  // Flujo de solicitudes (lib/clinic/leads.ts): el bot junta los datos y un
+  // asesor confirma por WhatsApp. Los pasos de arriba son del agendamiento
+  // anterior y el webhook ya no los usa.
+  | "collecting_lead"
+  | "confirming_lead";
 
 export type PaymentMethod = "qr" | "cash";
 
@@ -103,6 +108,81 @@ export type BookingDraft = {
   serviceName?: string;  // servicio no agendable en curso (awaiting_service_time)
   serviceQuote?: string; // su precio ya formateado, para repetirlo al confirmar
   rescheduleConfirmed?: boolean; // true si la cita original ya estaba `confirmed`
+  lead?: LeadDraft;              // solicitud en curso (collecting_lead / confirming_lead)
+  // Momentos (ISO) en que el paciente dijo que no se le está ayudando. Al llegar
+  // a 3 dentro de la ventana, el bot deriva a una persona.
+  failedAttempts?: string[];
+};
+
+// ─── Solicitudes de ficha / servicio (clinic_leads) ─────────────────────────
+
+export type VisitType = "nueva" | "reconsulta";
+
+// Por qué saltó la alarma en el panel.
+export type LeadKind =
+  | "ficha"         // consulta con datos completos
+  | "servicio"      // ecografía, procedimiento, enfermería…
+  | "humano"        // pidió hablar con una persona
+  | "fallidos"      // 3 veces dijo que no se le ayuda
+  | "cancelar"
+  | "reprogramar"
+  | "consulta_cita" // "¿cuándo es mi cita?"
+  | "pago";         // pidió el QR o datos de pago
+
+export type LeadStatus = "pending" | "attended" | "withdrawn";
+
+// Lo que el bot va juntando en la conversación (vive en BookingDraft.lead).
+export type LeadDraft = {
+  kind: "ficha" | "servicio";
+  patientName?: string | null;
+  specialtyKey?: string | null;     // clave de CONSULTATION_SPECIALTIES
+  doctorPreference?: string | null; // tal como lo escribió el paciente
+  preferredTime?: string | null;    // "mañana a las 10"
+  preferredDate?: string | null;    // YYYY-MM-DD, si se pudo resolver
+  preferredHour?: string | null;    // HH:MM, si se pudo resolver
+  visitType?: VisitType | null;
+  serviceName?: string | null;
+  serviceQuote?: string | null;
+  leadId?: string | null;           // fila en clinic_leads, una vez enviado el resumen
+};
+
+export type Lead = {
+  id: string;
+  business: string;
+  conversationId: string | null;
+  contactPhone: string;
+  contactName: string | null;
+  kind: LeadKind;
+  status: LeadStatus;
+  patientName: string | null;
+  specialty: string | null;
+  doctorPreference: string | null;
+  preferredTime: string | null;
+  visitType: VisitType | null;
+  serviceName: string | null;
+  priceQuote: string | null;
+  summary: string | null;
+  lastMessage: string | null;
+  attendedByName: string | null;
+  attendedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PaymentProof = {
+  id: string;
+  business: string;
+  conversationId: string | null;
+  contactPhone: string;
+  contactName: string | null;
+  mediaUrl: string;
+  mediaType: string | null;
+  detectedAmount: number | null;
+  aiNote: string | null;
+  reviewed: boolean;
+  reviewedByName: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
 };
 
 // Estado del bloqueo temporal de 30 min sobre el slot elegido.

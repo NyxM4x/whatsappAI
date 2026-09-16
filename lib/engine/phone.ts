@@ -22,6 +22,14 @@ export function normalizePhone(raw?: string | null): string | null {
   return digits.length > 0 ? digits : null;
 }
 
+// Link que abre el chat de ese número en WhatsApp Web. Se usa web.whatsapp.com
+// y no wa.me porque wa.me en PC muestra una página intermedia; con un nombre de
+// ventana fijo, cada clic reutiliza la misma pestaña de WhatsApp Web.
+export function whatsappWebChatUrl(raw?: string | null): string | null {
+  const digits = normalizePhone(raw);
+  return digits ? `https://web.whatsapp.com/send?phone=${digits}` : null;
+}
+
 // true si dos representaciones apuntan al mismo número (misma identidad
 // durable). Devuelve false si alguna no es normalizable.
 export function samePhoneIdentity(a?: string | null, b?: string | null): boolean {

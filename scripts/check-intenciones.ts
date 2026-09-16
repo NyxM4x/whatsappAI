@@ -1,20 +1,23 @@
 // ============================================================================
-// Verificación de detección de intención y tarifario.
+// Verificación de detección de intención, tarifario y precios de consulta.
 // ----------------------------------------------------------------------------
-// No necesita OpenAI ni Google Calendar: prueba las regex de intención de
-// config.ts y matchService() contra frases reales de pacientes, y contrasta el
-// precio que el bot INFORMA (tarifario) con el que COBRA (clinic_doctors).
+// No necesita OpenAI: prueba las regex de intención de config.ts,
+// matchService() contra frases reales de pacientes y las franjas de precio de
+// lib/clinic/pricing.ts. Sin .env.local usa la config estática del código.
 //
 //   npx tsx scripts/check-intenciones.ts
 // ============================================================================
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { getClinicConfig } from "../lib/clinic/config";
+import { findSpecialty, priceAt } from "../lib/clinic/pricing";
 import { matchService, formatServicePrice } from "../lib/clinic/services";
 
-for (const line of readFileSync(".env.local", "utf8").split("\n")) {
-  const m = line.match(/^([A-Z_]+)=(.*)$/);
-  if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^"|"$/g, "");
+if (existsSync(".env.local")) {
+  for (const line of readFileSync(".env.local", "utf8").split("\n")) {
+    const m = line.match(/^([A-Z_]+)=(.*)$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^"|"$/g, "");
+  }
 }
 
 const clinic = await getClinicConfig();
@@ -62,6 +65,10 @@ chequear('"quiero cancelar mi cita"', clinic.cancelIntentPatterns.test("quiero c
 chequear('"necesito reprogramar"', clinic.rescheduleIntentPatterns.test("necesito reprogramar"), "reprogramar");
 chequear('"cuando es mi cita?"', clinic.checkAppointmentIntentPatterns.test("cuando es mi cita?"), "consultar");
 chequear('"quiero hablar con una persona"', clinic.humanHandoffIntentPatterns.test("quiero hablar con una persona"), "derivar");
+chequear('"quiero hablar con la dra"', clinic.humanHandoffIntentPatterns.test("quiero hablar con la dra"), "derivar");
+chequear('"puedo hablar con la enfermera?"', clinic.humanHandoffIntentPatterns.test("puedo hablar con la enfermera?"), "derivar");
+chequear('"quiero comunicarme con la secretaria"', clinic.humanHandoffIntentPatterns.test("quiero comunicarme con la secretaria"), "derivar");
+chequear('"necesito hablar con alguien"', clinic.humanHandoffIntentPatterns.test("necesito hablar con alguien"), "derivar");
 chequear('"esto es un pésimo servicio"', clinic.humanHandoffIntentPatterns.test("esto es un pésimo servicio"), "derivar");
 
 // Falsos positivos: NO deben disparar nada.
@@ -70,19 +77,22 @@ for (const [frase, patron, nombre] of [
   ["no es nada grave", clinic.cancelIntentPatterns, "cancelar"],
   ["gracias, muy amable", clinic.humanHandoffIntentPatterns, "derivar"],
   ["para las 5 de la tarde", clinic.cancelIntentPatterns, "cancelar"],
+  // Pedir ficha con un médico es un dato de la solicitud, no una derivación.
+  ["quiero una ficha con la doctora Rosmery", clinic.humanHandoffIntentPatterns, "derivar"],
+  ["necesito consulta con el dr Favio", clinic.humanHandoffIntentPatterns, "derivar"],
 ] as const) {
   const hit = patron.test(frase);
   chequear(`"${frase}"`, !hit, hit ? `✗ dispara ${nombre}` : "inerte");
 }
 
 // ── Tarifario ────────────────────────────────────────────────────────────────
-console.log("\nTARIFARIO  (bookable = entra a la agenda; el resto deriva a un asesor)");
-for (const [frase, esperaBookable] of [
-  ["cuanto sale una consulta general", true],
+console.log("\nTARIFARIO  (servicio = abre solicitud; emergencia = solo se informa)");
+for (const [frase, esperaEmergencia] of [
   ["quiero hacerme un papanicolao", false],
   ["cuanto cuesta la eco de embarazo", false],
   ["precio de una cesarea", false],
   ["lavado de oido cuanto es", false],
+  ["tuve un accidente de transito", true],
   // Conjugadas: el catálogo guarda infinitivos y el paciente conjuga.
   ["necesito que me saquen puntos", false],
   ["quiero sacarme los puntos", false],
@@ -100,37 +110,35 @@ for (const [frase, esperaBookable] of [
     chequear(`"${frase.slice(0, 42)}"`, false, "✗ no reconoció ningún servicio");
     continue;
   }
-  const ok = Boolean(s.bookable) === esperaBookable;
-  chequear(`"${frase.slice(0, 42)}"`, ok, `${s.name} — ${formatServicePrice(s)}${s.bookable ? " [agenda]" : " [asesor]"}`);
+  const emergencia = s.category === "emergencia";
+  chequear(`"${frase.slice(0, 42)}"`, emergencia === esperaEmergencia, `${s.name} — ${formatServicePrice(s)}${emergencia ? " [informa]" : " [solicitud]"}`);
 }
 
-// ── Precio informado vs precio cobrado ───────────────────────────────────────
-console.log("\nPRECIO INFORMADO vs COBRADO");
-const url = process.env.SUPABASE_URL!;
-const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const [dRes, sRes] = await Promise.all([
-  fetch(`${url}/rest/v1/clinic_doctors?select=name,specialty_id,consultation_price`, {
-    headers: { apikey: key, Authorization: `Bearer ${key}` },
-  }),
-  fetch(`${url}/rest/v1/clinic_specialties?select=id,slug`, {
-    headers: { apikey: key, Authorization: `Bearer ${key}` },
-  }),
-]);
-const specs = new Map(((await sRes.json()) as any[]).map((s) => [s.id, s.slug]));
-const cobrado = new Map<string, number>();
-for (const d of (await dRes.json()) as any[]) {
-  cobrado.set(specs.get(d.specialty_id)!, Number(d.consultation_price));
-}
-
-for (const [slug, frase] of [
-  ["medicina-general", "consulta general"],
-  ["pediatria", "consulta pediatria"],
-  ["ginecologia", "consulta ginecologia"],
+// ── Precios de consulta por franja ───────────────────────────────────────────
+// Franjas confirmadas el 2026-09-15: a las 19:00 rige la tarifa de después, y
+// la madrugada se cobra como la noche del día anterior.
+console.log("\nPRECIOS DE CONSULTA  (día 0=domingo … 6=sábado)");
+const mg = findSpecialty("medicina-general")!;
+const ped = findSpecialty("pediatria")!;
+const gin = findSpecialty("ginecologia")!;
+for (const [etiqueta, spec, dia, hora, esperado] of [
+  ["Medicina General martes 18:59", mg, 2, "18:59", 60],
+  ["Medicina General martes 19:00", mg, 2, "19:00", 80],
+  ["Medicina General miércoles 03:00", mg, 3, "03:00", 80],
+  ["Medicina General sábado 11:59", mg, 6, "11:59", 60],
+  ["Medicina General sábado 12:00", mg, 6, "12:00", 80],
+  ["Medicina General lunes 06:59", mg, 1, "06:59", 80],
+  ["Medicina General lunes 07:00", mg, 1, "07:00", 60],
+  ["Pediatría viernes 20:00", ped, 5, "20:00", 80],
+  ["Pediatría sábado 10:00", ped, 6, "10:00", 120],
+  ["Pediatría sábado 19:00", ped, 6, "19:00", 100],
+  ["Pediatría domingo 02:00", ped, 0, "02:00", 100],
+  ["Pediatría domingo 15:00", ped, 0, "15:00", 120],
+  ["Ginecología jueves 21:00", gin, 4, "21:00", 80],
+  ["Ginecología sábado 09:00", gin, 6, "09:00", 120],
 ] as const) {
-  const s = matchService(frase, clinic.services);
-  const informa = s?.price ?? null;
-  const cobra = cobrado.get(slug) ?? null;
-  chequear(slug, informa === cobra, `informa ${informa} Bs · cobra ${cobra} Bs`);
+  const precio = priceAt(spec, dia, hora);
+  chequear(etiqueta, precio === esperado, `${precio} Bs (esperado ${esperado})`);
 }
 
 console.log(`\n${"─".repeat(72)}`);
