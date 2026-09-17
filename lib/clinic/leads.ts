@@ -36,7 +36,7 @@ import {
   localNow,
   quoteConsultation,
 } from "@/lib/clinic/pricing";
-import { formatServicePrice, type ServiceItem } from "@/lib/clinic/services";
+import { formatServicePrice, matchService, type ServiceItem } from "@/lib/clinic/services";
 import {
   createLead,
   findRecentPendingLead,
@@ -67,12 +67,6 @@ export const LEAD_REPLIES = {
   // contestaba "Ok" sin que nadie se enterara.
   action: "Entendido 🙏 Eso se lo tiene que confirmar una persona de la clínica: ya le aviso para que le escriba por aquí en un momento.",
 };
-
-// Pidió por su nombre algo que la clínica no ofrece. Se lo decimos y lo pasamos
-// a un asesor: nunca se sustituye en silencio por otra especialidad.
-export function unavailableReply(request: string): string {
-  return `Disculpe 🙏 No contamos con *${request}* en la clínica. Le paso con un asesor por si podemos ofrecerle alguna alternativa; en un momento le escribe por aquí.`;
-}
 
 export type LeadContext = {
   clinic: ClinicConfig;
@@ -115,7 +109,7 @@ Reglas:
 - Solo extraés lo que el mensaje dice de verdad. Ante la duda, null o false. Nunca inventes.
 - patientName: nombre del PACIENTE que se va a atender, tal como lo escribió. Si la ficha es para otra persona (un hijo, la mamá), es el nombre de esa persona. Nunca es el nombre de un médico.
 - specialtyKey: la clave de la lista si nombra la especialidad o un sinónimo ("pediatra" → pediatria, "ginecólogo" → ginecologia, "médico general" → medicina-general). Si nombra a un médico de la lista, usá la especialidad de ese médico. Si SOLO describe un síntoma o malestar y no nombra ninguna especialidad, elegí la especialidad más apropiada de la lista y ante la duda medicina-general. Si no hay ninguna pista, null.
-- unavailableRequest: si el paciente PIDE POR SU NOMBRE una especialidad, un servicio o una atención que NO está en la lista de especialidades ni en el tarifario (por ejemplo fisioterapia, odontología, oftalmología, psiquiatría, oncología, rehabilitación, kinesiología, nutrición), poné acá eso que pidió, tal como lo escribió. Si lo que pide SÍ está en la lista, null.
+- unavailableRequest: si el paciente PIDE POR SU NOMBRE (o pregunta el precio de) una especialidad, un servicio, un examen o un procedimiento que NO está en la lista de especialidades (por ejemplo fisioterapia, odontología, oftalmología, psiquiatría, oncología, rehabilitación, kinesiología, nutrición, electrocardiograma, radiografía, un examen de laboratorio puntual), poné acá eso que pidió, tal como lo escribió. Esto NO es un rechazo: solo marca que hay que verificarlo con un asesor. Si lo que pide SÍ está en la lista de especialidades, null.
 - ANTES de marcar unavailableRequest, repasá la lista entera. La gente nombra al médico, no a la especialidad: "ginecólogo" es ginecologia, "pediatra" es pediatria, "traumatólogo" es traumatologia, "cardiólogo" es cardiologia, "urólogo" es urologia, "médico general" o "clínico" es medicina-general. Todas esas SÍ las tenemos: van en specialtyKey y unavailableRequest queda en null. Marcá unavailableRequest solo cuando no haya NINGUNA de la lista que corresponda.
 - REGLA DURA: cuando unavailableRequest tiene valor, specialtyKey es SIEMPRE null. Que el paciente nombre algo que no ofrecemos NUNCA se traduce a medicina-general ni a ninguna otra especialidad de la lista: el fallback a medicina-general vale solo para síntomas, jamás para una especialidad que el paciente nombró.
 - paymentIntention: cómo dice que va a pagar. "qr" si menciona QR, transferencia o pago por banco; "efectivo" si dice que paga al llegar, en caja, en recepción o en efectivo. null si no dice nada de pago. Es solo un dato para el asesor: no cambia nada del resto.
@@ -155,7 +149,7 @@ function cleanHour(value: unknown): string | null {
 const HUMAN_ACTION_PATTERN =
   /\bme confirma\b|\bconfirmeme\b|\bconf[ií]rmeme\b|\bme avisa\b|\bav[ií]sele\b|\bav[ií]sale\b|\bd[ií]gale\b|\bd[ií]cele\b|\bhable con\b|\bya llegu[eé]\b|\bestoy (aqu[ií]|afuera|en la puerta|en recepci[oó]n)\b/i;
 
-function sanitizeAnalysis(raw: any, text: string): TurnAnalysis {
+function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): TurnAnalysis {
   const date = typeof raw?.preferredDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.preferredDate)
     ? raw.preferredDate
     : null;
@@ -173,6 +167,14 @@ function sanitizeAnalysis(raw: any, text: string): TurnAnalysis {
   const unavailableIsOurs = unavailableRequest ? matchSpecialtyText(unavailableRequest) : null;
   if (unavailableIsOurs) unavailableRequest = null;
 
+  // Mismo chequeo contra el catálogo de SERVICIOS (ecografías, procedimientos,
+  // enfermería…): si lo que el modelo marcó como no disponible es en realidad
+  // un servicio catalogado, no era tal — se descarta y el webhook lo resuelve
+  // solo con matchService() sobre el texto completo (más robusto que este
+  // fragmento). Sin este chequeo, un falso positivo del modelo podría hacer
+  // que un servicio real (con precio conocido) se tratara como "a confirmar".
+  if (unavailableRequest && matchService(unavailableRequest, services)) unavailableRequest = null;
+
   const fromModel = findSpecialty(raw?.specialtyKey)?.key ?? null;
   // Con una especialidad nombrada en el texto, esa manda: es un hecho, no una
   // inferencia. Si no hay, vale la del modelo (que ahí sí está infiriendo desde
@@ -182,9 +184,12 @@ function sanitizeAnalysis(raw: any, text: string): TurnAnalysis {
 
   // Nombró una especialidad nuestra sin preguntar nada: viene a pedir ficha. El
   // modelo devolvía wantsLead=false para un "Para ginecología" a secas y el
-  // mensaje ni siquiera llegaba a abrir la solicitud.
+  // mensaje ni siquiera llegaba a abrir la solicitud. Pedir algo que no está en
+  // catálogo TAMBIÉN abre la ficha (no se rechaza): no sabemos si la clínica lo
+  // ofrece o no — solo que no está cargado acá — así que se recopila el dato
+  // igual y el asesor confirma.
   const isQuestion = raw?.isQuestion === true;
-  const wantsLead = raw?.wantsLead === true || Boolean(specialtyKey && !isQuestion && !unavailableRequest);
+  const wantsLead = raw?.wantsLead === true || Boolean((specialtyKey || unavailableRequest) && !isQuestion);
 
   return {
     patientName: cleanText(raw?.patientName, 80),
@@ -252,7 +257,7 @@ export async function analyzeTurn(
       temperature: 0,
       abortSignal: AbortSignal.timeout(10000),
     });
-    return sanitizeAnalysis(JSON.parse(text.trim().replace(/^```(?:json)?|```$/g, "").trim()), ctx.text);
+    return sanitizeAnalysis(JSON.parse(text.trim().replace(/^```(?:json)?|```$/g, "").trim()), ctx.text, ctx.clinic.services);
   } catch (err) {
     console.error("analyzeTurn failed", getErrorMessage(err));
     return null;
@@ -307,7 +312,9 @@ function missingFields(draft: LeadDraft | null): Field[] {
   // La especialidad es obligatoria SIEMPRE. Antes bastaba con nombrar un médico
   // y la ficha se cerraba sin especialidad, con un nombre que nadie validaba
   // contra el plantel: el médico es un dato extra, nunca un reemplazo.
-  if (draft.kind === "ficha" && !draft.specialtyKey) missing.push("specialty");
+  // unmatchedRequestText también la satisface: si ya dijo qué pidió (aunque no
+  // esté en catálogo), no se le vuelve a preguntar lo mismo.
+  if (draft.kind === "ficha" && !draft.specialtyKey && !draft.unmatchedRequestText) missing.push("specialty");
   if (!draft.patientName) missing.push("name");
   if (!draft.preferredTime) missing.push("time");
   if (needsVisitType(draft) && !draft.visitType) missing.push("visit");
@@ -328,20 +335,36 @@ function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): { draft
     next.preferredHour = analysis.preferredHour;
   }
   if (draft.kind === "ficha") {
-    if (analysis.specialtyKey) next.specialtyKey = analysis.specialtyKey;
+    if (analysis.specialtyKey) {
+      // Llegó una especialidad de catálogo real (p. ej. el paciente corrigió lo
+      // que había pedido antes): gana sobre cualquier pedido fuera de catálogo
+      // que hubiera quedado guardado.
+      next.specialtyKey = analysis.specialtyKey;
+      next.unmatchedRequestText = null;
+    } else if (analysis.unavailableRequest) {
+      next.unmatchedRequestText = analysis.unavailableRequest;
+    }
     if (analysis.doctorName) next.doctorPreference = analysis.doctorName;
     if (analysis.visitType) next.visitType = analysis.visitType;
   }
 
   const fields = (d: LeadDraft) =>
-    JSON.stringify([d.patientName, d.preferredTime, d.preferredDate, d.preferredHour, d.specialtyKey, d.doctorPreference, d.visitType, d.paymentIntention]);
+    JSON.stringify([
+      d.patientName, d.preferredTime, d.preferredDate, d.preferredHour,
+      d.specialtyKey, d.unmatchedRequestText, d.doctorPreference, d.visitType, d.paymentIntention,
+    ]);
   return { draft: next, changed: fields(next) !== fields(draft) };
 }
 
 function leadRowFields(draft: LeadDraft): LeadFields {
   return {
     patientName: draft.patientName ?? null,
-    specialty: findSpecialty(draft.specialtyKey)?.name ?? null,
+    specialty: findSpecialty(draft.specialtyKey)?.name ?? draft.unmatchedRequestText ?? null,
+    // true cuando lo único que tenemos es el texto libre del paciente (una
+    // especialidad, un servicio o un examen que no está en ningún catálogo
+    // nuestro): no confirmamos ni negamos que la clínica lo ofrezca, se marca
+    // para que el asesor lo revise antes de avisar nada.
+    specialtyUnverified: Boolean(!draft.specialtyKey && draft.unmatchedRequestText),
     doctorPreference: draft.doctorPreference ?? null,
     preferredTime: draft.preferredTime ?? null,
     visitType: draft.visitType ?? null,
@@ -429,6 +452,12 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
     `${draft.specialtyKey === "pediatria" ? "👶" : "👤"} Paciente: ${draft.patientName}`,
     draft.kind === "servicio" ? `🩺 Servicio: ${draft.serviceName}` : null,
     draft.kind === "ficha" && spec ? `🩺 Especialidad: ${spec.name}` : null,
+    // Fuera de catálogo (especialidad, servicio o examen): se anota tal cual
+    // lo pidió, sin afirmar ni negar que la clínica lo ofrece. El asesor lo
+    // confirma antes de avisarle nada al paciente.
+    draft.kind === "ficha" && !spec && draft.unmatchedRequestText
+      ? `🩺 Pidió: ${draft.unmatchedRequestText} _(no está en nuestro catálogo — el asesor confirma si lo ofrecemos y el precio)_`
+      : null,
     draft.kind === "ficha" && draft.doctorPreference ? `👨‍⚕️ Médico de preferencia: ${draft.doctorPreference}` : null,
     `🗓️ Horario que prefiere: ${draft.preferredTime}`,
     showVisitType ? `🔁 ${draft.visitType === "reconsulta" ? "Reconsulta" : "Consulta nueva"}` : null,

@@ -810,6 +810,7 @@ export async function getActiveDoctorsWithSpecialty(
 export type LeadFields = {
   patientName?: string | null;
   specialty?: string | null;
+  specialtyUnverified?: boolean;
   doctorPreference?: string | null;
   preferredTime?: string | null;
   visitType?: VisitType | null;
@@ -823,6 +824,7 @@ export type LeadFields = {
 const LEAD_COLUMNS: Record<keyof LeadFields, string> = {
   patientName: "patient_name",
   specialty: "specialty",
+  specialtyUnverified: "specialty_unverified",
   doctorPreference: "doctor_preference",
   preferredTime: "preferred_time",
   visitType: "visit_type",
@@ -854,6 +856,7 @@ function mapLead(row: any): Lead {
     status: row.status as LeadStatus,
     patientName: row.patient_name ?? null,
     specialty: row.specialty ?? null,
+    specialtyUnverified: Boolean(row.specialty_unverified),
     doctorPreference: row.doctor_preference ?? null,
     preferredTime: row.preferred_time ?? null,
     visitType: (row.visit_type as VisitType) ?? null,

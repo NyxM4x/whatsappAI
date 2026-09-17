@@ -166,6 +166,13 @@ export type LeadDraft = {
   kind: "ficha" | "servicio";
   patientName?: string | null;
   specialtyKey?: string | null;     // clave de CONSULTATION_SPECIALTIES
+  // Lo que el paciente pidió tal cual (especialidad, servicio o examen), cuando
+  // NO está en CONSULTATION_SPECIALTIES ni en el catálogo de servicios. No
+  // significa que la clínica no lo ofrezca: solo que no está cargado en
+  // nuestro catálogo — el Excel de la clínica no siempre está completo. El bot
+  // nunca afirma ni niega disponibilidad — junta el dato igual y el asesor
+  // confirma.
+  unmatchedRequestText?: string | null;
   doctorPreference?: string | null; // tal como lo escribió el paciente
   preferredTime?: string | null;    // "mañana a las 10"
   preferredDate?: string | null;    // YYYY-MM-DD, si se pudo resolver
@@ -187,6 +194,9 @@ export type Lead = {
   status: LeadStatus;
   patientName: string | null;
   specialty: string | null;
+  // true cuando `specialty` es texto libre que el paciente pidió y no está en
+  // CONSULTATION_SPECIALTIES — no confirmado como ofrecido ni como rechazado.
+  specialtyUnverified: boolean;
   doctorPreference: string | null;
   preferredTime: string | null;
   visitType: VisitType | null;

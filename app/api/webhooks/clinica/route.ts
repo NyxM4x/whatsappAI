@@ -12,11 +12,12 @@
 //   4. Pide hablar con una persona → alarma + pausa
 //   5. Solicitud en curso (collecting_lead / confirming_lead) → continueLead
 //   6. Cancelar / reprogramar / "¿cuándo es mi cita?" / pedir QR → alarma + pausa
-//   7. analyzeTurn: pide persona, pide algo que no ofrecemos, frustración
-//      (3 veces → alarma + pausa)
-//   8. Servicio del tarifario o ficha → startLead
-//   9. Pide una gestión ("avísele a la doctora", "ya llegué") → alarma + pausa
-//  10. Si no → Q&A con OpenAI
+//   7. analyzeTurn: pide persona, frustración (3 veces → alarma + pausa)
+//   8. Pide una especialidad fuera de catálogo → ficha igual (nunca se le dice
+//      que no la tenemos: no sabemos si la clínica la ofrece o no)
+//   9. Servicio del tarifario o ficha → startLead
+//  10. Pide una gestión ("avísele a la doctora", "ya llegué") → alarma + pausa
+//  11. Si no → Q&A con OpenAI
 // Toda derivación pausa el bot DESPUÉS de enviar la respuesta: la barrera de
 // pausa de sendAndPersist descartaría el aviso al paciente si se pausara antes.
 // ============================================================================
@@ -60,7 +61,6 @@ import {
   LEAD_REPLIES,
   registerEscalation,
   startLead,
-  unavailableReply,
   type LeadContext,
   type TurnAnalysis,
 } from "@/lib/clinic/leads";
@@ -522,16 +522,21 @@ export async function POST(request: Request) {
   lastAnalysis = analysis;
   if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff, "handoff_humano");
 
-  // Pidió por su nombre algo que la clínica no ofrece (fisioterapia,
-  // odontología…). Va ANTES de servicio y ficha: si no, el mensaje seguiría de
-  // largo y se le abriría una solicitud de otra cosa. Nunca se sustituye en
-  // silencio por otra especialidad.
-  if (analysis?.unavailableRequest) {
-    return escalate("no_disponible", unavailableReply(analysis.unavailableRequest), "no_disponible");
-  }
-
   const tracked = await trackFailedAttempts(leadCtx, session, analysis);
   if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts, "fallidos");
+
+  // Pidió por su nombre una especialidad que no está en nuestro catálogo
+  // (fisioterapia, odontología…). NUNCA se le dice que no la tenemos: la
+  // clínica no siempre nos pasa la lista completa, así que no sabemos si de
+  // verdad no la ofrece o solo no está cargada acá. Se recopila el dato igual,
+  // como cualquier ficha, y un asesor humano confirma. Va ANTES de servicio y
+  // ficha para que el texto de la especialidad no se pierda contra
+  // matchService() ni se le repregunte.
+  if (analysis?.unavailableRequest) {
+    const result = await startLead({ ...leadCtx, session: tracked.session, kind: "ficha", analysis });
+    await send(result.reply);
+    return ok("ficha");
+  }
 
   // ── 10. Servicio del tarifario → solicitud de servicio ────────────────────
   // Las consultas de emergencia solo se informan (Q&A): no esperan a un asesor.

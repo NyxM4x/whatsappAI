@@ -28,6 +28,7 @@ type LeadDTO = {
   contactName: string | null;
   patientName: string | null;
   specialty: string | null;
+  specialtyUnverified: boolean;
   doctorPreference: string | null;
   preferredTime: string | null;
   visitType: string | null;
@@ -56,7 +57,7 @@ const KIND_LABEL: Record<string, string> = {
   reprogramar: "🔁 Pide reprogramar",
   consulta_cita: "❓ Pregunta por su cita",
   pago: "💳 Quiere pagar",
-  no_disponible: "🚫 Pide algo que no ofrecemos",
+  no_disponible: "🩺 Ficha (especialidad no catalogada)",
   accion: "🔔 Pide que se le avise o confirme algo",
 };
 
@@ -149,7 +150,19 @@ function LeadDetails({ lead }: { lead: LeadDTO }) {
   const rows: [string, string | null][] = [
     ["Paciente", lead.patientName],
     ["WhatsApp", [lead.contactName, lead.contactPhone].filter(Boolean).join(" · ")],
-    ["Especialidad", lead.specialty],
+    // specialtyUnverified: el paciente pidió una especialidad, un servicio o un
+    // examen que no está en ningún catálogo nuestro. No significa que la
+    // clínica no lo tenga — puede que solo no esté cargado acá (el Excel de
+    // tarifario no siempre está completo) — así que se marca para que el
+    // asesor lo confirme, nunca se le dice al paciente que no lo ofrecemos.
+    [
+      lead.specialtyUnverified ? "Pidió (a confirmar)" : "Especialidad",
+      lead.specialty
+        ? lead.specialtyUnverified
+          ? `⚠️ ${lead.specialty} — no está en catálogo, confirmar con la clínica`
+          : lead.specialty
+        : null,
+    ],
     ["Médico de preferencia", lead.doctorPreference],
     ["Servicio", lead.serviceName],
     ["Horario que prefiere", lead.preferredTime],

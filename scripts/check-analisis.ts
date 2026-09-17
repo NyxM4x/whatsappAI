@@ -41,11 +41,22 @@ type Expectation = {
 };
 
 const CASES: Expectation[] = [
-  // ── El caso que rompió: especialidad que la clínica no tiene ──────────────
-  { text: "Para fisioterapia", unavailable: true, specialtyKey: null },
+  // ── El caso que rompió: especialidad fuera de nuestro catálogo ────────────
+  // Desde 2026-09-17 esto YA NO se rechaza ("no contamos con X"): no sabemos
+  // si la clínica la ofrece o no, solo que no está cargada acá. Se recopila
+  // igual (wantsLead: true en los pedidos directos) y un asesor confirma.
+  { text: "Para fisioterapia", unavailable: true, specialtyKey: null, wantsLead: true },
   { text: "buenas, hacen odontologia?", unavailable: true, specialtyKey: null },
-  { text: "necesito un oftalmologo para mi mama", unavailable: true, specialtyKey: null },
-  { text: "quiero una ficha para rehabilitacion de rodilla", unavailable: true, specialtyKey: null },
+  { text: "necesito un oftalmologo para mi mama", unavailable: true, specialtyKey: null, wantsLead: true },
+  { text: "quiero una ficha para rehabilitacion de rodilla", unavailable: true, specialtyKey: null, wantsLead: true },
+
+  // ── Caso real 2026-09-17: el mismo problema pero con un SERVICIO, no una
+  // especialidad. El bot dijo "no contamos con electrocardiograma" y la
+  // clínica sí lo ofrece (170 Bs con consulta) — la recepcionista tuvo que
+  // corregirlo en vivo. unavailableRequest cubre especialidad Y servicio/
+  // examen por igual; acá solo importa que NO se rechace.
+  { text: "cuanto está el electrocardiograma", unavailable: true, specialtyKey: null },
+  { text: "hacen electrocardiograma?", unavailable: true, specialtyKey: null },
 
   // ── Gestiones que solo hace una persona (antes contestaba "Ok") ───────────
   { text: "Por favor doctora me lo dice a la licen para las 5:10 llegó", needsAction: true },
@@ -61,6 +72,10 @@ const CASES: Expectation[] = [
   { text: "me duele mucho la barriga desde ayer", unavailable: false, specialtyKey: "medicina-general" },
   { text: "necesito un ginecologo", unavailable: false, specialtyKey: "ginecologia", wantsLead: true },
   { text: "cuanto cuesta la consulta de neurologia?", unavailable: false, specialtyKey: "neurologia" },
+  // Servicio real del catálogo (defaultServices): nunca debe quedar marcado
+  // como unavailableRequest — matchService() en sanitizeAnalysis es la red que
+  // descarta ese falso positivo, igual que matchSpecialtyText para especialidades.
+  { text: "cuanto cuesta el papanicolau?", unavailable: false },
   { text: "a que hora abren?", unavailable: false, needsAction: false, wantsLead: false },
 
   // ── F2: la especialidad dicha en el primer mensaje no se repregunta ───────
