@@ -131,6 +131,34 @@ export type LeadKind =
   | "no_disponible" // pidió algo que la clínica no ofrece (fisioterapia, odontología…)
   | "accion";       // pide una gestión: "avísele a la doctora", "ya llegué", "me confirma"
 
+// Cómo dijo el paciente que va a pagar. Es un dato para el asesor: el bot nunca
+// cobra ni manda el QR.
+export type PaymentIntention = "qr" | "efectivo";
+
+// Qué rama del webhook atendió el mensaje. Se guarda en clinic_webhook_audits
+// para poder responder "¿por qué el bot contestó esto?" sin reconstruirlo a
+// mano. Es un string cerrado a propósito: el compilador obliga a declarar la
+// rama en cada salida del webhook, así no queda ninguna sin auditar.
+export type AuditIntent =
+  | "emergencia"
+  | "handoff_humano"
+  | "ubicacion"
+  | "comprobante"
+  | "solicitud_en_curso"
+  | "bienvenida"
+  | "saludo"
+  | "cancelar"
+  | "reprogramar"
+  | "consulta_cita"
+  | "pago"
+  | "no_disponible"
+  | "fallidos"
+  | "servicio"
+  | "ficha"
+  | "accion"
+  | "qa"
+  | "qa_fallido";
+
 export type LeadStatus = "pending" | "attended" | "withdrawn";
 
 // Lo que el bot va juntando en la conversación (vive en BookingDraft.lead).
@@ -143,6 +171,7 @@ export type LeadDraft = {
   preferredDate?: string | null;    // YYYY-MM-DD, si se pudo resolver
   preferredHour?: string | null;    // HH:MM, si se pudo resolver
   visitType?: VisitType | null;
+  paymentIntention?: PaymentIntention | null; // cómo dijo que va a pagar
   serviceName?: string | null;
   serviceQuote?: string | null;
   leadId?: string | null;           // fila en clinic_leads, una vez enviado el resumen
@@ -161,6 +190,7 @@ export type Lead = {
   doctorPreference: string | null;
   preferredTime: string | null;
   visitType: VisitType | null;
+  paymentIntention: PaymentIntention | null;
   serviceName: string | null;
   priceQuote: string | null;
   summary: string | null;

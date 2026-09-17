@@ -31,6 +31,7 @@ type LeadDTO = {
   doctorPreference: string | null;
   preferredTime: string | null;
   visitType: string | null;
+  paymentIntention: string | null;
   serviceName: string | null;
   priceQuote: string | null;
   lastMessage: string | null;
@@ -152,6 +153,7 @@ function LeadDetails({ lead }: { lead: LeadDTO }) {
     ["Servicio", lead.serviceName],
     ["Horario que prefiere", lead.preferredTime],
     ["Tipo", lead.visitType === "reconsulta" ? "Reconsulta" : lead.visitType === "nueva" ? "Consulta nueva" : null],
+    ["Pago que anunció", lead.paymentIntention === "qr" ? "Por QR" : lead.paymentIntention === "efectivo" ? "En efectivo al llegar" : null],
     ["Precio informado", lead.priceQuote],
     ["Último mensaje", lead.lastMessage],
   ];

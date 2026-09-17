@@ -37,6 +37,7 @@ type Expectation = {
   needsAction?: boolean;      // pide una gestión humana
   specialtyKey?: string | null;
   wantsLead?: boolean;
+  payment?: "qr" | "efectivo" | null;
 };
 
 const CASES: Expectation[] = [
@@ -58,6 +59,18 @@ const CASES: Expectation[] = [
   { text: "necesito un ginecologo", unavailable: false, specialtyKey: "ginecologia", wantsLead: true },
   { text: "cuanto cuesta la consulta de neurologia?", unavailable: false, specialtyKey: "neurologia" },
   { text: "a que hora abren?", unavailable: false, needsAction: false, wantsLead: false },
+
+  // ── F2: la especialidad dicha en el primer mensaje no se repregunta ───────
+  // Para que no repregunte, wantsLead tiene que salir en true: si no, el
+  // mensaje ni siquiera llega a abrir la solicitud.
+  { text: "Para ginecología", specialtyKey: "ginecologia", wantsLead: true },
+  { text: "pediatria por favor", specialtyKey: "pediatria", wantsLead: true },
+
+  // ── F7: forma de pago como dato, sin derivar por eso ──────────────────────
+  { text: "voy a pagar por QR", payment: "qr" },
+  { text: "pago llegando nomas", payment: "efectivo", needsAction: false },
+  { text: "quiero ficha para medicina general, pago en efectivo al llegar", payment: "efectivo", specialtyKey: "medicina-general", wantsLead: true },
+  { text: "mañana a las 9 me viene bien", payment: null },
 ];
 
 const clinic = await getClinicConfig();
@@ -99,6 +112,9 @@ for (const c of CASES) {
   if (c.wantsLead !== undefined && a.wantsLead !== c.wantsLead) {
     problems.push(`wantsLead=${a.wantsLead} (esperado ${c.wantsLead})`);
   }
+  if (c.payment !== undefined && a.paymentIntention !== c.payment) {
+    problems.push(`paymentIntention=${a.paymentIntention ?? "null"} (esperado ${c.payment ?? "null"})`);
+  }
 
   // Invariante del arreglo: nunca las dos cosas a la vez. Si esto falla, el bot
   // volvió a poder sustituir en silencio una especialidad que no tenemos.
@@ -111,6 +127,7 @@ for (const c of CASES) {
     a.needsHumanAction ? "gestión" : null,
     a.specialtyKey ? findSpecialty(a.specialtyKey)?.name ?? a.specialtyKey : null,
     a.wantsLead ? "quiere-ficha" : null,
+    a.paymentIntention ? `paga:${a.paymentIntention}` : null,
   ].filter(Boolean).join(" · ") || "—";
 
   if (problems.length) {

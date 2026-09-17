@@ -68,8 +68,9 @@ import {
   getBookingSession,
   saveBookingSession,
   expireStalePaymentAppointments,
+  recordWebhookAudit,
 } from "@/lib/clinic/data";
-import type { BookingSession, LeadKind } from "@/lib/clinic/types";
+import type { AuditIntent, BookingSession, LeadKind } from "@/lib/clinic/types";
 
 // Node runtime y ventana amplia: el debounce duerme unos segundos dentro de la
 // invocación, así que subimos el límite por defecto de Vercel (10s).
@@ -338,17 +339,32 @@ export async function POST(request: Request) {
       lastMessage,
       pauseAfter: options.pauseAfter,
     });
-  const ok = () => new Response("ok", { status: 200 });
-
   const session = normalizeSession(await getBookingSession(conversationId));
+
+  // Cierre de cada turno: deja la fila de auditoría y responde 200. El `intent`
+  // es obligatorio, así que el compilador no deja salir del webhook sin decir
+  // qué rama atendió el mensaje — que es justo lo que faltaba para poder
+  // revisar después por qué el bot contestó lo que contestó.
+  let lastAnalysis: TurnAnalysis | null = null;
+  const ok = async (intent: AuditIntent) => {
+    await recordWebhookAudit({
+      business: clinic.slug,
+      conversationId,
+      contactPhone,
+      intent,
+      analysis: lastAnalysis,
+      step: session.step,
+    });
+    return new Response("ok", { status: 200 });
+  };
 
   // Derivar a una persona: alarma en el panel, sesión limpia, aviso al
   // paciente y pausa del bot.
-  const escalate = async (kind: LeadKind, replyText: string) => {
+  const escalate = async (kind: LeadKind, replyText: string, intent: AuditIntent) => {
     await registerEscalation({ ...leadCtx, kind, lastMessage: newText, lead: session.draft.lead ?? null });
     await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {} });
     await send(replyText, { pauseAfter: true });
-    return ok();
+    return ok(intent);
   };
 
   // ── 1. Comprobantes y archivos ────────────────────────────────────────────
@@ -365,25 +381,25 @@ export async function POST(request: Request) {
   const textLc = newText.toLowerCase();
   if (emergencyDetectionEnabled && clinic.emergencyKeywords.some((kw) => textLc.includes(kw.toLowerCase()))) {
     await send(clinic.emergencyResponse);
-    return ok();
+    return ok("emergencia");
   }
 
   // ── 3. Pide hablar con una persona ────────────────────────────────────────
   // Prioridad alta: corta cualquier flujo, incluso una solicitud en curso.
   if (clinic.humanHandoffIntentPatterns.test(newText)) {
-    return escalate("humano", clinic.replies.humanHandoff);
+    return escalate("humano", clinic.replies.humanHandoff, "handoff_humano");
   }
 
   // ── 4. Ubicación / GPS: respuesta determinista con ambos datos ────────────
   if (clinic.locationRequestIntentPatterns.test(newText)) {
     await send(`📍 Nuestra dirección es: ${clinic.generalInfo.address}\n\n🗺️ Ubicación en Google Maps:\n${clinic.generalInfo.mapsUrl}`);
-    return ok();
+    return ok("ubicacion");
   }
 
   // ── 5. Llegó un comprobante o un archivo ──────────────────────────────────
   if (proof) {
     await send(proof === "receipt" ? LEAD_REPLIES.receipt : LEAD_REPLIES.file);
-    return ok();
+    return ok("comprobante");
   }
 
   // ── 6. Solicitud en curso ─────────────────────────────────────────────────
@@ -391,47 +407,49 @@ export async function POST(request: Request) {
     const analysis = newText
       ? await analyzeTurn({ ...leadCtx, text: newText, step: session.step, draft: session.draft.lead ?? null })
       : null;
-    if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff);
+    lastAnalysis = analysis;
+    if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff, "handoff_humano");
 
     const tracked = await trackFailedAttempts(leadCtx, session, analysis);
-    if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts);
+    if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts, "fallidos");
 
     const result = await continueLead({ ...leadCtx, session: tracked.session, analysis, text: newText });
     await send(result.reply, { pauseAfter: result.pauseAfterReply });
-    return ok();
+    return ok("solicitud_en_curso");
   }
 
   // ── 7. Archivo o audio sin texto, o saludo solo ───────────────────────────
   if (!newText) {
     await send(clinic.replies.welcome);
-    return ok();
+    return ok("bienvenida");
   }
   if (GREETING_ONLY_PATTERN.test(newText)) {
     await send(CLINIC_WELCOME_MESSAGE);
-    return ok();
+    return ok("saludo");
   }
 
   // ── 8. Pedidos que solo resuelve una persona ──────────────────────────────
   // El bot ya no cancela, reprograma, consulta citas ni envía el QR.
-  if (clinic.cancelIntentPatterns.test(newText)) return escalate("cancelar", LEAD_REPLIES.toAdvisor);
-  if (clinic.rescheduleIntentPatterns.test(newText)) return escalate("reprogramar", LEAD_REPLIES.toAdvisor);
-  if (clinic.checkAppointmentIntentPatterns.test(newText)) return escalate("consulta_cita", LEAD_REPLIES.toAdvisor);
-  if (clinic.qrRequestIntentPatterns.test(newText)) return escalate("pago", LEAD_REPLIES.payment);
+  if (clinic.cancelIntentPatterns.test(newText)) return escalate("cancelar", LEAD_REPLIES.toAdvisor, "cancelar");
+  if (clinic.rescheduleIntentPatterns.test(newText)) return escalate("reprogramar", LEAD_REPLIES.toAdvisor, "reprogramar");
+  if (clinic.checkAppointmentIntentPatterns.test(newText)) return escalate("consulta_cita", LEAD_REPLIES.toAdvisor, "consulta_cita");
+  if (clinic.qrRequestIntentPatterns.test(newText)) return escalate("pago", LEAD_REPLIES.payment, "pago");
 
   // ── 9. Análisis del mensaje ───────────────────────────────────────────────
   const analysis = await analyzeTurn({ ...leadCtx, text: newText, step: "idle", draft: null });
-  if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff);
+  lastAnalysis = analysis;
+  if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff, "handoff_humano");
 
   // Pidió por su nombre algo que la clínica no ofrece (fisioterapia,
   // odontología…). Va ANTES de servicio y ficha: si no, el mensaje seguiría de
   // largo y se le abriría una solicitud de otra cosa. Nunca se sustituye en
   // silencio por otra especialidad.
   if (analysis?.unavailableRequest) {
-    return escalate("no_disponible", unavailableReply(analysis.unavailableRequest));
+    return escalate("no_disponible", unavailableReply(analysis.unavailableRequest), "no_disponible");
   }
 
   const tracked = await trackFailedAttempts(leadCtx, session, analysis);
-  if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts);
+  if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts, "fallidos");
 
   // ── 10. Servicio del tarifario → solicitud de servicio ────────────────────
   // Las consultas de emergencia solo se informan (Q&A): no esperan a un asesor.
@@ -439,14 +457,14 @@ export async function POST(request: Request) {
   if (service && service.category !== "emergencia") {
     const result = await startLead({ ...leadCtx, session: tracked.session, kind: "servicio", service, analysis });
     await send(result.reply);
-    return ok();
+    return ok("servicio");
   }
 
   // ── 11. Pide ficha / consulta ─────────────────────────────────────────────
   if (clinic.bookingIntentPatterns.test(newText) || analysis?.wantsLead) {
     const result = await startLead({ ...leadCtx, session: tracked.session, kind: "ficha", analysis });
     await send(result.reply);
-    return ok();
+    return ok("ficha");
   }
 
   // ── 12. Red de seguridad: pide una gestión, no información ────────────────
@@ -456,16 +474,16 @@ export async function POST(request: Request) {
   // que es donde el agujero existía: el modelo contestaba "Ok" y nadie se
   // enteraba. Tiene que ser una rama del código, no una regla del prompt: el
   // Q&A solo devuelve texto, no puede dejar la alarma en el panel.
-  if (analysis?.needsHumanAction) return escalate("accion", LEAD_REPLIES.action);
+  if (analysis?.needsHumanAction) return escalate("accion", LEAD_REPLIES.action, "accion");
 
   // ── 13. Q&A general con OpenAI ────────────────────────────────────────────
   // Si el modelo no responde no dejamos al paciente sin salida: se deriva de
   // verdad, con alarma en el panel.
   const answer = await answerQuestion(leadCtx, newText);
-  if (!answer) return escalate("humano", LEAD_REPLIES.technicalError);
+  if (!answer) return escalate("humano", LEAD_REPLIES.technicalError, "qa_fallido");
 
   await send(answer);
-  return ok();
+  return ok("qa");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

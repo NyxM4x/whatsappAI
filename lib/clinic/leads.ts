@@ -44,7 +44,7 @@ import {
   updateLead,
   type LeadFields,
 } from "@/lib/clinic/data";
-import type { BookingDraft, BookingSession, BookingStep, LeadDraft, LeadKind, VisitType } from "@/lib/clinic/types";
+import type { BookingDraft, BookingSession, BookingStep, LeadDraft, LeadKind, PaymentIntention, VisitType } from "@/lib/clinic/types";
 import { getRecentConversationHistory } from "@/lib/engine/data";
 import { getErrorMessage, logSystemEvent } from "@/lib/engine/logging";
 
@@ -96,6 +96,7 @@ export type TurnAnalysis = {
   preferredDate: string | null;
   preferredHour: string | null;
   visitType: VisitType | null;
+  paymentIntention: PaymentIntention | null;
   unavailableRequest: string | null;
   needsHumanAction: boolean;
   wantsLead: boolean;
@@ -107,7 +108,7 @@ export type TurnAnalysis = {
 };
 
 const ANALYSIS_SYSTEM = `Analizás mensajes de WhatsApp de pacientes de una clínica en Bolivia. Respondés ÚNICAMENTE con un JSON válido, sin texto extra:
-{"patientName": string|null, "specialtyKey": string|null, "doctorName": string|null, "preferredTime": string|null, "preferredDate": "YYYY-MM-DD"|null, "preferredHour": "HH:MM"|null, "visitType": "nueva"|"reconsulta"|null, "unavailableRequest": string|null, "needsHumanAction": boolean, "wantsLead": boolean, "wantsHuman": boolean, "frustrated": boolean, "confirms": boolean, "wantsOut": boolean, "isQuestion": boolean}
+{"patientName": string|null, "specialtyKey": string|null, "doctorName": string|null, "preferredTime": string|null, "preferredDate": "YYYY-MM-DD"|null, "preferredHour": "HH:MM"|null, "visitType": "nueva"|"reconsulta"|null, "paymentIntention": "qr"|"efectivo"|null, "unavailableRequest": string|null, "needsHumanAction": boolean, "wantsLead": boolean, "wantsHuman": boolean, "frustrated": boolean, "confirms": boolean, "wantsOut": boolean, "isQuestion": boolean}
 
 Reglas:
 - Solo extraés lo que el mensaje dice de verdad. Ante la duda, null o false. Nunca inventes.
@@ -115,7 +116,8 @@ Reglas:
 - specialtyKey: la clave de la lista si nombra la especialidad o un sinónimo ("pediatra" → pediatria, "ginecólogo" → ginecologia, "médico general" → medicina-general). Si nombra a un médico de la lista, usá la especialidad de ese médico. Si SOLO describe un síntoma o malestar y no nombra ninguna especialidad, elegí la especialidad más apropiada de la lista y ante la duda medicina-general. Si no hay ninguna pista, null.
 - unavailableRequest: si el paciente PIDE POR SU NOMBRE una especialidad, un servicio o una atención que NO está en la lista de especialidades ni en el tarifario (por ejemplo fisioterapia, odontología, oftalmología, psiquiatría, oncología, rehabilitación, kinesiología, nutrición), poné acá eso que pidió, tal como lo escribió. Si lo que pide SÍ está en la lista, null.
 - REGLA DURA: cuando unavailableRequest tiene valor, specialtyKey es SIEMPRE null. Que el paciente nombre algo que no ofrecemos NUNCA se traduce a medicina-general ni a ninguna otra especialidad de la lista: el fallback a medicina-general vale solo para síntomas, jamás para una especialidad que el paciente nombró.
-- needsHumanAction: true si el mensaje pide una GESTIÓN o avisa de un HECHO FÍSICO que solo puede resolver una persona de la clínica: que se avise a alguien ("dígale a la doctora", "avise a la licenciada"), que se le confirme algo ("me confirma", "confírmeme"), que ya llegó o está por llegar ("ya llegué", "estoy en la puerta", "llego a las 5"), que ya pagó o va a pagar al llegar, o cualquier pedido de que alguien haga algo fuera de este chat. false si solo pide una ficha, un servicio o información.
+- paymentIntention: cómo dice que va a pagar. "qr" si menciona QR, transferencia o pago por banco; "efectivo" si dice que paga al llegar, en caja, en recepción o en efectivo. null si no dice nada de pago. Es solo un dato para el asesor: no cambia nada del resto.
+- needsHumanAction: true si el mensaje pide una GESTIÓN o avisa de un HECHO FÍSICO que solo puede resolver una persona de la clínica: que se avise a alguien ("dígale a la doctora", "avise a la licenciada"), que se le confirme algo ("me confirma", "confírmeme"), que ya llegó o está por llegar ("ya llegué", "estoy en la puerta", "llego a las 5"), que ya pagó, o cualquier pedido de que alguien haga algo fuera de este chat. false si solo pide una ficha, un servicio o información, y también false si solo dice CÓMO va a pagar sin pedir nada más (eso ya va en paymentIntention).
 - doctorName: el médico que pide el paciente, tal como lo escribió. null si no nombra a ninguno.
 - preferredTime: el día y/o la hora que prefiere, en pocas palabras y como lo dijo ("mañana a las 10", "el sábado en la tarde", "lo antes posible"). null si no dijo nada de horario.
 - preferredDate: la fecha de ese día en formato YYYY-MM-DD, calculada con la fecha actual ("hoy", "ahora", "mañana", "el lunes", "20 de septiembre"). null si no dijo un día claro.
@@ -161,6 +163,7 @@ function sanitizeAnalysis(raw: any): TurnAnalysis {
     preferredDate: date,
     preferredHour: cleanHour(raw?.preferredHour),
     visitType: raw?.visitType === "nueva" || raw?.visitType === "reconsulta" ? raw.visitType : null,
+    paymentIntention: raw?.paymentIntention === "qr" || raw?.paymentIntention === "efectivo" ? raw.paymentIntention : null,
     unavailableRequest,
     needsHumanAction: raw?.needsHumanAction === true,
     wantsLead: raw?.wantsLead === true,
@@ -287,6 +290,7 @@ function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): { draft
   const next: LeadDraft = { ...draft };
 
   if (analysis.patientName) next.patientName = analysis.patientName;
+  if (analysis.paymentIntention) next.paymentIntention = analysis.paymentIntention;
   if (analysis.preferredTime) {
     next.preferredTime = analysis.preferredTime;
     next.preferredDate = analysis.preferredDate;
@@ -299,7 +303,7 @@ function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): { draft
   }
 
   const fields = (d: LeadDraft) =>
-    JSON.stringify([d.patientName, d.preferredTime, d.preferredDate, d.preferredHour, d.specialtyKey, d.doctorPreference, d.visitType]);
+    JSON.stringify([d.patientName, d.preferredTime, d.preferredDate, d.preferredHour, d.specialtyKey, d.doctorPreference, d.visitType, d.paymentIntention]);
   return { draft: next, changed: fields(next) !== fields(draft) };
 }
 
@@ -310,6 +314,7 @@ function leadRowFields(draft: LeadDraft): LeadFields {
     doctorPreference: draft.doctorPreference ?? null,
     preferredTime: draft.preferredTime ?? null,
     visitType: draft.visitType ?? null,
+    paymentIntention: draft.paymentIntention ?? null,
     serviceName: draft.serviceName ?? null,
   };
 }
@@ -396,6 +401,11 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
     draft.kind === "ficha" && draft.doctorPreference ? `👨‍⚕️ Médico de preferencia: ${draft.doctorPreference}` : null,
     `🗓️ Horario que prefiere: ${draft.preferredTime}`,
     showVisitType ? `🔁 ${draft.visitType === "reconsulta" ? "Reconsulta" : "Consulta nueva"}` : null,
+    // Solo se confirma lo que el paciente dijo. El bot no cobra ni manda el QR:
+    // el asesor ve el dato y sigue desde ahí.
+    draft.paymentIntention
+      ? `💳 Pago: ${draft.paymentIntention === "qr" ? "por QR" : "en efectivo al llegar"}`
+      : null,
     "",
     ...price.lines,
     "🪪 Recuerde traer su *carnet de identidad*. Si no lo tiene, puede mostrar una foto del carnet en recepción.",

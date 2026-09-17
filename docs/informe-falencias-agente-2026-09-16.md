@@ -7,10 +7,14 @@ Este documento es autocontenido: incluye el contexto del sistema, el estado real
 una conversación de producción que falló, el diagnóstico línea por línea y las preguntas
 concretas que necesitamos resolver.
 
-> **Estado al 2026-09-16, después de la primera tanda de correcciones.**
+> **Estado al 2026-09-16, después de las dos tandas de correcciones.**
 > El diagnóstico de las secciones 1 a 5 se conserva tal como se escribió, para que se
-> entienda de dónde salió cada arreglo. Lo ya resuelto está en la sección 7 al final.
-> Resueltos: F1, F4, F5, F6 y —por decisión de negocio— F3. Pendientes: F2, F7, F8, F9.
+> entienda de dónde salió cada arreglo. Lo resuelto está en la sección 7 al final.
+> **Las nueve falencias tienen arreglo en la rama.** Falta la verificación contra el
+> modelo (`npm run check:analisis`, necesita `OPENAI_API_KEY`) y aplicar las migraciones.
+>
+> **Ninguna migración fue aplicada todavía.** El repositorio no tiene acceso a Supabase:
+> lo que hay es código y SQL escritos, nada corrido contra la base.
 
 ---
 
@@ -353,13 +357,62 @@ de médicos es contexto opcional con `.catch()`. Importa justamente porque queda
 | 2 | `20260915010000` | **Junto con el deploy**: reescribe `system_prompt_base` y `services`, que el código viejo lee |
 | 3 | `20260916000000` | Junto con el deploy: amplía el CHECK de `kind` y actualiza prompt y saludo |
 
-### Sigue pendiente
+## 8. Segunda tanda: F2, F7, F8, F9
 
-- **F2** — que el bot no liste especialidades no pedidas. En el flujo nuevo no hay menú, pero
-  falta revisar que `askMissing` no repregunte lo que el paciente ya dijo.
-- **F7** — la forma de pago ("voy a pagar llegando") no se guarda como dato de la ficha.
-- **F8** — trazabilidad. Ojo con la promesa flotante propuesta: en Vercel el runtime puede
-  congelar la instancia al devolver la respuesta y el insert nunca llega, y un reject sin
-  catch es unhandled rejection. Va con `waitUntil` de `@vercel/functions`, o directamente
-  `await` (el webhook ya duerme 6 s en el debounce).
-- **F9** — precios de pediatría en fin de semana; lo resuelve `pricing.ts` al desplegar.
+### F7 — Forma de pago · resuelto
+
+`paymentIntention: "qr" | "efectivo" | null` en `TurnAnalysis` y en `LeadDraft`, columna
+`payment_intention` en `clinic_leads`, línea en el resumen del paciente y fila en el panel.
+El bot sigue sin cobrar y sin mandar el QR: es un dato para el asesor.
+
+Hubo que desambiguar contra `needsHumanAction`, que en la primera tanda incluía "va a pagar
+al llegar": eso habría derivado en vez de guardar el dato. Ahora `needsHumanAction` cubre
+"ya pagó" (un hecho consumado que alguien debe verificar) y `paymentIntention` cubre la
+intención. Si el paciente solo dice cómo va a pagar, no se deriva.
+
+### F8 — Trazabilidad · resuelto, con dos desvíos de lo propuesto
+
+Tabla `clinic_webhook_audits` (`business`, `contact_phone`, `intent`, `step`, `analysis`
+jsonb, `created_at`), con índices por conversación y por intent, RLS activo y una consulta
+de retención sugerida a 90 días en la propia migración.
+
+**Desvío 1 — sin `waitUntil`, con `await`.** La premisa de "no ralentizar la respuesta a
+WhatsApp" no aplica a este webhook: ya duerme `DEBOUNCE_MS` (6 s) dentro de la invocación a
+propósito, y espera a OpenAI hasta 15 s más, con `maxDuration = 30`. Un insert de
+milisegundos no cambia nada, y `await` garantiza el guardado y permite manejar el error.
+`@vercel/functions` ni siquiera está instalado: se evitó una dependencia nueva para resolver
+un problema que acá no existe. (El diagnóstico sobre la promesa flotante sí era correcto —
+por eso tampoco se usó esa.)
+
+**Desvío 2 — el compilador obliga a auditar.** En vez de agregar el insert "justo antes del
+return", que en este webhook son **diez** puntos de salida distintos y sería cuestión de
+tiempo que alguien agregue el once sin auditar, el helper `ok()` pasa a recibir un
+`AuditIntent` obligatorio. Olvidarse de auditar una rama nueva ahora es un error de
+compilación, no un agujero silencioso.
+
+### F2 — Repreguntar lo ya dicho · cubierto, pendiente de verificar
+
+Con `missingFields()` consumiendo lo que trae `analyzeTurn`, un "Para ginecología" no debería
+repreguntar la especialidad. Pero eso depende de que el modelo devuelva `wantsLead: true`:
+si no, el mensaje ni siquiera llega a abrir la solicitud. En vez de darlo por hecho, se
+agregaron casos a `check:analisis` que lo comprueban.
+
+### F9 — Pediatría fin de semana
+
+Se resuelve al desplegar: `pricing.ts` ya tiene las reglas por franja y día.
+
+### Migraciones — orden final
+
+| Orden | Migración | Cuándo |
+|---|---|---|
+| 1 | `20260915000000` | Segura ya — solo `create table` / `add column` |
+| 2 | `20260915010000` | **Junto con el deploy** — reescribe `system_prompt_base` y `services` |
+| 3 | `20260916000000` | Junto con el deploy — kinds de alarma, prompt, saludo |
+| 4 | `20260916010000` | Junto con el deploy — `payment_intention` y `clinic_webhook_audits` |
+
+### Lo único que falta antes de desplegar
+
+`npm run check:analisis` con `OPENAI_API_KEY` en `.env.local`. Es la única verificación que
+toca el modelo: 19 casos que cubren fisioterapia, las gestiones que antes se contestaban con
+"Ok", la forma de pago, y los controles para que no sobre-derive. Hasta que corra en verde,
+"está arreglado" es una afirmación sobre el código, no sobre el comportamiento del bot.

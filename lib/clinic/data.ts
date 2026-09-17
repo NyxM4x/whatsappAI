@@ -19,6 +19,8 @@ import type {
   Specialty,
   TimeSlot,
   VisitType,
+  AuditIntent,
+  PaymentIntention,
 } from "@/lib/clinic/types";
 import { ACTIVE_APPOINTMENT_STATUSES, PAYMENT_WINDOW_MINUTES } from "@/lib/clinic/types";
 
@@ -811,6 +813,7 @@ export type LeadFields = {
   doctorPreference?: string | null;
   preferredTime?: string | null;
   visitType?: VisitType | null;
+  paymentIntention?: PaymentIntention | null;
   serviceName?: string | null;
   priceQuote?: string | null;
   summary?: string | null;
@@ -823,6 +826,7 @@ const LEAD_COLUMNS: Record<keyof LeadFields, string> = {
   doctorPreference: "doctor_preference",
   preferredTime: "preferred_time",
   visitType: "visit_type",
+  paymentIntention: "payment_intention",
   serviceName: "service_name",
   priceQuote: "price_quote",
   summary: "summary",
@@ -853,6 +857,7 @@ function mapLead(row: any): Lead {
     doctorPreference: row.doctor_preference ?? null,
     preferredTime: row.preferred_time ?? null,
     visitType: (row.visit_type as VisitType) ?? null,
+    paymentIntention: (row.payment_intention as PaymentIntention) ?? null,
     serviceName: row.service_name ?? null,
     priceQuote: row.price_quote ?? null,
     summary: row.summary ?? null,
@@ -1093,4 +1098,40 @@ export async function markPaymentProofReviewed(
     return false;
   }
   return Boolean(data);
+}
+
+// ─── Auditoría de turnos (clinic_webhook_audits) ─────────────────────────────
+// Una fila por mensaje respondido: qué rama del webhook lo atendió y qué
+// devolvió el análisis. Sirve para responder "¿por qué el bot contestó esto?"
+// sin reconstruir la conversación a mano.
+//
+// Se hace con await, no con una promesa flotante: en Vercel el runtime puede
+// congelar la instancia apenas se devuelve la respuesta y el insert se perdería.
+// No cuesta nada esperarlo — esta misma invocación ya duerme los segundos del
+// debounce y espera a OpenAI.
+//
+// Nunca falla el webhook: un problema de auditoría no puede dejar al paciente
+// sin respuesta.
+export async function recordWebhookAudit(params: {
+  business: string;
+  conversationId: string | null;
+  contactPhone: string;
+  intent: AuditIntent;
+  analysis: unknown;
+  step: string;
+}): Promise<void> {
+  try {
+    const supabase = getSupabaseClient();
+    const { error } = await supabase.from("clinic_webhook_audits").insert({
+      business: params.business,
+      kapso_conversation_id: params.conversationId,
+      contact_phone: params.contactPhone,
+      intent: params.intent,
+      step: params.step,
+      analysis: params.analysis ?? null,
+    });
+    if (error) console.error("recordWebhookAudit failed", error);
+  } catch (err) {
+    console.error("recordWebhookAudit threw", err);
+  }
 }
