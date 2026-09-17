@@ -31,6 +31,7 @@ import {
   CONSULTATION_SPECIALTIES,
   findSpecialty,
   isHolidayToday,
+  matchSpecialtyText,
   localDateISO,
   localNow,
   quoteConsultation,
@@ -115,9 +116,11 @@ Reglas:
 - patientName: nombre del PACIENTE que se va a atender, tal como lo escribió. Si la ficha es para otra persona (un hijo, la mamá), es el nombre de esa persona. Nunca es el nombre de un médico.
 - specialtyKey: la clave de la lista si nombra la especialidad o un sinónimo ("pediatra" → pediatria, "ginecólogo" → ginecologia, "médico general" → medicina-general). Si nombra a un médico de la lista, usá la especialidad de ese médico. Si SOLO describe un síntoma o malestar y no nombra ninguna especialidad, elegí la especialidad más apropiada de la lista y ante la duda medicina-general. Si no hay ninguna pista, null.
 - unavailableRequest: si el paciente PIDE POR SU NOMBRE una especialidad, un servicio o una atención que NO está en la lista de especialidades ni en el tarifario (por ejemplo fisioterapia, odontología, oftalmología, psiquiatría, oncología, rehabilitación, kinesiología, nutrición), poné acá eso que pidió, tal como lo escribió. Si lo que pide SÍ está en la lista, null.
+- ANTES de marcar unavailableRequest, repasá la lista entera. La gente nombra al médico, no a la especialidad: "ginecólogo" es ginecologia, "pediatra" es pediatria, "traumatólogo" es traumatologia, "cardiólogo" es cardiologia, "urólogo" es urologia, "médico general" o "clínico" es medicina-general. Todas esas SÍ las tenemos: van en specialtyKey y unavailableRequest queda en null. Marcá unavailableRequest solo cuando no haya NINGUNA de la lista que corresponda.
 - REGLA DURA: cuando unavailableRequest tiene valor, specialtyKey es SIEMPRE null. Que el paciente nombre algo que no ofrecemos NUNCA se traduce a medicina-general ni a ninguna otra especialidad de la lista: el fallback a medicina-general vale solo para síntomas, jamás para una especialidad que el paciente nombró.
 - paymentIntention: cómo dice que va a pagar. "qr" si menciona QR, transferencia o pago por banco; "efectivo" si dice que paga al llegar, en caja, en recepción o en efectivo. null si no dice nada de pago. Es solo un dato para el asesor: no cambia nada del resto.
-- needsHumanAction: true si el mensaje pide una GESTIÓN o avisa de un HECHO FÍSICO que solo puede resolver una persona de la clínica: que se avise a alguien ("dígale a la doctora", "avise a la licenciada"), que se le confirme algo ("me confirma", "confírmeme"), que ya llegó o está por llegar ("ya llegué", "estoy en la puerta", "llego a las 5"), que ya pagó, o cualquier pedido de que alguien haga algo fuera de este chat. false si solo pide una ficha, un servicio o información, y también false si solo dice CÓMO va a pagar sin pedir nada más (eso ya va en paymentIntention).
+- OJO con "cancelar": en Bolivia significa PAGAR, no anular. "Voy a cancelar llegando" es paymentIntention "efectivo"; "va a cancelar por QR" es "qr". Solo es una cancelación de verdad cuando dice que ya no quiere la cita o la ficha (eso va en wantsOut).
+- needsHumanAction: true si el mensaje pide una GESTIÓN o avisa de un HECHO FÍSICO que solo puede resolver una persona de la clínica: que se avise a alguien ("dígale a la doctora", "avise a la licenciada"), que se le confirme algo ("me confirma", "confírmeme"), que ya llegó o está por llegar ("ya llegué", "estoy en la puerta", "llego a las 5"), que ya pagó, o cualquier pedido de que alguien haga algo fuera de este chat. false si solo pide una ficha, un servicio o información, y también false si solo dice CÓMO va a pagar sin pedir nada más (eso ya va en paymentIntention). Pedir una ficha para un día y una hora ("quiero ficha para pediatría mañana a las 10") NO es needsHumanAction por mencionar un horario: es una solicitud normal.
 - doctorName: el médico que pide el paciente, tal como lo escribió. null si no nombra a ninguno.
 - preferredTime: el día y/o la hora que prefiere, en pocas palabras y como lo dijo ("mañana a las 10", "el sábado en la tarde", "lo antes posible"). null si no dijo nada de horario.
 - preferredDate: la fecha de ese día en formato YYYY-MM-DD, calculada con la fecha actual ("hoy", "ahora", "mañana", "el lunes", "20 de septiembre"). null si no dijo un día claro.
@@ -146,18 +149,46 @@ function cleanHour(value: unknown): string | null {
   return `${String(hours).padStart(2, "0")}:${match[2]}`;
 }
 
-function sanitizeAnalysis(raw: any): TurnAnalysis {
+// Pide una gestión con todas las letras. El modelo se pierde con estos mensajes
+// sueltos —"Me confirma" a secas lo daba por false—, y son justo los que dejaron
+// morir la conversación real. Acá no hace falta criterio: si lo dice, lo dice.
+const HUMAN_ACTION_PATTERN =
+  /\bme confirma\b|\bconfirmeme\b|\bconf[ií]rmeme\b|\bme avisa\b|\bav[ií]sele\b|\bav[ií]sale\b|\bd[ií]gale\b|\bd[ií]cele\b|\bhable con\b|\bya llegu[eé]\b|\bestoy (aqu[ií]|afuera|en la puerta|en recepci[oó]n)\b/i;
+
+function sanitizeAnalysis(raw: any, text: string): TurnAnalysis {
   const date = typeof raw?.preferredDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.preferredDate)
     ? raw.preferredDate
     : null;
-  // El paciente nombró algo que no ofrecemos: la especialidad se descarta acá,
-  // en código, y no solo por la regla del prompt. Si el modelo devuelve las dos
-  // cosas ("fisioterapia" + medicina-general), lo que mandaba antes era el
-  // fallback silencioso — el error que se le ofreció a un paciente real.
-  const unavailableRequest = cleanText(raw?.unavailableRequest, 80);
+
+  // ── Especialidad: primero el código, después el modelo ────────────────────
+  // El modelo llegó a marcar "necesito un ginecologo" como algo que no
+  // ofrecemos. Reconocer un nombre contra una lista cerrada es comparación de
+  // strings: se resuelve acá y solo se le cree al modelo para lo que no se
+  // puede resolver así (los síntomas).
+  const fromText = matchSpecialtyText(text);
+  let unavailableRequest = cleanText(raw?.unavailableRequest, 80);
+
+  // Lo que dijo que no ofrecemos, ¿es en realidad una de las nuestras? Entonces
+  // no era tal: se descarta el falso positivo y se usa la especialidad.
+  const unavailableIsOurs = unavailableRequest ? matchSpecialtyText(unavailableRequest) : null;
+  if (unavailableIsOurs) unavailableRequest = null;
+
+  const fromModel = findSpecialty(raw?.specialtyKey)?.key ?? null;
+  // Con una especialidad nombrada en el texto, esa manda: es un hecho, no una
+  // inferencia. Si no hay, vale la del modelo (que ahí sí está infiriendo desde
+  // un síntoma), salvo que de verdad haya pedido algo que no tenemos.
+  const specialtyKey =
+    fromText?.key ?? unavailableIsOurs?.key ?? (unavailableRequest ? null : fromModel);
+
+  // Nombró una especialidad nuestra sin preguntar nada: viene a pedir ficha. El
+  // modelo devolvía wantsLead=false para un "Para ginecología" a secas y el
+  // mensaje ni siquiera llegaba a abrir la solicitud.
+  const isQuestion = raw?.isQuestion === true;
+  const wantsLead = raw?.wantsLead === true || Boolean(specialtyKey && !isQuestion && !unavailableRequest);
+
   return {
     patientName: cleanText(raw?.patientName, 80),
-    specialtyKey: unavailableRequest ? null : findSpecialty(raw?.specialtyKey)?.key ?? null,
+    specialtyKey,
     doctorName: cleanText(raw?.doctorName, 80),
     preferredTime: cleanText(raw?.preferredTime),
     preferredDate: date,
@@ -165,13 +196,13 @@ function sanitizeAnalysis(raw: any): TurnAnalysis {
     visitType: raw?.visitType === "nueva" || raw?.visitType === "reconsulta" ? raw.visitType : null,
     paymentIntention: raw?.paymentIntention === "qr" || raw?.paymentIntention === "efectivo" ? raw.paymentIntention : null,
     unavailableRequest,
-    needsHumanAction: raw?.needsHumanAction === true,
-    wantsLead: raw?.wantsLead === true,
+    needsHumanAction: raw?.needsHumanAction === true || HUMAN_ACTION_PATTERN.test(text),
+    wantsLead,
     wantsHuman: raw?.wantsHuman === true,
     frustrated: raw?.frustrated === true,
     confirms: raw?.confirms === true,
     wantsOut: raw?.wantsOut === true,
-    isQuestion: raw?.isQuestion === true,
+    isQuestion,
   };
 }
 
@@ -221,7 +252,7 @@ export async function analyzeTurn(
       temperature: 0,
       abortSignal: AbortSignal.timeout(10000),
     });
-    return sanitizeAnalysis(JSON.parse(text.trim().replace(/^```(?:json)?|```$/g, "").trim()));
+    return sanitizeAnalysis(JSON.parse(text.trim().replace(/^```(?:json)?|```$/g, "").trim()), ctx.text);
   } catch (err) {
     console.error("analyzeTurn failed", getErrorMessage(err));
     return null;

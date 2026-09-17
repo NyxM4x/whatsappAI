@@ -430,7 +430,12 @@ export async function POST(request: Request) {
 
   // ── 8. Pedidos que solo resuelve una persona ──────────────────────────────
   // El bot ya no cancela, reprograma, consulta citas ni envía el QR.
-  if (clinic.cancelIntentPatterns.test(newText)) return escalate("cancelar", LEAD_REPLIES.toAdvisor, "cancelar");
+  // "Cancelar" con un medio o un momento de pago al lado es PAGAR, no anular
+  // (ver cancelMeansPayingPatterns). Ese mensaje sigue de largo: lo recoge
+  // paymentIntention como dato de la solicitud.
+  if (clinic.cancelIntentPatterns.test(newText) && !clinic.cancelMeansPayingPatterns.test(newText)) {
+    return escalate("cancelar", LEAD_REPLIES.toAdvisor, "cancelar");
+  }
   if (clinic.rescheduleIntentPatterns.test(newText)) return escalate("reprogramar", LEAD_REPLIES.toAdvisor, "reprogramar");
   if (clinic.checkAppointmentIntentPatterns.test(newText)) return escalate("consulta_cita", LEAD_REPLIES.toAdvisor, "consulta_cita");
   if (clinic.qrRequestIntentPatterns.test(newText)) return escalate("pago", LEAD_REPLIES.payment, "pago");

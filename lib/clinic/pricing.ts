@@ -34,6 +34,10 @@ export type ConsultationSpecialty = {
   rules?: PriceRule[];
   scheduleNote?: string;  // franjas en texto, para el prompt y el resumen
   reconsultaDays?: number;
+  // Cómo la nombra la gente por WhatsApp. Sirve para reconocer la especialidad
+  // sin depender del criterio del modelo: ver matchSpecialtyText(). No hace
+  // falta listar el nombre ni la clave, que ya se comparan solos.
+  aliases?: string[];
 };
 
 const MON_FRI = [1, 2, 3, 4, 5];
@@ -55,6 +59,7 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
     scheduleNote:
       "60 Bs de lunes a viernes de 7:00 a 19:00 y sábado de 7:00 a 12:00; 80 Bs de noche (19:00 a 7:00), sábado desde las 12:00 y domingo",
     reconsultaDays: 7,
+    aliases: ["medico general", "medica general", "general", "medicina", "clinico", "medico clinico", "consulta general"],
   },
   {
     key: "pediatria",
@@ -68,6 +73,7 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
     ],
     scheduleNote: "80 Bs de lunes a viernes; sábado 120 Bs hasta las 19:00 y 100 Bs desde las 19:00; domingo 120 Bs",
     reconsultaDays: 3,
+    aliases: ["pediatra", "pediatr", "medico de niños", "doctor de niños", "para mi bebe", "para mi niño", "para mi niña"],
   },
   {
     key: "ginecologia",
@@ -79,24 +85,25 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
     ],
     scheduleNote: "80 Bs de lunes a viernes; sábado y domingo 120 Bs",
     reconsultaDays: 3,
+    aliases: ["ginecologo", "ginecologa", "ginecolog", "gineco", "obstetra", "obstetricia"],
   },
   // Especialidades con precio en el tarifario de la clínica: precio único.
-  { key: "cardiologia", name: "Cardiología", price: 150 },
-  { key: "cirugia-general", name: "Cirugía General", price: 150 },
-  { key: "cirugia-pediatrica", name: "Cirugía Pediátrica", price: 150 },
-  { key: "cirugia-plastica", name: "Cirugía Plástica", price: 350 },
-  { key: "coloproctologia", name: "Coloproctología", price: 150 },
-  { key: "diabetologia", name: "Diabetología", price: 200 },
-  { key: "endocrinologia", name: "Endocrinología", price: 250 },
-  { key: "gastroenterologia", name: "Gastroenterología", price: 170 },
-  { key: "medicina-interna", name: "Medicina Interna", price: 370 },
-  { key: "nefrologia", name: "Nefrología", price: 350 },
-  { key: "neumologia", name: "Neumología", price: 350 },
-  { key: "neurologia", name: "Neurología", price: 320 },
-  { key: "psicologia", name: "Psicología", price: 250 },
-  { key: "reumatologia", name: "Reumatología", price: 200 },
-  { key: "traumatologia", name: "Traumatología", price: 250 },
-  { key: "urologia", name: "Urología", price: 150 },
+  { key: "cardiologia", name: "Cardiología", price: 150, aliases: ["cardiologo", "cardiologa", "cardiolog", "del corazon"] },
+  { key: "cirugia-general", name: "Cirugía General", price: 150, aliases: ["cirujano", "cirujano general", "cirugia"] },
+  { key: "cirugia-pediatrica", name: "Cirugía Pediátrica", price: 150, aliases: ["cirujano pediatra", "cirugia de niños"] },
+  { key: "cirugia-plastica", name: "Cirugía Plástica", price: 350, aliases: ["cirujano plastico", "cirugia estetica"] },
+  { key: "coloproctologia", name: "Coloproctología", price: 150, aliases: ["coloproctologo", "proctologo", "proctologia"] },
+  { key: "diabetologia", name: "Diabetología", price: 200, aliases: ["diabetologo", "diabetes", "para la diabetes"] },
+  { key: "endocrinologia", name: "Endocrinología", price: 250, aliases: ["endocrinologo", "endocrinologa", "endocrinolog", "tiroides"] },
+  { key: "gastroenterologia", name: "Gastroenterología", price: 170, aliases: ["gastroenterologo", "gastro", "gastroenterolog"] },
+  { key: "medicina-interna", name: "Medicina Interna", price: 370, aliases: ["internista", "medico internista"] },
+  { key: "nefrologia", name: "Nefrología", price: 350, aliases: ["nefrologo", "nefrolog", "del riñon", "de los riñones"] },
+  { key: "neumologia", name: "Neumología", price: 350, aliases: ["neumologo", "neumolog", "del pulmon", "de los pulmones"] },
+  { key: "neurologia", name: "Neurología", price: 320, aliases: ["neurologo", "neurologa", "neurolog"] },
+  { key: "psicologia", name: "Psicología", price: 250, aliases: ["psicologo", "psicologa", "psicolog", "terapia psicologica"] },
+  { key: "reumatologia", name: "Reumatología", price: 200, aliases: ["reumatologo", "reumatolog", "reuma"] },
+  { key: "traumatologia", name: "Traumatología", price: 250, aliases: ["traumatologo", "traumatolog", "traumato", "ortopedia", "ortopedista", "de huesos"] },
+  { key: "urologia", name: "Urología", price: 150, aliases: ["urologo", "urolog", "urologa"] },
 ];
 
 const DAY_NAMES = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
@@ -104,6 +111,66 @@ const DAY_NAMES = ["domingo", "lunes", "martes", "miércoles", "jueves", "vierne
 export function findSpecialty(key?: string | null): ConsultationSpecialty | null {
   if (!key) return null;
   return CONSULTATION_SPECIALTIES.find((s) => s.key === key) ?? null;
+}
+
+// ─── Reconocer la especialidad en un texto ───────────────────────────────────
+
+// Minúsculas, sin tildes, guiones por espacios: "Ginecología" y "ginecologia"
+// y "medicina-general" y "medicina general" tienen que converger.
+function normalize(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[-_]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// La raíz que comparten las formas de una misma especialidad: "ginecologia" y
+// "ginecologo" comparten "ginecolog"; "pediatria" y "pediatra", "pediatr".
+function stem(word: string): string {
+  return word.replace(/(ia|ía|ica|o|a)$/, "");
+}
+
+// ¿Qué especialidad de la lista nombra este texto? Compara contra la clave, el
+// nombre y los alias, y como último recurso contra la raíz de la primera
+// palabra del nombre.
+//
+// Existe porque el modelo no es de fiar para esto: con la regla de "pedí algo
+// que no ofrecemos" encima, llegó a marcar "necesito un ginecologo" como
+// especialidad ausente. Reconocer un nombre contra una lista cerrada es
+// comparación de strings, no criterio: se hace acá y no se le pregunta a nadie.
+export function matchSpecialtyText(text?: string | null): ConsultationSpecialty | null {
+  if (!text) return null;
+  const haystack = normalize(text);
+  if (!haystack) return null;
+
+  let best: ConsultationSpecialty | null = null;
+  let bestLength = 0;
+
+  for (const spec of CONSULTATION_SPECIALTIES) {
+    const needles = [spec.name, spec.key, ...(spec.aliases ?? [])].map(normalize);
+    // La raíz del nombre ("ginecolog" de "ginecologia") atrapa las formas que
+    // no están listadas como alias.
+    const root = stem(normalize(spec.name).split(" ")[0]);
+    if (root.length >= 6) needles.push(root);
+
+    for (const needle of needles) {
+      // Las muy cortas ("gastro", "reuma") se exigen como palabra suelta; el
+      // resto puede ir dentro de la frase ("necesito un ginecologo").
+      const hit =
+        needle.length <= 6
+          ? new RegExp(`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(haystack)
+          : haystack.includes(needle);
+      if (hit && needle.length > bestLength) {
+        best = spec;
+        bestLength = needle.length;
+      }
+    }
+  }
+
+  return best;
 }
 
 // ─── Fechas en la zona de la clínica ─────────────────────────────────────────

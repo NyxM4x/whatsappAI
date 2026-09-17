@@ -62,6 +62,14 @@ for (const frase of [
 // ── Otras intenciones ────────────────────────────────────────────────────────
 console.log("\nOTRAS INTENCIONES");
 chequear('"quiero cancelar mi cita"', clinic.cancelIntentPatterns.test("quiero cancelar mi cita"), "cancelar");
+// En Bolivia "cancelar" es pagar: estos NO deben derivar como cancelación.
+for (const frase of ["Va cancelar por QR", "voy a cancelar llegando nomas", "le cancelo al llegar", "cancelo en efectivo"]) {
+  chequear(`"${frase}" NO es cancelación`, clinic.cancelMeansPayingPatterns.test(frase), "sentido de pago");
+}
+// ...pero una cancelación real se sigue detectando.
+for (const frase of ["quiero cancelar mi cita", "necesito anular la consulta"]) {
+  chequear(`"${frase}" SÍ es cancelación`, clinic.cancelIntentPatterns.test(frase) && !clinic.cancelMeansPayingPatterns.test(frase), "cancelar");
+}
 chequear('"necesito reprogramar"', clinic.rescheduleIntentPatterns.test("necesito reprogramar"), "reprogramar");
 chequear('"cuando es mi cita?"', clinic.checkAppointmentIntentPatterns.test("cuando es mi cita?"), "consultar");
 chequear('"quiero hablar con una persona"', clinic.humanHandoffIntentPatterns.test("quiero hablar con una persona"), "derivar");

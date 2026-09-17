@@ -410,9 +410,68 @@ Se resuelve al desplegar: `pricing.ts` ya tiene las reglas por franja y día.
 | 3 | `20260916000000` | Junto con el deploy — kinds de alarma, prompt, saludo |
 | 4 | `20260916010000` | Junto con el deploy — `payment_intention` y `clinic_webhook_audits` |
 
-### Lo único que falta antes de desplegar
+---
 
-`npm run check:analisis` con `OPENAI_API_KEY` en `.env.local`. Es la única verificación que
-toca el modelo: 19 casos que cubren fisioterapia, las gestiones que antes se contestaban con
-"Ok", la forma de pago, y los controles para que no sobre-derive. Hasta que corra en verde,
-"está arreglado" es una afirmación sobre el código, no sobre el comportamiento del bot.
+## 9. La prueba contra el modelo · 19/19 en verde
+
+`npm run check:analisis` corrió por primera vez el 2026-09-17. **Falló 6 de 19 casos** y
+encontró dos defectos que ninguna revisión de código había visto.
+
+### F10 · El arreglo de F1 rompía el flujo principal
+
+`"necesito un ginecologo"` → `unavailableRequest: "ginecologo"`. **El bot creía que la clínica
+no ofrece ginecología.** La regla nueva le había creado un sesgo al modelo: puesto a buscar
+cosas fuera de la lista, empezó a encontrarlas donde no las había. Y como la regla dura fuerza
+`specialtyKey = null` cuando hay `unavailableRequest`, el falso positivo se llevaba puesta la
+especialidad. Habría derivado a un asesor a todo el que pidiera un ginecólogo.
+
+En la misma línea, `"Para ginecología"` y `"pediatria por favor"` devolvían **todo null** —
+F2 no "se arreglaba solo": sin `wantsLead`, esos mensajes ni siquiera llegaban a abrir la
+solicitud.
+
+**Arreglo — reconocer la especialidad deja de ser criterio del modelo.** Se agregó `aliases`
+a `ConsultationSpecialty` (las 19 con las formas que usa la gente: "ginecólogo", "pediatra",
+"traumatólogo", "clínico"…) y `matchSpecialtyText()` en `pricing.ts`, que compara contra
+clave, nombre, alias y la raíz del nombre ("ginecolog" cubre "ginecologia" y "ginecologo").
+En `sanitizeAnalysis()`:
+
+1. si lo que el modelo marcó como no disponible **es una de las nuestras**, se descarta el
+   falso positivo y se usa esa especialidad;
+2. la especialidad nombrada en el texto **manda sobre la del modelo** — es un hecho, no una
+   inferencia. Al modelo se le cree solo para lo que no se puede resolver comparando strings:
+   los síntomas;
+3. si nombró una especialidad nuestra y no está preguntando, `wantsLead` pasa a true.
+
+También se agregó `HUMAN_ACTION_PATTERN`, porque `"Me confirma"` a secas el modelo lo daba
+por `false` — y es exactamente uno de los mensajes que murieron en la conversación real.
+
+### F11 · En Bolivia "cancelar" significa pagar
+
+El caso que quedó rojo al final destapó un bug que **ya estaba en producción**:
+
+```
+cancelIntentPatterns: /\bcancelar|anular|cancela mi/i
+```
+
+El paciente del 2026-09-15 escribió **"Va cancelar por QR"** y **"O llegando"**. Estaba
+diciendo cómo iba a **pagar**. Ese patrón lo lee como que quiere **anular su cita** y lo
+deriva como cancelación.
+
+**Arreglo:** `cancelMeansPayingPatterns` desactiva la derivación solo cuando el sentido de
+pago es explícito (hay un medio o un momento de pago al lado: "cancelar por QR", "cancelo al
+llegar", "cancelo en efectivo"). Un `"quiero cancelar"` pelado sigue siendo cancelación, que
+ante la duda es lo seguro. `check:intenciones` cubre los dos sentidos.
+
+### Un caso de prueba estaba mal escrito
+
+`"voy a cancelar llegando nomas"` esperaba `needsHumanAction: true`. Era la misma confusión:
+no es una gestión, es la forma de pago. El modelo entendió el boliviano mejor que la
+expectativa. Corregido a `payment: "efectivo"`.
+
+### Resultado
+
+```
+✓ Sin fallos.   (19/19)
+```
+
+`npm run typecheck` y `npm run check:intenciones` también en verde.

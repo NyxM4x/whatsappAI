@@ -51,7 +51,10 @@ const CASES: Expectation[] = [
   { text: "Por favor doctora me lo dice a la licen para las 5:10 llegó", needsAction: true },
   { text: "Me confirma", needsAction: true },
   { text: "ya llegué a la clínica, avise por favor", needsAction: true },
-  { text: "voy a cancelar llegando nomas", needsAction: true },
+  // En Bolivia "cancelar" es PAGAR, no anular. Este caso estaba mal escrito de
+  // mi parte: no es una gestión, es la forma de pago. El modelo lo entendió
+  // mejor que la expectativa.
+  { text: "voy a cancelar llegando nomas", needsAction: false, payment: "efectivo" },
 
   // ── Lo que SÍ debe seguir funcionando: no sobre-derivar ───────────────────
   { text: "quiero una ficha para pediatria mañana a las 10", unavailable: false, needsAction: false, specialtyKey: "pediatria", wantsLead: true },

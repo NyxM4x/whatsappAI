@@ -118,6 +118,16 @@ const defaultClinicConfig = {
 
   // Dispara cancelación/reprogramación.
   cancelIntentPatterns: /\bcancelar|anular|cancela mi/i,
+
+  // En Bolivia "cancelar" es PAGAR. El paciente de la conversación del
+  // 2026-09-15 escribió "Va cancelar por QR" / "O llegando": con el patrón de
+  // arriba a secas, eso se leía como que quería anular su cita.
+  //
+  // Solo desactiva la derivación cuando el sentido de pago es explícito (hay un
+  // medio o un momento de pago al lado). Un "quiero cancelar" pelado sigue
+  // siendo cancelación, que es lo más seguro ante la duda.
+  cancelMeansPayingPatterns:
+    /\bcancel\w+\s+(?:al llegar|llegando|en (?:efectivo|caja|recepci[oó]n|el banco)|por (?:qr|transferencia|banco)|con (?:qr|tarjeta|efectivo))\b|\b(?:al llegar|llegando)\s+(?:le\s+|lo\s+)?cancel\w+|\bva\s+(?:a\s+)?cancelar\s+por\b/i,
   rescheduleIntentPatterns: /\breprogramar|reprograma|cambiar (mi|la) cita|reagendar|mover (mi|la) cita/i,
 
   // Dispara la consulta "¿cuándo es mi cita?" (solo informar, no agendar).
