@@ -46,6 +46,7 @@ import {
   type LeadFields,
 } from "@/lib/clinic/data";
 import type { BookingDraft, BookingSession, BookingStep, LeadDraft, LeadKind, PaymentIntention, VisitType } from "@/lib/clinic/types";
+import { unlistedAnswer } from "@/lib/clinic/routing";
 import { getRecentConversationHistory } from "@/lib/engine/data";
 import { getErrorMessage, logSystemEvent } from "@/lib/engine/logging";
 
@@ -134,6 +135,32 @@ function cleanText(value: unknown, max = 120): string | null {
   return text.slice(0, max);
 }
 
+// El paciente dice PARA QUIÉN es, no cómo se llama: "pa mi", "para mi hijo",
+// "es para mi señora". El modelo lo devolvía como patientName y la ficha se
+// cerraba con eso de nombre — verificado en producción con "pa mi".
+//
+// No es una lista de casos: son las dos formas en que se contesta "¿para
+// quién?" sin dar un nombre. Todo lo que empiece con una preposición de
+// destinatario, o que sea solo un parentesco, no es un nombre. Ante la duda se
+// descarta: un nombre faltante se pregunta, uno inventado llega al panel.
+const NOT_A_NAME = [
+  // "pa mi", "para mí", "es para mi hijo", "para la señora"…
+  /^(?:es\s+)?p(?:a|ara)'?\s/i,
+  // "mi hijo", "mi señora", "el niño", "la bebé" — parentesco sin nombre propio.
+  /^(?:mi|mí|el|la|su|un|una)\s+(?:hij[oa]|niñ[oa]|beb[eé]|mam[aá]|pap[aá]|madre|padre|espos[oa]|señor[a]?|hermi?an[oa]|nieto?a?|abuel[oa]|sobrin[oa]|t[ií][oa]|prim[oa]|suegr[oa]|yern[oa]|nuera|pareja|amig[oa])\b[\s.]*$/i,
+  // Pronombres sueltos: "yo", "mi", "para mí nomás".
+  /^(?:yo|m[ií]|me|nosotros?)\b[\s.]*$/i,
+];
+
+// true si el texto puede ser el nombre de una persona. Deliberadamente
+// permisivo con lo que SÍ deja pasar (un solo nombre, apodos, nombres
+// compuestos) y estricto solo con las formas de arriba.
+function looksLikeName(text: string): boolean {
+  if (NOT_A_NAME.some((re) => re.test(text))) return false;
+  // Sin una sola letra no hay nombre ("123", ".", "??").
+  return /\p{L}/u.test(text);
+}
+
 function cleanHour(value: unknown): string | null {
   const match = typeof value === "string" ? value.trim().match(/^(\d{1,2}):(\d{2})$/) : null;
   if (!match) return null;
@@ -182,17 +209,19 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): Turn
   const specialtyKey =
     fromText?.key ?? unavailableIsOurs?.key ?? (unavailableRequest ? null : fromModel);
 
-  // Nombró una especialidad nuestra sin preguntar nada: viene a pedir ficha. El
-  // modelo devolvía wantsLead=false para un "Para ginecología" a secas y el
-  // mensaje ni siquiera llegaba a abrir la solicitud. Pedir algo que no está en
-  // catálogo TAMBIÉN abre la ficha (no se rechaza): no sabemos si la clínica lo
-  // ofrece o no — solo que no está cargado acá — así que se recopila el dato
-  // igual y el asesor confirma.
+  // wantsLead sale tal cual del modelo. Antes se forzaba acá ("nombró una
+  // especialidad y no preguntó => quiere ficha"), pero eso es una decisión de
+  // flujo, no normalización: vive en wantsToRequest() de lib/clinic/routing.ts,
+  // donde se puede leer junto al resto del ruteo y probar sin llamar al modelo.
   const isQuestion = raw?.isQuestion === true;
-  const wantsLead = raw?.wantsLead === true || Boolean((specialtyKey || unavailableRequest) && !isQuestion);
+
+  // El nombre pasa por looksLikeName(): el modelo devuelve "pa mi" o "mi
+  // hijo" cuando el paciente contesta PARA QUIEN es en vez de como se llama.
+  const rawName = cleanText(raw?.patientName, 80);
+  const patientName = rawName && looksLikeName(rawName) ? rawName : null;
 
   return {
-    patientName: cleanText(raw?.patientName, 80),
+    patientName,
     specialtyKey,
     doctorName: cleanText(raw?.doctorName, 80),
     preferredTime: cleanText(raw?.preferredTime),
@@ -202,7 +231,7 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): Turn
     paymentIntention: raw?.paymentIntention === "qr" || raw?.paymentIntention === "efectivo" ? raw.paymentIntention : null,
     unavailableRequest,
     needsHumanAction: raw?.needsHumanAction === true || HUMAN_ACTION_PATTERN.test(text),
-    wantsLead,
+    wantsLead: raw?.wantsLead === true,
     wantsHuman: raw?.wantsHuman === true,
     frustrated: raw?.frustrated === true,
     confirms: raw?.confirms === true,
@@ -300,10 +329,12 @@ type Field = "specialty" | "name" | "time" | "visit";
 
 function needsVisitType(draft: LeadDraft): boolean {
   if (draft.kind !== "ficha") return false;
+  // Sin especialidad resuelta no se pregunta. El fallback era `true`, y como lo
+  // que no está en catálogo nunca tiene specialtyKey, terminaba preguntándole a
+  // alguien si su electrocardiograma era "consulta nueva o reconsulta".
+  // Si la especialidad llega en un turno posterior, se pregunta ahí.
   const spec = findSpecialty(draft.specialtyKey);
-  // Todavía sin especialidad: no se sabe si aplica, así que se pregunta junto
-  // con el resto y el paciente contesta todo en un mensaje.
-  return spec ? Boolean(spec.reconsultaDays) : true;
+  return spec ? Boolean(spec.reconsultaDays) : false;
 }
 
 function missingFields(draft: LeadDraft | null): Field[] {
@@ -314,7 +345,10 @@ function missingFields(draft: LeadDraft | null): Field[] {
   // contra el plantel: el médico es un dato extra, nunca un reemplazo.
   // unmatchedRequestText también la satisface: si ya dijo qué pidió (aunque no
   // esté en catálogo), no se le vuelve a preguntar lo mismo.
-  if (draft.kind === "ficha" && !draft.specialtyKey && !draft.unmatchedRequestText) missing.push("specialty");
+  // En "no_disponible" el texto de lo pedido ya viene del primer mensaje, así
+  // que nunca falta; se deja la misma condición para que un draft sin ninguno
+  // de los dos vuelva a preguntar en vez de seguir a ciegas.
+  if (draft.kind !== "servicio" && !draft.specialtyKey && !draft.unmatchedRequestText) missing.push("specialty");
   if (!draft.patientName) missing.push("name");
   if (!draft.preferredTime) missing.push("time");
   if (needsVisitType(draft) && !draft.visitType) missing.push("visit");
@@ -334,13 +368,17 @@ function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): { draft
     next.preferredDate = analysis.preferredDate;
     next.preferredHour = analysis.preferredHour;
   }
-  if (draft.kind === "ficha") {
+  // Vale para "ficha" y para "no_disponible": en los dos el paciente puede
+  // corregir qué necesita, nombrar un médico o decir si es reconsulta.
+  if (draft.kind !== "servicio") {
     if (analysis.specialtyKey) {
       // Llegó una especialidad de catálogo real (p. ej. el paciente corrigió lo
       // que había pedido antes): gana sobre cualquier pedido fuera de catálogo
       // que hubiera quedado guardado.
       next.specialtyKey = analysis.specialtyKey;
       next.unmatchedRequestText = null;
+      // Ya sabemos qué es: pasa a ser una ficha normal.
+      if (next.kind === "no_disponible") next.kind = "ficha";
     } else if (analysis.unavailableRequest) {
       next.unmatchedRequestText = analysis.unavailableRequest;
     }
@@ -410,6 +448,10 @@ function priceLines(draft: LeadDraft, clinic: ClinicConfig): { lines: string[]; 
     return { lines: draft.serviceQuote ? [`💰 Precio: ${draft.serviceQuote}`] : [], quote: draft.serviceQuote ?? null };
   }
 
+  if (draft.kind === "no_disponible") {
+    return { lines: ["💰 El precio se lo confirma el asesor junto con la disponibilidad."], quote: null };
+  }
+
   const spec = findSpecialty(draft.specialtyKey);
   if (!spec) return { lines: ["💰 El asesor le confirma el precio de la consulta."], quote: null };
 
@@ -443,7 +485,7 @@ function priceLines(draft: LeadDraft, clinic: ClinicConfig): { lines: string[]; 
 function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; priceQuote: string | null } {
   const spec = findSpecialty(draft.specialtyKey);
   // En especialidades sin reconsulta no se menciona el tipo de consulta.
-  const showVisitType = draft.kind === "ficha" && draft.visitType && (!spec || spec.reconsultaDays);
+  const showVisitType = draft.kind === "ficha" && draft.visitType && Boolean(spec?.reconsultaDays);
   const price = priceLines(draft, clinic);
 
   const lines = [
@@ -455,10 +497,10 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
     // Fuera de catálogo (especialidad, servicio o examen): se anota tal cual
     // lo pidió, sin afirmar ni negar que la clínica lo ofrece. El asesor lo
     // confirma antes de avisarle nada al paciente.
-    draft.kind === "ficha" && !spec && draft.unmatchedRequestText
+    draft.kind !== "servicio" && !spec && draft.unmatchedRequestText
       ? `🩺 Pidió: ${draft.unmatchedRequestText} _(no está en nuestro catálogo — el asesor confirma si lo ofrecemos y el precio)_`
       : null,
-    draft.kind === "ficha" && draft.doctorPreference ? `👨‍⚕️ Médico de preferencia: ${draft.doctorPreference}` : null,
+    draft.kind !== "servicio" && draft.doctorPreference ? `👨‍⚕️ Médico de preferencia: ${draft.doctorPreference}` : null,
     `🗓️ Horario que prefiere: ${draft.preferredTime}`,
     showVisitType ? `🔁 ${draft.visitType === "reconsulta" ? "Reconsulta" : "Consulta nueva"}` : null,
     // Solo se confirma lo que el paciente dijo. El bot no cobra ni manda el QR:
@@ -472,7 +514,9 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
     "",
     draft.kind === "servicio"
       ? "Un asesor de la clínica le escribirá por aquí para confirmar el horario."
-      : "Un asesor de la clínica le escribirá por aquí para confirmar el horario y el médico disponible.",
+      : draft.kind === "no_disponible"
+        ? "Un asesor de la clínica le escribirá por aquí para confirmarle si lo realizamos, el precio y el horario."
+        : "Un asesor de la clínica le escribirá por aquí para confirmar el horario y el médico disponible.",
     "",
     "¿Los datos están correctos? Si algo está mal, dígame qué corregir 😊",
   ].filter((line) => line !== null);
@@ -533,10 +577,20 @@ async function askOrSummarize(ctx: FlowContext, draft: LeadDraft, intro?: string
 }
 
 export async function startLead(
-  ctx: FlowContext & { kind: "ficha" | "servicio"; service?: ServiceItem | null; analysis: TurnAnalysis | null },
+  ctx: FlowContext & { kind: LeadDraft["kind"]; service?: ServiceItem | null; analysis: TurnAnalysis | null },
 ): Promise<LeadTurnResult> {
   const base: LeadDraft = { kind: ctx.kind };
   let intro = "¡Con gusto le ayudo a pedir su ficha! 😊";
+
+  // Fuera de catálogo: no se le habla de "su ficha" (puede ser un examen, no una
+  // consulta) ni se afirma que lo ofrecemos. Solo se toma el pedido.
+  if (ctx.kind === "no_disponible") {
+    const pedido = mergeAnalysis(base, ctx.analysis).draft.unmatchedRequestText;
+    base.unmatchedRequestText = pedido ?? null;
+    intro = pedido
+      ? `Con gusto le ayudo con *${pedido}* 😊 Se lo confirma un asesor de la clínica, junto con el precio.`
+      : "Con gusto le ayudo 😊 Se lo confirma un asesor de la clínica.";
+  }
 
   if (ctx.kind === "servicio" && ctx.service) {
     base.serviceName = ctx.service.name;
@@ -547,6 +601,22 @@ export async function startLead(
   }
 
   return askOrSummarize(ctx, mergeAnalysis(base, ctx.analysis).draft, intro);
+}
+
+// El paciente PREGUNTÓ por algo que no está en catálogo ("¿tienen
+// electrocardiograma?"). No pidió nada todavía, así que no se le piden datos: se
+// le dice lo que sabemos y se le ofrece averiguarlo.
+//
+// La solicitud queda abierta en collecting_lead con lo pedido ya anotado, pero
+// SIN preguntar nada. Si contesta que sí, continueLead pide lo que falta; si
+// dice que no, wantsOut la cierra. No hace falta un paso nuevo en la máquina.
+export async function offerLead(
+  ctx: FlowContext & { request: string; analysis: TurnAnalysis | null },
+): Promise<LeadTurnResult> {
+  const base: LeadDraft = { kind: "no_disponible", unmatchedRequestText: ctx.request };
+  const draft = mergeAnalysis(base, ctx.analysis).draft;
+  await saveStep(ctx, "collecting_lead", draft);
+  return { reply: unlistedAnswer(ctx.request), pauseAfterReply: false };
 }
 
 export async function continueLead(

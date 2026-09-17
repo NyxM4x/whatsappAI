@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "prompt:check": "tsx scripts/prompt-check.ts",
     "check:intenciones": "tsx scripts/check-intenciones.ts",
-    "check:analisis": "tsx scripts/check-analisis.ts"
+    "check:analisis": "tsx scripts/check-analisis.ts",
+    "check:routing": "tsx scripts/check-routing.ts"
   },
   "keywords": [],
   "author": "",

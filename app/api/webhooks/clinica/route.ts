@@ -50,15 +50,15 @@ import {
   getClinicConfig,
   getBusinessByPhoneNumberId,
   DEFAULT_BUSINESS_SLUG,
-  CLINIC_WELCOME_MESSAGE,
 } from "@/lib/clinic/config";
-import { matchService } from "@/lib/clinic/services";
+import { decideAction } from "@/lib/clinic/routing";
 import {
   analyzeTurn,
   answerQuestion,
   continueLead,
   isLeadStep,
   LEAD_REPLIES,
+  offerLead,
   registerEscalation,
   startLead,
   type LeadContext,
@@ -444,133 +444,97 @@ export async function POST(request: Request) {
     return ok(intent);
   };
 
-  // ── 1. Comprobantes y archivos ────────────────────────────────────────────
+  // ── Comprobantes y archivos ───────────────────────────────────────────────
+  // Se registran siempre (aunque el turno termine en otra rama): el resultado
+  // entra como dato de la decisión.
   let proof: IncomingProofResult = null;
   for (const message of newMessages) {
     const result = await registerIncomingProof({ ...leadCtx, message });
     if (result === "receipt" || (result === "unverified" && proof !== "receipt")) proof = result;
   }
 
-  // ── 2. Emergencias ────────────────────────────────────────────────────────
-  // Desactivado por defecto (los clientes no lo quieren habilitado). Para
-  // reactivarlo en una clínica: CLINIC_EMERGENCY_DETECTION=true.
-  const emergencyDetectionEnabled = process.env.CLINIC_EMERGENCY_DETECTION === "true";
-  const textLc = newText.toLowerCase();
-  if (emergencyDetectionEnabled && clinic.emergencyKeywords.some((kw) => textLc.includes(kw.toLowerCase()))) {
-    await send(clinic.emergencyResponse);
-    return ok("emergencia");
-  }
+  // ── Análisis del mensaje ──────────────────────────────────────────────────
+  // Una sola llamada por turno. Antes había dos sitios que llamaban a
+  // analyzeTurn (dentro y fuera de la solicitud en curso) con el mismo texto.
+  const needsAnalysis =
+    Boolean(newText) &&
+    !clinic.humanHandoffIntentPatterns.test(newText) &&
+    !clinic.locationRequestIntentPatterns.test(newText) &&
+    !proof &&
+    !GREETING_ONLY_PATTERN.test(newText);
 
-  // ── 3. Pide hablar con una persona ────────────────────────────────────────
-  // Prioridad alta: corta cualquier flujo, incluso una solicitud en curso.
-  if (clinic.humanHandoffIntentPatterns.test(newText)) {
-    return escalate("humano", clinic.replies.humanHandoff, "handoff_humano");
-  }
-
-  // ── 4. Ubicación / GPS: respuesta determinista con ambos datos ────────────
-  if (clinic.locationRequestIntentPatterns.test(newText)) {
-    await send(`📍 Nuestra dirección es: ${clinic.generalInfo.address}\n\n🗺️ Ubicación en Google Maps:\n${clinic.generalInfo.mapsUrl}`);
-    return ok("ubicacion");
-  }
-
-  // ── 5. Llegó un comprobante o un archivo ──────────────────────────────────
-  if (proof) {
-    await send(proof === "receipt" ? LEAD_REPLIES.receipt : LEAD_REPLIES.file);
-    return ok("comprobante");
-  }
-
-  // ── 6. Solicitud en curso ─────────────────────────────────────────────────
-  if (isLeadStep(session.step)) {
-    const analysis = newText
-      ? await analyzeTurn({ ...leadCtx, text: newText, step: session.step, draft: session.draft.lead ?? null })
-      : null;
-    lastAnalysis = analysis;
-    if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff, "handoff_humano");
-
-    const tracked = await trackFailedAttempts(leadCtx, session, analysis);
-    if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts, "fallidos");
-
-    const result = await continueLead({ ...leadCtx, session: tracked.session, analysis, text: newText });
-    await send(result.reply, { pauseAfter: result.pauseAfterReply });
-    return ok("solicitud_en_curso");
-  }
-
-  // ── 7. Archivo o audio sin texto, o saludo solo ───────────────────────────
-  if (!newText) {
-    await send(clinic.replies.welcome);
-    return ok("bienvenida");
-  }
-  if (GREETING_ONLY_PATTERN.test(newText)) {
-    await send(CLINIC_WELCOME_MESSAGE);
-    return ok("saludo");
-  }
-
-  // ── 8. Pedidos que solo resuelve una persona ──────────────────────────────
-  // El bot ya no cancela, reprograma, consulta citas ni envía el QR.
-  // "Cancelar" con un medio o un momento de pago al lado es PAGAR, no anular
-  // (ver cancelMeansPayingPatterns). Ese mensaje sigue de largo: lo recoge
-  // paymentIntention como dato de la solicitud.
-  if (clinic.cancelIntentPatterns.test(newText) && !clinic.cancelMeansPayingPatterns.test(newText)) {
-    return escalate("cancelar", LEAD_REPLIES.toAdvisor, "cancelar");
-  }
-  if (clinic.rescheduleIntentPatterns.test(newText)) return escalate("reprogramar", LEAD_REPLIES.toAdvisor, "reprogramar");
-  if (clinic.checkAppointmentIntentPatterns.test(newText)) return escalate("consulta_cita", LEAD_REPLIES.toAdvisor, "consulta_cita");
-  if (clinic.qrRequestIntentPatterns.test(newText)) return escalate("pago", LEAD_REPLIES.payment, "pago");
-
-  // ── 9. Análisis del mensaje ───────────────────────────────────────────────
-  const analysis = await analyzeTurn({ ...leadCtx, text: newText, step: "idle", draft: null });
+  const analysis = needsAnalysis
+    ? await analyzeTurn({
+        ...leadCtx,
+        text: newText,
+        step: session.step,
+        draft: session.draft.lead ?? null,
+      })
+    : null;
   lastAnalysis = analysis;
-  if (analysis?.wantsHuman) return escalate("humano", clinic.replies.humanHandoff, "handoff_humano");
 
+  // Frustración repetida: se cuenta antes de decidir, porque al llegar al
+  // límite manda sobre cualquier otra rama.
   const tracked = await trackFailedAttempts(leadCtx, session, analysis);
   if (tracked.limitReached) return escalate("fallidos", LEAD_REPLIES.failedAttempts, "fallidos");
 
-  // Pidió por su nombre una especialidad que no está en nuestro catálogo
-  // (fisioterapia, odontología…). NUNCA se le dice que no la tenemos: la
-  // clínica no siempre nos pasa la lista completa, así que no sabemos si de
-  // verdad no la ofrece o solo no está cargada acá. Se recopila el dato igual,
-  // como cualquier ficha, y un asesor humano confirma. Va ANTES de servicio y
-  // ficha para que el texto de la especialidad no se pierda contra
-  // matchService() ni se le repregunte.
-  if (analysis?.unavailableRequest) {
-    const result = await startLead({ ...leadCtx, session: tracked.session, kind: "ficha", analysis });
-    await send(result.reply);
-    return ok("ficha");
+  // ── Decisión ──────────────────────────────────────────────────────────────
+  // Función pura (lib/clinic/routing.ts): no toca base de datos ni red. Todo lo
+  // que sigue es ejecución.
+  const action = decideAction({
+    clinic,
+    text: newText,
+    analysis,
+    step: session.step,
+    proof,
+    emergencyDetectionEnabled: process.env.CLINIC_EMERGENCY_DETECTION === "true",
+    greetingOnly: Boolean(newText) && GREETING_ONLY_PATTERN.test(newText),
+  });
+
+  // ── Ejecución ─────────────────────────────────────────────────────────────
+  switch (action.type) {
+    case "reply": {
+      await send(action.text);
+      return ok(action.intent);
+    }
+
+    case "escalate":
+      return escalate(action.kind, action.reply, action.intent);
+
+    case "continueLead": {
+      const result = await continueLead({ ...leadCtx, session: tracked.session, analysis, text: newText });
+      await send(result.reply, { pauseAfter: result.pauseAfterReply });
+      return ok(action.intent);
+    }
+
+    case "offerLead": {
+      const result = await offerLead({ ...leadCtx, session: tracked.session, request: action.request, analysis });
+      await send(result.reply, { pauseAfter: result.pauseAfterReply });
+      return ok(action.intent);
+    }
+
+    case "startLead": {
+      const result = await startLead({
+        ...leadCtx,
+        session: tracked.session,
+        kind: action.kind,
+        service: action.service,
+        analysis,
+      });
+      await send(result.reply, { pauseAfter: result.pauseAfterReply });
+      return ok(action.intent);
+    }
+
+    case "qa": {
+      // Si el modelo no responde no dejamos al paciente sin salida: se deriva de
+      // verdad, con alarma en el panel.
+      const answer = await answerQuestion(leadCtx, newText);
+      if (!answer) return escalate("humano", LEAD_REPLIES.technicalError, "qa_fallido");
+      await send(answer);
+      return ok(action.intent);
+    }
   }
 
-  // ── 10. Servicio del tarifario → solicitud de servicio ────────────────────
-  // Las consultas de emergencia solo se informan (Q&A): no esperan a un asesor.
-  const service = matchService(newText, clinic.services);
-  if (service && service.category !== "emergencia") {
-    const result = await startLead({ ...leadCtx, session: tracked.session, kind: "servicio", service, analysis });
-    await send(result.reply);
-    return ok("servicio");
-  }
-
-  // ── 11. Pide ficha / consulta ─────────────────────────────────────────────
-  if (clinic.bookingIntentPatterns.test(newText) || analysis?.wantsLead) {
-    const result = await startLead({ ...leadCtx, session: tracked.session, kind: "ficha", analysis });
-    await send(result.reply);
-    return ok("ficha");
-  }
-
-  // ── 12. Red de seguridad: pide una gestión, no información ────────────────
-  // "Avísele a la doctora", "ya llegué", "me confirma": nada de eso lo puede
-  // hacer el bot. Va acá, después de servicio y ficha, para no robarle mensajes
-  // a la recolección ("quiero una ficha, me confirma") y justo antes del Q&A,
-  // que es donde el agujero existía: el modelo contestaba "Ok" y nadie se
-  // enteraba. Tiene que ser una rama del código, no una regla del prompt: el
-  // Q&A solo devuelve texto, no puede dejar la alarma en el panel.
-  if (analysis?.needsHumanAction) return escalate("accion", LEAD_REPLIES.action, "accion");
-
-  // ── 13. Q&A general con OpenAI ────────────────────────────────────────────
-  // Si el modelo no responde no dejamos al paciente sin salida: se deriva de
-  // verdad, con alarma en el panel.
-  const answer = await answerQuestion(leadCtx, newText);
-  if (!answer) return escalate("humano", LEAD_REPLIES.technicalError, "qa_fallido");
-
-  await send(answer);
-  return ok("qa");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

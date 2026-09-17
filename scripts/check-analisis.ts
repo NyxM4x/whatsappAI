@@ -29,6 +29,7 @@ if (!process.env.OPENAI_API_KEY) {
 const { getClinicConfig } = await import("../lib/clinic/config");
 const { analyzeTurn } = await import("../lib/clinic/leads");
 const { findSpecialty } = await import("../lib/clinic/pricing");
+const { decideAction } = await import("../lib/clinic/routing");
 
 type Expectation = {
   text: string;
@@ -38,6 +39,13 @@ type Expectation = {
   specialtyKey?: string | null;
   wantsLead?: boolean;
   payment?: "qr" | "efectivo" | null;
+  patientName?: string | null;
+  isQuestion?: boolean;
+  // Qué debe DECIDIR el ruteo con ese análisis real. Encadena las dos capas:
+  // así se verifica el recorrido entero (mensaje → comprensión → decisión) sin
+  // levantar el webhook. wantsLead ya no se verifica acá: dejó de ser una
+  // conclusión del análisis y pasó a ser una decisión de routing.ts.
+  action?: string;
 };
 
 const CASES: Expectation[] = [
@@ -45,10 +53,10 @@ const CASES: Expectation[] = [
   // Desde 2026-09-17 esto YA NO se rechaza ("no contamos con X"): no sabemos
   // si la clínica la ofrece o no, solo que no está cargada acá. Se recopila
   // igual (wantsLead: true en los pedidos directos) y un asesor confirma.
-  { text: "Para fisioterapia", unavailable: true, specialtyKey: null, wantsLead: true },
+  { text: "Para fisioterapia", unavailable: true, specialtyKey: null, action: "startLead" },
   { text: "buenas, hacen odontologia?", unavailable: true, specialtyKey: null },
-  { text: "necesito un oftalmologo para mi mama", unavailable: true, specialtyKey: null, wantsLead: true },
-  { text: "quiero una ficha para rehabilitacion de rodilla", unavailable: true, specialtyKey: null, wantsLead: true },
+  { text: "necesito un oftalmologo para mi mama", unavailable: true, specialtyKey: null, action: "startLead" },
+  { text: "quiero una ficha para rehabilitacion de rodilla", unavailable: true, specialtyKey: null, action: "startLead" },
 
   // ── Caso real 2026-09-17: el mismo problema pero con un SERVICIO, no una
   // especialidad. El bot dijo "no contamos con electrocardiograma" y la
@@ -68,26 +76,36 @@ const CASES: Expectation[] = [
   { text: "voy a cancelar llegando nomas", needsAction: false, payment: "efectivo" },
 
   // ── Lo que SÍ debe seguir funcionando: no sobre-derivar ───────────────────
-  { text: "quiero una ficha para pediatria mañana a las 10", unavailable: false, needsAction: false, specialtyKey: "pediatria", wantsLead: true },
+  { text: "quiero una ficha para pediatria mañana a las 10", unavailable: false, needsAction: false, specialtyKey: "pediatria", action: "startLead" },
   { text: "me duele mucho la barriga desde ayer", unavailable: false, specialtyKey: "medicina-general" },
-  { text: "necesito un ginecologo", unavailable: false, specialtyKey: "ginecologia", wantsLead: true },
-  { text: "cuanto cuesta la consulta de neurologia?", unavailable: false, specialtyKey: "neurologia" },
+  { text: "necesito un ginecologo", unavailable: false, specialtyKey: "ginecologia", action: "startLead" },
+  { text: "cuanto cuesta la consulta de neurologia?", unavailable: false, specialtyKey: "neurologia", action: "qa" },
   // Servicio real del catálogo (defaultServices): nunca debe quedar marcado
   // como unavailableRequest — matchService() en sanitizeAnalysis es la red que
   // descarta ese falso positivo, igual que matchSpecialtyText para especialidades.
   { text: "cuanto cuesta el papanicolau?", unavailable: false },
-  { text: "a que hora abren?", unavailable: false, needsAction: false, wantsLead: false },
+  { text: "a que hora abren?", unavailable: false, needsAction: false, action: "qa" },
 
   // ── F2: la especialidad dicha en el primer mensaje no se repregunta ───────
   // Para que no repregunte, wantsLead tiene que salir en true: si no, el
   // mensaje ni siquiera llega a abrir la solicitud.
-  { text: "Para ginecología", specialtyKey: "ginecologia", wantsLead: true },
-  { text: "pediatria por favor", specialtyKey: "pediatria", wantsLead: true },
+  { text: "Para ginecología", specialtyKey: "ginecologia", action: "startLead" },
+  { text: "pediatria por favor", specialtyKey: "pediatria", action: "startLead" },
+
+  // ── Nombre: "pa mi" NO es un nombre ───────────────────────────────
+  // Contestan PARA QUIÉN es, no cómo se llama. Iba al panel como nombre.
+  { text: "hola tienen electrocardiograma? pa mi", patientName: null },
+  { text: "quiero ficha para pediatria, es para mi hijo", patientName: null, specialtyKey: "pediatria" },
+  { text: "Quiero sacar ficha con cardiología, soy Juan Pérez", patientName: "Juan Pérez", specialtyKey: "cardiologia" },
+
+  // ── Preguntar vs pedir: el ruteo necesita estos dos campos bien ────────
+  { text: "¿Tienen electrocardiograma?", unavailable: true, isQuestion: true, action: "offerLead" },
+  { text: "Quiero hacerme un electrocardiograma", unavailable: true, action: "startLead" },
 
   // ── F7: forma de pago como dato, sin derivar por eso ──────────────────────
   { text: "voy a pagar por QR", payment: "qr" },
   { text: "pago llegando nomas", payment: "efectivo", needsAction: false },
-  { text: "quiero ficha para medicina general, pago en efectivo al llegar", payment: "efectivo", specialtyKey: "medicina-general", wantsLead: true },
+  { text: "quiero ficha para medicina general, pago en efectivo al llegar", payment: "efectivo", specialtyKey: "medicina-general", action: "startLead" },
   { text: "mañana a las 9 me viene bien", payment: null },
 ];
 
@@ -133,6 +151,22 @@ for (const c of CASES) {
   if (c.payment !== undefined && a.paymentIntention !== c.payment) {
     problems.push(`paymentIntention=${a.paymentIntention ?? "null"} (esperado ${c.payment ?? "null"})`);
   }
+  if (c.patientName !== undefined && a.patientName !== c.patientName) {
+    problems.push(`patientName=${JSON.stringify(a.patientName)} (esperado ${JSON.stringify(c.patientName)})`);
+  }
+  if (c.isQuestion !== undefined && a.isQuestion !== c.isQuestion) {
+    problems.push(`isQuestion=${a.isQuestion} (esperado ${c.isQuestion})`);
+  }
+  // Encadenado: el análisis REAL entra al ruteo REAL.
+  let decided: string | null = null;
+  if (c.action !== undefined) {
+    const action = decideAction({
+      clinic, text: c.text, analysis: a, step: "idle",
+      proof: null, emergencyDetectionEnabled: false, greetingOnly: false,
+    });
+    decided = action.type + ("kind" in action && action.kind ? `:${action.kind}` : "");
+    if (action.type !== c.action) problems.push(`action=${decided} (esperado ${c.action})`);
+  }
 
   // Invariante del arreglo: nunca las dos cosas a la vez. Si esto falla, el bot
   // volvió a poder sustituir en silencio una especialidad que no tenemos.
@@ -141,11 +175,12 @@ for (const c of CASES) {
   }
 
   const resumen = [
-    a.unavailableRequest ? `no-ofrecemos:"${a.unavailableRequest}"` : null,
+    a.unavailableRequest ? `fuera-de-catalogo:"${a.unavailableRequest}"` : null,
     a.needsHumanAction ? "gestión" : null,
     a.specialtyKey ? findSpecialty(a.specialtyKey)?.name ?? a.specialtyKey : null,
     a.wantsLead ? "quiere-ficha" : null,
     a.paymentIntention ? `paga:${a.paymentIntention}` : null,
+    decided ? `→ ${decided}` : null,
   ].filter(Boolean).join(" · ") || "—";
 
   if (problems.length) {

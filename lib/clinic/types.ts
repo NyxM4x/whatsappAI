@@ -163,7 +163,12 @@ export type LeadStatus = "pending" | "attended" | "withdrawn";
 
 // Lo que el bot va juntando en la conversación (vive en BookingDraft.lead).
 export type LeadDraft = {
-  kind: "ficha" | "servicio";
+  // "ficha" = consulta con un médico. "servicio" = algo del tarifario.
+  // "no_disponible" = lo pidió por su nombre y no está en ningún catálogo
+  // nuestro: no se sabe si la clínica lo ofrece, lo confirma el asesor. No es
+  // una ficha médica y no debe tratarse como tal (no se pregunta
+  // nueva/reconsulta ni se le habla de "su ficha").
+  kind: "ficha" | "servicio" | "no_disponible";
   patientName?: string | null;
   specialtyKey?: string | null;     // clave de CONSULTATION_SPECIALTIES
   // Lo que el paciente pidió tal cual (especialidad, servicio o examen), cuando
