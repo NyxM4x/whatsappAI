@@ -197,10 +197,6 @@ function extractMediaUrl(
   return { url: null, type: null };
 }
 
-// El evento que dispara la pausa por intervención humana. Es el ÚNICO nombre
-// aceptado: `delivered`, `read`, `failed` o cualquier otro NO pausan el bot.
-export const HUMAN_TAKEOVER_EVENT_NAME = "whatsapp.message.sent";
-
 // ¿El request trae varios eventos en `payload.data`?
 function isBatchPayload(payload: Record<string, any>, request?: Request | null): boolean {
   return payload.batch === true || request?.headers?.get("x-webhook-batch") === "true";
@@ -230,10 +226,34 @@ function getEventName(
   return headerEventName && headerEventName.trim() ? headerEventName.trim() : null;
 }
 
-// Clasificador de intervención humana. Estrictamente estructural: NO mira el
-// contenido del mensaje. Pausa solo con la terna exacta
-//   whatsapp.message.sent + direction=outbound + origin=business_app
-// (`cloud_api` es el propio bot, así que jamás debe pausar).
+// ¿Este mensaje lo originó un humano desde la app de WhatsApp Business (y no
+// nuestro propio bot)? Estrictamente estructural, nunca mira el contenido.
+//
+// Se acepta CUALQUIERA de dos señales porque este repo no tiene ningún payload
+// real de Kapso capturado que confirme cuál de las dos usa en producción
+// (ver docs de la auditoría 2026-09-17):
+//   - kapso.source === "smb_message_echo": es el campo que documenta el SDK
+//     oficial `@kapso/whatsapp-cloud-api` (README, sección Webhooks) para los
+//     "message echoes" que Meta reenvía cuando el negocio contesta desde la
+//     app WhatsApp Business (feature "Coexistence" de Meta Cloud API). Es la
+//     evidencia más fuerte disponible, aunque documenta el modo "webhook nativo
+//     de Meta" (normalizeWebhook()), no el modo "eventos" (whatsapp.message.*)
+//     que consume este webhook.
+//   - kapso.origin === "business_app": hipótesis previa de este código, sin
+//     evidencia directa encontrada. Se conserva por si el modo "eventos" de
+//     Kapso remapea el campo con otro nombre.
+// `cloud_api` (nuestro propio envío) no matchea ninguna de las dos: no puede
+// autopausarse. Ver captureOutboundSentDiagnostics() para la captura pasiva
+// que debe confirmar (o descartar) esto contra un evento real.
+function isHumanBusinessAppMessage(kapso: Record<string, any> | undefined | null): boolean {
+  if (!kapso) return false;
+  return kapso.source === "smb_message_echo" || kapso.origin === "business_app";
+}
+
+// El evento que dispara la pausa por intervención humana. Es el ÚNICO nombre
+// aceptado: `delivered`, `read`, `failed` o cualquier otro NO pausan el bot.
+export const HUMAN_TAKEOVER_EVENT_NAME = "whatsapp.message.sent";
+
 export function extractHumanTakeoverEvent(
   event: Record<string, any>,
   headerEventName?: string | null,
@@ -246,7 +266,7 @@ export function extractHumanTakeoverEvent(
   const providerMessageId = message?.id;
   if (
     message?.kapso?.direction !== "outbound" ||
-    message?.kapso?.origin !== "business_app" ||
+    !isHumanBusinessAppMessage(message?.kapso) ||
     typeof customerPhone !== "string" || !customerPhone.trim() ||
     typeof conversationId !== "string" || !conversationId.trim() ||
     typeof providerMessageId !== "string" || !providerMessageId.trim()
@@ -277,6 +297,40 @@ export function extractHumanTakeoverEvents(
   return getWebhookEvents(payload, request)
     .map((event) => extractHumanTakeoverEvent(event, headerEventName))
     .filter((event): event is HumanTakeoverEvent => Boolean(event));
+}
+
+export type OutboundSentDiagnostic = {
+  conversationId: string | null;
+  providerMessageId: string | null;
+  matched: boolean;
+  kapso: Record<string, any> | null;
+};
+
+// Captura DIAGNÓSTICA temporal (auditoría 2026-09-17): todavía no hay en este
+// repo un payload real de Kapso que confirme si el campo que marca "esto lo
+// mandó la recepcionista" es `kapso.source` o `kapso.origin` (ver
+// isHumanBusinessAppMessage). Devuelve el objeto `message.kapso` crudo de todo
+// evento `whatsapp.message.sent` con direction=outbound — tanto los que ya
+// matchean nuestra clasificación como los que no (que hoy deberían ser SOLO
+// el propio bot, origin/source=cloud_api) — para poder comparar ambos shapes
+// la próxima vez que ocurran en producción. El caller los persiste en
+// system_logs (nunca el texto del mensaje). Quitar esta función y su uso en el
+// webhook una vez confirmado el campo real.
+export function extractOutboundSentDiagnostics(
+  payload: Record<string, any>,
+  request: Request,
+): OutboundSentDiagnostic[] {
+  const headerEventName = isBatchPayload(payload, request) ? null : getHeaderEventName(request);
+
+  return getWebhookEvents(payload, request)
+    .filter((event) => getEventName(event, headerEventName) === HUMAN_TAKEOVER_EVENT_NAME)
+    .filter((event) => event.message?.kapso?.direction === "outbound")
+    .map((event) => ({
+      conversationId: typeof event.conversation?.id === "string" ? event.conversation.id : null,
+      providerMessageId: typeof event.message?.id === "string" ? event.message.id : null,
+      matched: isHumanBusinessAppMessage(event.message?.kapso),
+      kapso: event.message?.kapso ?? null,
+    }));
 }
 
 async function extractIncomingFromEvent(

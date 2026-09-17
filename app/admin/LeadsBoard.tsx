@@ -40,6 +40,7 @@ type LeadDTO = {
   createdAt: string;
   updatedAt: string;
   waUrl: string | null;
+  botPaused: boolean;
 };
 
 const POLL_MS = 5000;
@@ -171,6 +172,53 @@ function LeadDetails({ lead }: { lead: LeadDTO }) {
   );
 }
 
+// Botón "IA: ACTIVA / PAUSADA" por cliente (nunca global). Actúa por teléfono
+// — la identidad durable — así que sigue funcionando aunque Kapso le abra al
+// mismo paciente otra conversación técnica.
+function BotPauseControl({
+  phone,
+  paused,
+  onToggled,
+}: {
+  phone: string;
+  paused: boolean;
+  onToggled: (phone: string, paused: boolean) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const toggle = async () => {
+    if (busy) return;
+    setBusy(true);
+    const nextAction = paused ? "resume" : "pause";
+    try {
+      const res = await fetch("/api/admin/bot-pause", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, action: nextAction }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { botPaused: boolean };
+      onToggled(phone, data.botPaused);
+    } catch {
+      // Sin cambio optimista: si falló, el próximo sondeo muestra el estado real.
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      className={`btn-bot-toggle ${paused ? "bot-paused" : "bot-active"}`}
+      onClick={toggle}
+      disabled={busy}
+      title={paused ? "La IA no le responde a este cliente. Tocar para reactivarla." : "La IA le responde a este cliente. Tocar para pausarla."}
+    >
+      {busy ? "…" : paused ? "🤖 IA pausada — Reactivar" : "🤖 IA activa — Pausar"}
+    </button>
+  );
+}
+
 export default function LeadsBoard({ timezone, compact }: { timezone: string; compact: boolean }) {
   const [pending, setPending] = useState<LeadDTO[]>([]);
   const [recent, setRecent] = useState<LeadDTO[]>([]);
@@ -182,6 +230,23 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
   // Atendidas desde esta pantalla: un sondeo que salió antes del clic no las revive.
   const attendedRef = useRef<Set<string>>(new Set());
   const baseTitleRef = useRef("");
+  // Overrides optimistas tras tocar "Pausar/Reactivar IA", por teléfono
+  // normalizado — el próximo sondeo (5 s) los reemplaza por el estado real.
+  const [pauseOverrides, setPauseOverrides] = useState<Record<string, boolean>>({});
+
+  const handleBotToggled = useCallback((phone: string, paused: boolean) => {
+    setPauseOverrides((current) => ({ ...current, [phone]: paused }));
+  }, []);
+
+  const withOverride = useCallback(
+    (leads: LeadDTO[]) =>
+      leads.map((lead) =>
+        lead.contactPhone in pauseOverrides
+          ? { ...lead, botPaused: pauseOverrides[lead.contactPhone] }
+          : lead,
+      ),
+    [pauseOverrides],
+  );
 
   const refreshSoundState = useCallback(() => {
     setSoundBlocked(alarmRef.current ? alarmRef.current.isBlocked() : false);
@@ -337,7 +402,7 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
         <p className="leads-empty">No hay solicitudes pendientes ✅</p>
       ) : (
         <div className="lead-grid">
-          {pending.map((lead) => (
+          {withOverride(pending).map((lead) => (
             <article key={lead.id} className={`lead-card lead-kind-${lead.kind}`}>
               <header className="lead-card-header">
                 <span className="lead-kind">{KIND_LABEL[lead.kind] ?? lead.kind}</span>
@@ -350,6 +415,7 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
                 ATENDER
               </button>
               <p className="lead-hint">Abre el chat en WhatsApp Web y apaga esta alarma</p>
+              <BotPauseControl phone={lead.contactPhone} paused={lead.botPaused} onToggled={handleBotToggled} />
             </article>
           ))}
         </div>
@@ -366,15 +432,16 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
               <th>Teléfono</th>
               <th>Estado</th>
               <th>Chat</th>
+              <th>IA</th>
             </tr>
           </thead>
           <tbody>
             {recent.length === 0 && (
               <tr>
-                <td colSpan={6} className="empty">Todavía no hay solicitudes cerradas.</td>
+                <td colSpan={7} className="empty">Todavía no hay solicitudes cerradas.</td>
               </tr>
             )}
-            {recent.map((lead) => (
+            {withOverride(recent).map((lead) => (
               <tr key={lead.id}>
                 <td>{formatClock(lead.createdAt, timezone)}</td>
                 <td>{KIND_LABEL[lead.kind] ?? lead.kind}</td>
@@ -392,6 +459,9 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
                   ) : (
                     "—"
                   )}
+                </td>
+                <td>
+                  <BotPauseControl phone={lead.contactPhone} paused={lead.botPaused} onToggled={handleBotToggled} />
                 </td>
               </tr>
             ))}

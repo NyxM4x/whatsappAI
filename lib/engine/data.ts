@@ -512,9 +512,11 @@ export async function pauseBotForHumanHandoff(conversationId: string, phone?: st
   }
 }
 
-// Pausa manual (indefinida) desde el panel / API de bot-control.
+// Pausa manual (indefinida) desde el panel / API de bot-control. `conversationId`
+// es opcional a propósito: el panel de leads identifica al cliente por teléfono
+// (identidad durable), no por conversation.id, que puede no conocerse o cambiar.
 export async function setManualBotPause(params: {
-  conversationId: string;
+  conversationId?: string | null;
   phone?: string | null;
   reason: string;
 }): Promise<void> {
@@ -534,7 +536,7 @@ export async function setManualBotPause(params: {
       bot_paused_reason: params.reason,
       bot_pause_mode: "manual",
       bot_pause_duration_minutes: null,
-      last_kapso_conversation_id: params.conversationId,
+      last_kapso_conversation_id: params.conversationId ?? null,
       updated_at: nowIso,
     },
     { onConflict: "contact_phone_normalized" },
@@ -542,9 +544,10 @@ export async function setManualBotPause(params: {
   if (error) console.error("setManualBotPause failed", error);
 }
 
-// Reanudación manual desde el panel / API de bot-control.
+// Reanudación manual desde el panel / API de bot-control. Mismo motivo que
+// arriba: `conversationId` es opcional.
 export async function clearBotPause(params: {
-  conversationId: string;
+  conversationId?: string | null;
   phone?: string | null;
   reason: string;
 }): Promise<void> {
@@ -564,12 +567,43 @@ export async function clearBotPause(params: {
       bot_paused_reason: params.reason,
       bot_pause_mode: "manual",
       bot_pause_duration_minutes: null,
-      last_kapso_conversation_id: params.conversationId,
+      last_kapso_conversation_id: params.conversationId ?? null,
       updated_at: nowIso,
     },
     { onConflict: "contact_phone_normalized" },
   );
   if (error) console.error("clearBotPause failed", error);
+}
+
+// Estado de pausa de varios teléfonos en una sola consulta (evita N+1 al listar
+// el panel de leads). Los que no tienen fila en bot_pause_state se reportan
+// como no pausados.
+export async function getBotPauseStatesForPhones(
+  phones: string[],
+): Promise<Record<string, BotPauseState>> {
+  const identities = Array.from(
+    new Set(phones.map((p) => normalizePhone(p)).filter((p): p is string => Boolean(p))),
+  );
+  const result: Record<string, BotPauseState> = {};
+  if (identities.length === 0) return result;
+
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("bot_pause_state")
+    .select(
+      "contact_phone_normalized, bot_paused, bot_paused_at, bot_pause_expires_at, bot_paused_reason, bot_pause_mode",
+    )
+    .in("contact_phone_normalized", identities);
+
+  if (error) {
+    console.error("getBotPauseStatesForPhones failed", error);
+    return result;
+  }
+
+  for (const row of (data as DurablePauseRow[] | null) ?? []) {
+    result[row.contact_phone_normalized] = resolveBotPauseState({ durable: row });
+  }
+  return result;
 }
 
 export async function saveContactAndConversation(message: IncomingMessage) {

@@ -40,6 +40,7 @@ import {
 } from "@/lib/engine/data";
 import {
   extractHumanTakeoverEvents,
+  extractOutboundSentDiagnostics,
   normalizeIncomingMessages,
   type IncomingMessage,
 } from "@/lib/engine/messages";
@@ -143,6 +144,18 @@ export async function POST(request: Request) {
     }
   } else {
     console.warn("clinica webhook: META_APP_SECRET not set, skipping signature verification");
+    // Persistido (no solo console.warn, que se pierde con los runtime logs de
+    // Vercel): mientras falte esta env var, cualquiera en internet puede
+    // forjar un POST a este webhook, incluyendo un evento falso de takeover
+    // humano que pause/despause el bot. Configurar META_APP_SECRET (panel de
+    // Meta for Developers → tu app → Settings → Basic) cierra esto sin tocar
+    // código — el mecanismo (X-Hub-Signature-256) ya es el correcto, según la
+    // documentación oficial del SDK de Kapso.
+    await logSystemEvent({
+      level: "warning",
+      eventType: "webhook_signature_verification_disabled",
+      errorMessage: "META_APP_SECRET no configurada: firma del webhook sin verificar",
+    });
   }
 
   let payload: Record<string, any>;
@@ -167,6 +180,22 @@ export async function POST(request: Request) {
         duplicate: result.duplicate,
         expiresAt: result.expiresAt,
       });
+      // Log estructurado y persistido (no solo console.log, que expira con los
+      // runtime logs de Vercel) para poder auditar en producción quién pausó a
+      // quién y cuándo.
+      await logSystemEvent({
+        level: "info",
+        eventType: "human_takeover",
+        conversationId: takeover.conversationId,
+        contactPhone: takeover.customerPhone,
+        messageId: takeover.providerMessageId,
+        metadata: {
+          decision: result.duplicate ? "HUMAN_MESSAGE_DETECTED_DUPLICATE" : "HUMAN_MESSAGE_DETECTED",
+          outcome: result.outcome,
+          bot_paused: result.applied || result.outcome === "manual_pause_kept",
+          pause_expires_at: result.expiresAt,
+        },
+      });
     } catch (err) {
       console.error("human takeover failed", getErrorMessage(err));
       await logSystemEvent({
@@ -178,6 +207,19 @@ export async function POST(request: Request) {
         errorMessage: getErrorMessage(err),
       });
     }
+  }
+
+  // Captura DIAGNÓSTICA temporal — quitar una vez confirmado en producción cuál
+  // campo real usa Kapso para marcar "esto lo mandó la recepcionista" (ver
+  // extractOutboundSentDiagnostics). No incluye texto de mensajes.
+  for (const diag of extractOutboundSentDiagnostics(payload, request)) {
+    await logSystemEvent({
+      level: "info",
+      eventType: "outbound_sent_shape_capture",
+      conversationId: diag.conversationId ?? undefined,
+      messageId: diag.providerMessageId ?? undefined,
+      metadata: { matched_as_human_takeover: diag.matched, kapso: diag.kapso },
+    });
   }
 
   const incomingMessages = await normalizeIncomingMessages(payload, request);
@@ -268,6 +310,19 @@ export async function POST(request: Request) {
   const pauseState = await getBotPauseState(lastMessage.conversationId, lastMessage.from);
 
   if (pauseState.paused && !pauseState.expired) {
+    await logSystemEvent({
+      level: "info",
+      eventType: "ai_turn_decision",
+      conversationId,
+      contactPhone,
+      messageId: lastMessage.messageId,
+      metadata: {
+        decision: "BOT_PAUSED",
+        bot_paused: true,
+        pause_reason: pauseState.reason ?? null,
+        pause_expires_at: pauseState.expiresAt ?? null,
+      },
+    });
     await watchWhilePaused(leadCtx, newMessages);
     return new Response("bot paused", { status: 200 });
   }
@@ -325,9 +380,31 @@ export async function POST(request: Request) {
       reason: currentPauseState.reason,
       expiresAt: currentPauseState.expiresAt,
     });
+    await logSystemEvent({
+      level: "info",
+      eventType: "ai_turn_decision",
+      conversationId,
+      contactPhone,
+      messageId: lastMessage.messageId,
+      metadata: {
+        decision: "AI_SKIPPED_HUMAN_TAKEOVER",
+        bot_paused: true,
+        pause_reason: currentPauseState.reason ?? null,
+        pause_expires_at: currentPauseState.expiresAt ?? null,
+      },
+    });
     await watchWhilePaused(leadCtx, newMessages);
     return new Response("bot paused", { status: 200 });
   }
+
+  await logSystemEvent({
+    level: "info",
+    eventType: "ai_turn_decision",
+    conversationId,
+    contactPhone,
+    messageId: lastMessage.messageId,
+    metadata: { decision: "AI_PROCESSING_ALLOWED", bot_paused: false },
+  });
 
   const send = (replyText: string, options: { pauseAfter?: boolean } = {}) =>
     sendAndPersist({
@@ -573,6 +650,19 @@ async function sendAndPersist(params: {
         reason: pauseState.reason,
         expiresAt: pauseState.expiresAt,
       });
+      await logSystemEvent({
+        level: "info",
+        eventType: "ai_turn_decision",
+        conversationId,
+        contactPhone,
+        messageId: lastMessage.messageId,
+        metadata: {
+          decision: "AI_ABORTED_BEFORE_SEND",
+          bot_paused: true,
+          pause_reason: pauseState.reason ?? null,
+          pause_expires_at: pauseState.expiresAt ?? null,
+        },
+      });
       return;
     }
 
@@ -592,6 +682,34 @@ async function sendAndPersist(params: {
         errorMessage: getErrorMessage(err),
       });
       return;
+    }
+
+    // Verificación POST-envío: la llamada de red a Kapso (arriba) tiene latencia
+    // propia, y en ese hueco puede aterrizar una pausa real (auditoría
+    // 2026-09-17: ocurrió en producción, ~4 s de diferencia). Para entonces el
+    // mensaje ya salió hacia Meta — no hay forma de "desenviarlo" — pero antes
+    // esto era invisible. Ahora queda como evento CRÍTICO para poder medir cuán
+    // seguido pasa y decidir si hace falta acortar la latencia del turno.
+    try {
+      const postSendPauseState = await getBotPauseState(conversationId, contactPhone);
+      if (postSendPauseState.paused && !postSendPauseState.expired) {
+        console.error("ai response sent during a race window with a human takeover", { conversationId });
+        await logSystemEvent({
+          level: "critical",
+          eventType: "ai_turn_decision",
+          conversationId,
+          contactPhone,
+          messageId: lastMessage.messageId,
+          metadata: {
+            decision: "AI_SENT_DURING_RACE_WINDOW",
+            bot_paused: true,
+            pause_reason: postSendPauseState.reason ?? null,
+            pause_expires_at: postSendPauseState.expiresAt ?? null,
+          },
+        });
+      }
+    } catch (err) {
+      console.error("post-send pause re-check failed", err);
     }
 
     try {

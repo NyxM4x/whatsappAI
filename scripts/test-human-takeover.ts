@@ -39,13 +39,19 @@ function pass(name: string) {
 const HUMAN_TS = "1787753046"; // 2026-08-26T14:04:06.000Z
 const HUMAN_TS_ISO = "2026-08-26T14:04:06.000Z";
 
+// `source: "smb_message_echo"` es el campo documentado por el SDK oficial de
+// Kapso (README, sección Webhooks) para los message echoes de la app WhatsApp
+// Business. `origin: "business_app"` se agrega también porque es la hipótesis
+// previa de este código, sin evidencia directa — ver isHumanBusinessAppMessage
+// en lib/engine/messages.ts. El fixture trae AMBOS para no depender de cuál
+// resulte ser el real; los tests C1/C2 prueban que cada uno solo basta.
 function humanEvent(over: Record<string, any> = {}) {
   return {
     type: "whatsapp.message.sent",
     message: {
       id: "wamid.test-1",
       timestamp: HUMAN_TS,
-      kapso: { direction: "outbound", origin: "business_app" },
+      kapso: { direction: "outbound", source: "smb_message_echo", origin: "business_app" },
     },
     conversation: { id: "technical-id", phone_number: "59170000000" },
     ...over,
@@ -127,6 +133,43 @@ function req(headers: Record<string, string> = {}) {
   );
 
   pass("B. outbound + cloud_api no pausa");
+}
+
+// ─── B2. cada señal humana basta por sí sola (source O origin) ──────────────
+
+{
+  const onlySource = humanEvent({
+    message: {
+      id: "wamid.source-only",
+      timestamp: HUMAN_TS,
+      kapso: { direction: "outbound", source: "smb_message_echo" },
+    },
+  });
+  assert.ok(extractHumanTakeoverEvent(onlySource), "kapso.source=smb_message_echo solo ya debe pausar");
+
+  const onlyOrigin = humanEvent({
+    message: {
+      id: "wamid.origin-only",
+      timestamp: HUMAN_TS,
+      kapso: { direction: "outbound", origin: "business_app" },
+    },
+  });
+  assert.ok(extractHumanTakeoverEvent(onlyOrigin), "kapso.origin=business_app solo ya debe pausar");
+
+  const neither = humanEvent({
+    message: {
+      id: "wamid.neither",
+      timestamp: HUMAN_TS,
+      kapso: { direction: "outbound" },
+    },
+  });
+  assert.equal(
+    extractHumanTakeoverEvent(neither),
+    null,
+    "direction=outbound sin source ni origin no debe pausar",
+  );
+
+  pass("B2. source=smb_message_echo u origin=business_app bastan por separado; ninguno de los dos no pausa");
 }
 
 // ─── C. delivered / read / failed / inbound / desconocido NO pausan ──────────

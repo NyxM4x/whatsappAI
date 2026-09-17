@@ -554,6 +554,38 @@ a {
   background: #b91c1c;
 }
 
+.btn-bot-toggle {
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-bot-toggle:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.btn-bot-toggle.bot-active {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.btn-bot-toggle.bot-active:hover:not(:disabled) {
+  background: #bbf7d0;
+}
+
+.btn-bot-toggle.bot-paused {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.btn-bot-toggle.bot-paused:hover:not(:disabled) {
+  background: #fde68a;
+}
+
 .lead-hint {
   margin: -4px 0 0;
   font-size: 0.75rem;
