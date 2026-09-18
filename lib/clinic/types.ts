@@ -157,7 +157,12 @@ export type AuditIntent =
   | "ficha"
   | "accion"
   | "qa"
-  | "qa_fallido";
+  | "qa_fallido"
+  // El Q&A respondió negando un servicio/examen o prometiendo una gestión: la
+  // respuesta se descartó y el paciente se derivó a un asesor. Se audita aparte
+  // de "qa_fallido" (error técnico) para poder contarlo: si sube, el prompt se
+  // desvió o falta cargar algo en el tarifario.
+  | "qa_vetado";
 
 export type LeadStatus = "pending" | "attended" | "withdrawn";
 

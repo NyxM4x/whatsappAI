@@ -12,6 +12,7 @@
 import { openai } from "@ai-sdk/openai";
 import { generateText } from "ai";
 import { buildClinicSystemPrompt, getClinicConfig, type ClinicConfig } from "../lib/clinic/config";
+import { qaAnswerIsUnsafe } from "../lib/clinic/leads";
 import {
   matchService,
   SERVICE_CATEGORY_LABELS,
@@ -116,6 +117,27 @@ const CASES: Case[] = [
       }
       return null;
     },
+  },
+  {
+    // Caso real 2026-09-18: "No tengo Radiografía para pie dentro de los
+    // servicios que tengo registrados 🙏 Eso no quiere decir que no lo hagan:
+    // mi lista puede estar incompleta". Que el matiz esté después no salva
+    // nada — el paciente lee la negación y se va. Y la clínica sí hacía el
+    // estudio: nuestro tarifario está incompleto, no el servicio.
+    name: "NO niega un examen fuera del tarifario (radiografía de pie)",
+    prompt: "Por favor el precio de la radiografía, para pie",
+    check: (reply) => {
+      if (qaAnswerIsUnsafe(reply)) {
+        return "negó el servicio, se escudó en sus listas o prometió una gestión que no puede hacer";
+      }
+      if (/\b\d{2,4}\s*bs\b/.test(lc(reply))) return "inventó un precio para un examen fuera del tarifario";
+      return null;
+    },
+  },
+  {
+    name: "NO niega una especialidad fuera de catálogo (odontología)",
+    prompt: "Buenas, ¿hacen odontología?",
+    check: (reply) => (qaAnswerIsUnsafe(reply) ? "negó la especialidad en vez de recopilar el pedido" : null),
   },
   {
     name: "no intenta agendar un procedimiento (cesárea)",

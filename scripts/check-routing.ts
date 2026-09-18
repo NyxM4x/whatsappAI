@@ -74,6 +74,41 @@ const CASES: Case[] = [
     expect: { type: "startLead", kind: "no_disponible" },
   },
 
+  // ── Caso real 2026-09-18: el analisis se cae y el mensaje no puede llegar
+  // al Q&A libre, que es donde el bot se pone a opinar sobre disponibilidad.
+  // Sin analysis no hay criterio del modelo, pero "radiografia" no esta en
+  // ningun catalogo y eso se sabe comparando strings.
+  {
+    name: "sin análisis (timeout) + examen no catalogado → toma el pedido, no Q&A",
+    text: "Por favor el precio de la Radiografía",
+    analysis: null,
+    expect: { type: "offerLead", intent: "no_disponible" },
+  },
+  {
+    name: "sin análisis + rayos x → toma el pedido",
+    text: "necesitan orden para los rayos x?",
+    analysis: null,
+    expect: { type: "offerLead", intent: "no_disponible" },
+  },
+  {
+    name: "sin análisis + servicio DEL tarifario → gana el tarifario, se cotiza",
+    text: "cuanto cuesta la ecografia abdominal",
+    analysis: null,
+    expect: { type: "startLead", kind: "servicio" },
+  },
+  {
+    name: "sin análisis + pregunta común → sigue yendo al Q&A",
+    text: "a que hora abren?",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "CON análisis manda el modelo: pregunta por no catalogado sigue siendo oferta",
+    text: "Por favor el precio de la Radiografía",
+    analysis: analysis({ unavailableRequest: "Radiografía", isQuestion: true }),
+    expect: { type: "offerLead", intent: "no_disponible" },
+  },
+
   // ── Oferta pendiente: no es una recolección aceptada ────────────────
   // El bot ofreció consultar un electrocardiograma. Lo que diga ahora el
   // paciente decide: aceptar sigue, rechazar cierra, y cualquier otra cosa

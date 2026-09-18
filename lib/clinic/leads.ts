@@ -36,7 +36,12 @@ import {
   localNow,
   quoteConsultation,
 } from "@/lib/clinic/pricing";
-import { formatServicePrice, matchService, type ServiceItem } from "@/lib/clinic/services";
+import {
+  formatServicePrice,
+  matchService,
+  mentionsOffCatalogRequest,
+  type ServiceItem,
+} from "@/lib/clinic/services";
 import {
   createLead,
   findRecentPendingLead,
@@ -203,6 +208,16 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): Turn
   // que un servicio real (con precio conocido) se tratara como "a confirmar".
   if (unavailableRequest && matchService(unavailableRequest, services)) unavailableRequest = null;
 
+  // Refuerzo por código del caso inverso: el modelo NO lo marcó y sí correspondía.
+  // Pasó con "cuanto está el electrocardiograma" y con "el precio de la
+  // radiografía… para pie": el análisis volvió limpio, el mensaje cayó en el Q&A
+  // general y el modelo libre contestó negando. Si el texto nombra algo que no
+  // está en NINGÚN catálogo nuestro (ni servicio ni especialidad), se marca acá
+  // y el webhook lo manda a recopilar datos en vez de dejar que alguien opine.
+  if (!unavailableRequest && !fromText && !matchService(text, services) && mentionsOffCatalogRequest(text)) {
+    unavailableRequest = cleanText(text, 80);
+  }
+
   const fromModel = findSpecialty(raw?.specialtyKey)?.key ?? null;
   // Con una especialidad nombrada en el texto, esa manda: es un hecho, no una
   // inferencia. Si no hay, vale la del modelo (que ahí sí está infiriendo desde
@@ -294,9 +309,49 @@ export async function analyzeTurn(
   }
 }
 
+// ─── Veto de negaciones ──────────────────────────────────────────────────────
+// El Q&A es texto libre de un modelo: el prompt le prohíbe negar, pero un
+// prompt es una instrucción, no una garantía. Esta es la garantía.
+//
+// Caso real 2026-09-18: preguntaron el precio de una radiografía de pie y el bot
+// contestó "No tengo Radiografía para pie dentro de los servicios que tengo
+// registrados 🙏 Eso no quiere decir que no lo hagan: mi lista puede estar
+// incompleta". El matiz no sirve de nada — el paciente lee la primera línea y se
+// va. Lo mismo había pasado con el electrocardiograma, que la clínica SÍ ofrece.
+//
+// Nuestros catálogos están incompletos por definición (el tarifario nunca llega
+// entero), así que el bot no está en posición de negar nada: si la respuesta
+// niega o se escuda en sus listas, no se envía.
+const NEGATION_PATTERN =
+  /\bno\s+(?:se\s+)?(?:l[oa]s?\s+|le\s+)?(?:tengo|tenemos|ten[eé]s|contamos|cuenta|dispongo|disponemos|ofrecemos|ofrece|brindamos|brinda|realizamos|realiza|hacemos|hace|manejamos|maneja|prestamos|trabajamos|figur\w+|aparec\w+|est[aá]\s+(?:disponible|registrad\w+|en\s+(?:mi|el|la|nuestr\w+)))\b/i;
+
+// Escudarse en el catálogo propio ("dentro de los servicios que tengo
+// registrados", "en mi lista"). Es la misma negación con otra ropa, y encima le
+// cuenta al paciente cómo funciona el bot por dentro.
+const SELF_CATALOG_PATTERN =
+  /\b(?:mi|mis|nuestr[oa]s?|l[oa]s)\s+(?:lista|listas|cat[aá]logo|cat[aá]logos|registros?|servicios\s+registrados)\b|\bque\s+tengo\s+registrad\w+|\bdentro\s+de\s+l[oa]s\s+servicios\s+que\s+tengo\b/i;
+
+// Prometer una gestión que el bot no puede hacer ("¿quiere que le consulte con
+// el equipo?"). El paciente queda esperando una respuesta que nadie le va a dar,
+// porque nadie se enteró: el Q&A no deja alarma en el panel.
+const FAKE_ERRAND_PATTERN =
+  /\b(?:le\s+)?(?:consulto|consultamos|averiguo|averiguamos|pregunto|preguntamos|verifico|verificamos)\b|\bquiere\s+que\s+(?:le\s+)?(?:consulte|pregunte|averig[uü]e|verifique)\b|\b(?:d[eé]jeme|perm[ií]tame|voy\s+a|puedo)\s+(?:consultar|averiguar|preguntar|verificar|revisar|confirmarle)\b/i;
+
+// Lo que el Q&A nunca debe poder decirle a un paciente. Se evalúa sobre la
+// respuesta generada, no sobre lo que pidió el paciente.
+export function qaAnswerIsUnsafe(answer: string): boolean {
+  return NEGATION_PATTERN.test(answer) || SELF_CATALOG_PATTERN.test(answer) || FAKE_ERRAND_PATTERN.test(answer);
+}
+
+export type QaAnswer =
+  // "unsafe": el modelo respondió algo que no se le puede mandar al paciente.
+  // No es un error técnico — el llamador tiene que resolverlo de otra forma
+  // (recopilar los datos o derivar), nunca reenviando el texto.
+  { status: "ok"; text: string } | { status: "unsafe" } | { status: "failed" };
+
 // Respuesta libre con el prompt de la clínica (dudas en medio de la solicitud o
-// Q&A general). null si el modelo falla.
-export async function answerQuestion(ctx: LeadContext, text: string): Promise<string | null> {
+// Q&A general).
+export async function answerQuestion(ctx: LeadContext, text: string): Promise<QaAnswer> {
   try {
     const history = await getRecentConversationHistory(ctx.conversationId, 8);
     const { text: answer } = await generateText({
@@ -309,7 +364,24 @@ export async function answerQuestion(ctx: LeadContext, text: string): Promise<st
       temperature: 0.35,
       abortSignal: AbortSignal.timeout(15000),
     });
-    return answer.trim() || null;
+    const clean = answer.trim();
+    if (!clean) return { status: "failed" };
+
+    if (qaAnswerIsUnsafe(clean)) {
+      // Queda registrado en el panel: si esto empieza a saltar seguido, el
+      // prompt se corrigió mal o falta algo en el tarifario.
+      await logSystemEvent({
+        level: "warning",
+        eventType: "qa_answer_vetoed",
+        business: ctx.clinic.slug,
+        conversationId: ctx.conversationId,
+        contactPhone: ctx.contactPhone,
+        errorMessage: `Respuesta descartada por negar o prometer una gestión: "${clean.slice(0, 300)}"`,
+      });
+      return { status: "unsafe" };
+    }
+
+    return { status: "ok", text: clean };
   } catch (err) {
     console.error("answerQuestion failed", err);
     await logSystemEvent({
@@ -320,7 +392,7 @@ export async function answerQuestion(ctx: LeadContext, text: string): Promise<st
       contactPhone: ctx.contactPhone,
       errorMessage: getErrorMessage(err),
     });
-    return null;
+    return { status: "failed" };
   }
 }
 
@@ -675,8 +747,11 @@ export async function continueLead(
 
     const confirmQuestion = "¿Los datos de su resumen están correctos? Respóndame *sí* o dígame qué dato corregir 😊";
     if (analysis?.isQuestion) {
+      // Si la respuesta se descartó (negaba algo o prometía una gestión) se
+      // sigue igual con la confirmación: el asesor ya tiene la solicitud y le
+      // resuelve la duda. Nunca se le manda al paciente el texto vetado.
       const answer = await answerQuestion(ctx, ctx.text);
-      return { reply: answer ? `${answer}\n\n_${confirmQuestion}_` : confirmQuestion, pauseAfterReply: false };
+      return { reply: answer.status === "ok" ? `${answer.text}\n\n_${confirmQuestion}_` : confirmQuestion, pauseAfterReply: false };
     }
     return { reply: confirmQuestion, pauseAfterReply: false };
   }
@@ -684,7 +759,10 @@ export async function continueLead(
   // collecting_lead
   let intro: string | undefined;
   if (changed) intro = "¡Gracias! 😊";
-  else if (analysis?.isQuestion) intro = (await answerQuestion(ctx, ctx.text)) ?? undefined;
+  else if (analysis?.isQuestion) {
+    const answer = await answerQuestion(ctx, ctx.text);
+    intro = answer.status === "ok" ? answer.text : undefined;
+  }
   return askOrSummarize(ctx, draft, intro);
 }
 

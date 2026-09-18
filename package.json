@@ -11,7 +11,8 @@
     "prompt:check": "tsx scripts/prompt-check.ts",
     "check:intenciones": "tsx scripts/check-intenciones.ts",
     "check:analisis": "tsx scripts/check-analisis.ts",
-    "check:routing": "tsx scripts/check-routing.ts"
+    "check:routing": "tsx scripts/check-routing.ts",
+    "check:negaciones": "tsx scripts/check-negaciones.ts"
   },
   "keywords": [],
   "author": "",

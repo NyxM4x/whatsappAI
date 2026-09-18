@@ -210,3 +210,57 @@ export function matchService(text: string, services: ServiceItem[]): ServiceItem
 
   return best;
 }
+
+// ─── Pedidos que HOY no están en ningún catálogo nuestro ─────────────────────
+// Estudios de imagen, estudios funcionales y terapias que los pacientes piden
+// por su nombre y que no figuran ni en defaultServices ni en las especialidades
+// de consulta. NO es una lista de "lo que no hacemos" — es exactamente lo
+// contrario: es la lista de lo que NO SABEMOS, para que el bot nunca improvise
+// una respuesta sobre ella.
+//
+// Existe porque depender del criterio del modelo falló dos veces en producción:
+// "electrocardiograma" (2026-09-17) y "radiografía de pie" (2026-09-18), las dos
+// contestadas con una negación que la clínica tuvo que desmentir. Reconocer un
+// nombre contra una lista cerrada es comparación de strings, no criterio.
+//
+// SIEMPRE se consulta después de matchService() y matchSpecialtyText(): si el
+// término llega a cargarse al catálogo, esos ganan y esta lista deja de verlo
+// sola, sin tener que editarla.
+const OFF_CATALOG_TERMS = [
+  // Imagen
+  "radiografia", "radiografias", "rayos x", "rayosx", "placa radiografica", "placas radiograficas",
+  "tomografia", "resonancia", "resonancia magnetica", "mamografia", "densitometria",
+  // Estudios funcionales
+  "electrocardiograma", "ecocardiograma", "electroencefalograma", "endoscopia",
+  "colonoscopia", "espirometria", "holter", "audiometria", "prueba de esfuerzo",
+  // Terapias y atenciones fuera del plantel cargado
+  "fisioterapia", "fisioterapeuta", "kinesiologia", "kinesiologo", "rehabilitacion",
+  "odontologia", "odontologo", "dentista", "oftalmologia", "oftalmologo", "optometria",
+  "psicologia", "psicologo", "psiquiatria", "psiquiatra", "nutricion", "nutricionista",
+  "fonoaudiologia", "terapia de lenguaje",
+];
+
+// Devuelve el término reconocido (normalizado, el match más largo) o null. El
+// llamador lo usa solo como señal: el texto que se le guarda al asesor es el
+// del paciente, no este.
+export function matchOffCatalogRequest(text: string): string | null {
+  const haystack = normalize(text);
+  if (!haystack) return null;
+
+  let best: string | null = null;
+  for (const term of OFF_CATALOG_TERMS) {
+    const candidate = normalize(term);
+    const matches =
+      candidate.length <= 4
+        ? new RegExp(`(^|[^a-z0-9])${candidate}([^a-z0-9]|$)`).test(haystack)
+        : haystack.includes(candidate);
+    if (matches && (!best || candidate.length > best.length)) best = candidate;
+  }
+  return best;
+}
+
+// "rx" va aparte: dos letras dentro de una lista por substring daría falsos
+// positivos en cualquier palabra. Como palabra suelta sí es inequívoco.
+export function mentionsOffCatalogRequest(text: string): boolean {
+  return matchOffCatalogRequest(text) !== null || /(^|[^a-z0-9])rx([^a-z0-9]|$)/i.test(text);
+}

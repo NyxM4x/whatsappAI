@@ -547,8 +547,16 @@ export async function POST(request: Request) {
       // Si el modelo no responde no dejamos al paciente sin salida: se deriva de
       // verdad, con alarma en el panel.
       const answer = await answerQuestion(leadCtx, newText);
-      if (!answer) return escalate("humano", LEAD_REPLIES.technicalError, "qa_fallido");
-      await send(answer);
+      if (answer.status === "failed") return escalate("humano", LEAD_REPLIES.technicalError, "qa_fallido");
+
+      // El modelo respondió negando un servicio, escudándose en nuestros
+      // catálogos o prometiendo una gestión que no puede hacer. Ese texto no
+      // sale de acá: el tarifario está incompleto, así que el bot no está en
+      // posición de negar nada. Se deriva de verdad, con alarma en el panel,
+      // para que un asesor confirme lo que el bot no sabe.
+      if (answer.status === "unsafe") return escalate("humano", LEAD_REPLIES.toAdvisor, "qa_vetado");
+
+      await send(answer.text);
       return ok(action.intent);
     }
   }

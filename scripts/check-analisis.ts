@@ -66,6 +66,17 @@ const CASES: Expectation[] = [
   { text: "cuanto está el electrocardiograma", unavailable: true, specialtyKey: null },
   { text: "hacen electrocardiograma?", unavailable: true, specialtyKey: null },
 
+  // ── Caso real 2026-09-18: radiografía ────────────────────────────────────
+  // Volvió a pasar, esta vez con "Por favor el precio de la Radiografía / Para
+  // pie". El análisis dejó el mensaje limpio, cayó en el Q&A general y el
+  // modelo contestó "No tengo Radiografía para pie dentro de los servicios que
+  // tengo registrados". Desde este caso, mentionsOffCatalogRequest() marca
+  // unavailableRequest por código aunque el modelo no lo haga: no depende de
+  // que el modelo tenga criterio.
+  { text: "Por favor el precio de la Radiografía", unavailable: true, specialtyKey: null },
+  { text: "radiografia de pie cuanto sale", unavailable: true, specialtyKey: null },
+  { text: "necesito una tomografia, cuanto cuesta?", unavailable: true, specialtyKey: null },
+
   // ── Gestiones que solo hace una persona (antes contestaba "Ok") ───────────
   { text: "Por favor doctora me lo dice a la licen para las 5:10 llegó", needsAction: true },
   { text: "Me confirma", needsAction: true },

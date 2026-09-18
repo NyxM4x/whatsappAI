@@ -16,7 +16,7 @@
 // ============================================================================
 
 import type { ClinicConfig } from "@/lib/clinic/config";
-import { matchService, type ServiceItem } from "@/lib/clinic/services";
+import { matchService, mentionsOffCatalogRequest, type ServiceItem } from "@/lib/clinic/services";
 import type { TurnAnalysis } from "@/lib/clinic/leads";
 import type { AuditIntent, BookingStep, LeadDraft, LeadKind } from "@/lib/clinic/types";
 
@@ -29,7 +29,9 @@ export type Action =
   | { type: "escalate"; kind: LeadKind; reply: string; intent: AuditIntent }
   // Abrir una solicitud nueva y pedir lo que falte.
   | { type: "startLead"; kind: LeadDraft["kind"]; service?: ServiceItem | null; intent: AuditIntent }
-  // Ofrecer gestionar algo que no está en catálogo, SIN pedir datos todavía.
+  // Tomar el pedido de algo que no está en catálogo. El paciente ve una
+  // solicitud normal (se le piden los datos); por dentro queda como oferta, así
+  // que si contesta otra cosa el mensaje se re-decide en vez de consumirse.
   | { type: "offerLead"; request: string; intent: AuditIntent }
   // El paciente rechazó la oferta: se descarta y la conversación vuelve a cero.
   | { type: "cancelOffer"; intent: AuditIntent }
@@ -86,13 +88,29 @@ function rejectsOffer(text: string, a: TurnAnalysis | null): boolean {
 }
 
 // El paciente nombró algo que no está en ningún catálogo nuestro, y está
-// PREGUNTANDO, no pidiéndolo. Se le dice lo que sabemos —que no lo tenemos
-// registrado, no que la clínica no lo haga— y se le ofrece averiguarlo.
+// PREGUNTANDO, no pidiéndolo.
+//
+// Acá NO se niega nada. La versión anterior abría con "No tengo X dentro de los
+// servicios que tengo registrados" y recién después aclaraba que la lista podía
+// estar incompleta: el paciente lee la primera línea y se va (caso real
+// 2026-09-18, radiografía de pie — la clínica sí la hacía). El matiz no salva la
+// negación, y contarle al paciente cómo estamos de catálogos no le sirve de
+// nada. Nuestro tarifario está incompleto por definición: lo que no sabemos no
+// se niega, se pregunta a un asesor.
+//
+// Tampoco se ofrece "consultarlo con el equipo": eso suena a una gestión que el
+// bot haría solo, y lo único que hace es tomar el pedido. Se piden los datos
+// directamente, como en cualquier otra solicitud.
+//
+// La mecánica de oferta sigue igual por debajo (offerPending): si el paciente
+// contesta otra cosa en vez de los datos, el mensaje se re-decide desde cero en
+// lugar de consumirse. Dar los datos ya cuenta como aceptar (ver acceptsOffer).
 export function unlistedAnswer(request: string): string {
   return (
-    `No tengo *${request}* dentro de los servicios que tengo registrados 🙏 ` +
-    `Eso no quiere decir que no lo hagan: mi lista puede estar incompleta.\n\n` +
-    `¿Quiere que le consulte con el equipo de la clínica para que le confirmen si lo realizan y el precio?`
+    `¡Con gusto le ayudo con *${request}*! 😊 El precio y el horario se los confirma ` +
+    `un asesor de la clínica por aquí mismo.\n\n` +
+    `¿Me dice el *nombre completo del paciente* y qué *día y hora* le quedarían cómodos? ` +
+    `Así le paso su pedido 🙏`
   );
 }
 
@@ -208,6 +226,21 @@ export function decideAction(input: RoutingInput): Action {
     return wantsToRequest(analysis)
       ? { type: "startLead", kind: "no_disponible", intent: "no_disponible" }
       : { type: "offerLead", request: analysis.unavailableRequest, intent: "no_disponible" };
+  }
+
+  // Misma rama, pero sin el modelo. Si analyzeTurn no devolvió nada (timeout,
+  // JSON roto, OpenAI caído) y el texto nombra algo que no está en NINGÚN
+  // catálogo nuestro, el mensaje no puede seguir de largo hasta el Q&A libre:
+  // ahí es donde el bot se pone a opinar sobre disponibilidad. Reconocer estos
+  // nombres es comparación de strings, no criterio — no hace falta un modelo
+  // para saber que "radiografía" no está en el tarifario.
+  //
+  // Va DESPUÉS de la rama con análisis y ANTES del tarifario, y solo cuando no
+  // hay análisis: con el modelo respondiendo manda él, que distingue preguntar
+  // de pedir. Si el término se carga algún día al catálogo, matchService lo
+  // atrapa en la rama 9 y esto deja de verlo solo.
+  if (!analysis && !matchService(text, clinic.services) && mentionsOffCatalogRequest(text)) {
+    return { type: "offerLead", request: text.slice(0, 80), intent: "no_disponible" };
   }
 
   // ── 9. Servicio del tarifario ─────────────────────────────────────────────
