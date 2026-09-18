@@ -265,6 +265,19 @@ export function invalidateClinicConfigCache(business?: string) {
   else configCache.clear();
 }
 
+// Un texto de la base que esté vacío o en blanco vale lo mismo que no estar:
+// `??` solo cubre null/undefined, así que un "" guardado por error dejaba al
+// bot mandando un mensaje sin cuerpo. Ante cualquier duda, el texto del código.
+function textOr(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+// Alias exportado solo para las pruebas: deja verificar los fallbacks de la
+// fila de clinic_settings sin tener que levantar Supabase.
+export function mapClinicSettingsRowForTest(row: any): ClinicConfig {
+  return mapClinicSettingsRow(row);
+}
+
 function mapClinicSettingsRow(row: any): ClinicConfig {
   const replies = row.replies ?? {};
   return {
@@ -298,10 +311,10 @@ function mapClinicSettingsRow(row: any): ClinicConfig {
     emergencyResponse: row.emergency_response ?? defaultClinicConfig.emergencyResponse,
     systemPromptBase: row.system_prompt_base ?? defaultClinicConfig.systemPromptBase,
     replies: {
-      welcome: replies.welcome ?? defaultClinicConfig.replies.welcome,
-      proofButNoBooking: replies.proofButNoBooking ?? defaultClinicConfig.replies.proofButNoBooking,
-      noActiveAppointment: replies.noActiveAppointment ?? defaultClinicConfig.replies.noActiveAppointment,
-      humanHandoff: replies.humanHandoff ?? defaultClinicConfig.replies.humanHandoff,
+      welcome: textOr(replies.welcome, defaultClinicConfig.replies.welcome),
+      proofButNoBooking: textOr(replies.proofButNoBooking, defaultClinicConfig.replies.proofButNoBooking),
+      noActiveAppointment: textOr(replies.noActiveAppointment, defaultClinicConfig.replies.noActiveAppointment),
+      humanHandoff: textOr(replies.humanHandoff, defaultClinicConfig.replies.humanHandoff),
     },
   };
 }

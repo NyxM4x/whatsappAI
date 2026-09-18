@@ -31,6 +31,8 @@ export type Action =
   | { type: "startLead"; kind: LeadDraft["kind"]; service?: ServiceItem | null; intent: AuditIntent }
   // Ofrecer gestionar algo que no está en catálogo, SIN pedir datos todavía.
   | { type: "offerLead"; request: string; intent: AuditIntent }
+  // El paciente rechazó la oferta: se descarta y la conversación vuelve a cero.
+  | { type: "cancelOffer"; intent: AuditIntent }
   // Seguir una solicitud ya empezada.
   | { type: "continueLead"; intent: AuditIntent }
   // Q&A libre con el prompt de la clínica.
@@ -43,11 +45,45 @@ export type RoutingInput = {
   // null si el modelo falló o si no había texto que analizar.
   analysis: TurnAnalysis | null;
   step: BookingStep;
+  // Qué ofreció consultar el bot y el paciente todavía no aceptó. null = no hay
+  // oferta pendiente. Se guarda el TEXTO y no un booleano porque hace falta
+  // saber si el mensaje siguiente insiste con lo mismo o trae otra cosa.
+  pendingOffer?: string | null;
   // Resultado de registrar adjuntos, ya calculado por el webhook.
   proof: "receipt" | "unverified" | null;
   emergencyDetectionEnabled: boolean;
   greetingOnly: boolean;
 };
+
+// Respuestas a una pregunta cerrada. Se resuelven con patrones y no con el
+// modelo a propósito: el análisis no distingue "No" de un mensaje neutral
+// —devuelve wantsOut:false para los dos— porque sin saber que hubo una oferta,
+// un "No" suelto no significa "ya no quiero la solicitud". En el contexto de
+// una pregunta de sí/no, en cambio, reconocerlo es determinista.
+const AFFIRMATIVE = /^\s*(?:s[ií]|sip+|claro|dale|ya|bueno|ok(?:ay)?|por ?favor|de una|obvio|as[ií] es|est[aá] bien|me parece|dele|dal[eé])\b/i;
+const NEGATIVE = /^\s*(?:no|nop+|nel|negativo|mejor no|ya no|d[eé]j[eaá]lo|olv[ií]delo|gracias no|nada m[aá]s|as[ií] nom[aá]s)\b/i;
+
+// Aceptó la oferta: lo dijo, o directamente pasó a dar los datos.
+function acceptsOffer(text: string, a: TurnAnalysis | null): boolean {
+  if (a?.confirms) return true;
+  if (a?.patientName || a?.preferredTime) return true;
+  return AFFIRMATIVE.test(text);
+}
+
+// ¿Es el mismo pedido que ya se ofreció? Comparación laxa: el modelo no
+// siempre repite el texto igual ("electrocardiograma" / "un electrocardiograma").
+function sameRequest(a: string, b: string): boolean {
+  const norm = (t: string) =>
+    t.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  const x = norm(a);
+  const y = norm(b);
+  return Boolean(x && y && (x.includes(y) || y.includes(x)));
+}
+
+function rejectsOffer(text: string, a: TurnAnalysis | null): boolean {
+  if (a?.wantsOut) return true;
+  return NEGATIVE.test(text);
+}
 
 // El paciente nombró algo que no está en ningún catálogo nuestro, y está
 // PREGUNTANDO, no pidiéndolo. Se le dice lo que sabemos —que no lo tenemos
@@ -110,6 +146,34 @@ export function decideAction(input: RoutingInput): Action {
     if (analysis?.wantsHuman) {
       return { type: "escalate", kind: "humano", reply: clinic.replies.humanHandoff, intent: "handoff_humano" };
     }
+
+    // Una OFERTA pendiente no es una solicitud aceptada. El paciente solo
+    // preguntó si teníamos algo; que el bot se haya ofrecido a averiguarlo no
+    // lo obliga a seguir por ahí.
+    if (input.pendingOffer) {
+      if (acceptsOffer(text, analysis)) return { type: "continueLead", intent: "solicitud_en_curso" };
+      if (rejectsOffer(text, analysis)) return { type: "cancelOffer", intent: "no_disponible" };
+
+      // Ni aceptó ni rechazó: cambió de tema, saludó o preguntó otra cosa. La
+      // oferta se descarta y este mismo mensaje se decide desde cero, como si
+      // no hubiera nada en curso. Así "¿Qué horarios tienen?" se responde en
+      // vez de consumirse como un dato de la solicitud.
+      //
+      // Con una salvedad: el análisis recibe el draft como contexto, así que
+      // sigue devolviendo el pedido anterior aunque el mensaje nuevo no lo
+      // mencione. Sin limpiarlo, el bot volvería a ofrecer lo mismo una y otra
+      // vez. Se descarta solo si es EL MISMO pedido; si nombró otra cosa fuera
+      // de catálogo, esa sí es nueva y se atiende.
+      const repiteLoMismo =
+        analysis?.unavailableRequest && sameRequest(analysis.unavailableRequest, input.pendingOffer);
+      return decideAction({
+        ...input,
+        step: "idle",
+        pendingOffer: null,
+        analysis: repiteLoMismo ? { ...analysis!, unavailableRequest: null } : analysis,
+      });
+    }
+
     return { type: "continueLead", intent: "solicitud_en_curso" };
   }
 

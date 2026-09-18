@@ -178,6 +178,11 @@ export type LeadDraft = {
   // nunca afirma ni niega disponibilidad — junta el dato igual y el asesor
   // confirma.
   unmatchedRequestText?: string | null;
+  // true mientras el bot ofreció consultar algo fuera de catálogo y el
+  // paciente todavía no dijo que sí. Es una oferta, no una recolección
+  // aceptada: si el siguiente mensaje no es una aceptación, la oferta se
+  // descarta y el mensaje se rutea desde cero (ver decideAction).
+  offerPending?: boolean;
   doctorPreference?: string | null; // tal como lo escribió el paciente
   preferredTime?: string | null;    // "mañana a las 10"
   preferredDate?: string | null;    // YYYY-MM-DD, si se pudo resolver

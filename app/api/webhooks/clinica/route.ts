@@ -55,6 +55,7 @@ import { decideAction } from "@/lib/clinic/routing";
 import {
   analyzeTurn,
   answerQuestion,
+  cancelOffer,
   continueLead,
   isLeadStep,
   LEAD_REPLIES,
@@ -481,17 +482,28 @@ export async function POST(request: Request) {
   // ── Decisión ──────────────────────────────────────────────────────────────
   // Función pura (lib/clinic/routing.ts): no toca base de datos ni red. Todo lo
   // que sigue es ejecución.
+  const pendingOffer = session.draft.lead?.offerPending
+    ? session.draft.lead.unmatchedRequestText ?? null
+    : null;
   const action = decideAction({
     clinic,
     text: newText,
     analysis,
     step: session.step,
+    pendingOffer,
     proof,
     emergencyDetectionEnabled: process.env.CLINIC_EMERGENCY_DETECTION === "true",
     greetingOnly: Boolean(newText) && GREETING_ONLY_PATTERN.test(newText),
   });
 
-  // ── Ejecución ─────────────────────────────────────────────────────────────
+  // ── Ejecución ───────────────────────────────────────────────────
+  // Había una oferta pendiente y el paciente cambió de tema: decideAction ya
+  // decidió el mensaje como si no hubiera nada en curso, así que la sesión se
+  // limpia antes de ejecutar para que la oferta no quede colgada.
+  if (pendingOffer && action.type !== "continueLead" && action.type !== "cancelOffer") {
+    await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {} });
+  }
+
   switch (action.type) {
     case "reply": {
       await send(action.text);
@@ -503,6 +515,12 @@ export async function POST(request: Request) {
 
     case "continueLead": {
       const result = await continueLead({ ...leadCtx, session: tracked.session, analysis, text: newText });
+      await send(result.reply, { pauseAfter: result.pauseAfterReply });
+      return ok(action.intent);
+    }
+
+    case "cancelOffer": {
+      const result = await cancelOffer({ ...leadCtx, session: tracked.session });
       await send(result.reply, { pauseAfter: result.pauseAfterReply });
       return ok(action.intent);
     }

@@ -22,9 +22,10 @@ if (existsSync(".env.local")) {
 
 const { getClinicConfig } = await import("../lib/clinic/config");
 const { decideAction } = await import("../lib/clinic/routing");
+const { looksLikeName, needsVisitType } = await import("../lib/clinic/leads");
 
 import type { TurnAnalysis } from "../lib/clinic/leads";
-import type { BookingStep } from "../lib/clinic/types";
+import type { BookingStep, LeadDraft } from "../lib/clinic/types";
 
 const clinic = await getClinicConfig();
 
@@ -47,6 +48,7 @@ type Case = {
   step?: BookingStep;
   proof?: "receipt" | "unverified" | null;
   greetingOnly?: boolean;
+  pendingOffer?: string | null;
   // Qué se espera de la Action resultante.
   expect: { type: string; kind?: string; intent?: string };
 };
@@ -70,6 +72,81 @@ const CASES: Case[] = [
     text: "para fisioterapia",
     analysis: analysis({ unavailableRequest: "fisioterapia", isQuestion: false, wantsLead: false }),
     expect: { type: "startLead", kind: "no_disponible" },
+  },
+
+  // ── Oferta pendiente: no es una recolección aceptada ────────────────
+  // El bot ofreció consultar un electrocardiograma. Lo que diga ahora el
+  // paciente decide: aceptar sigue, rechazar cierra, y cualquier otra cosa
+  // descarta la oferta y se atiende como un mensaje nuevo.
+  {
+    name: "oferta → sí → sigue la recolección",
+    text: "Sí",
+    analysis: analysis({ unavailableRequest: "electrocardiograma", confirms: true }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta → sí (sin confirms del modelo) → sigue igual",
+    text: "ya pues, dale",
+    analysis: analysis({ unavailableRequest: "electrocardiograma" }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta → da los datos directamente → sigue",
+    text: "Juan Pérez, mañana a las 10",
+    analysis: analysis({ patientName: "Juan Pérez", preferredTime: "mañana a las 10" }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta → no → cancela (el modelo da wantsOut=false)",
+    text: "No",
+    analysis: analysis({ unavailableRequest: "electrocardiograma", wantsOut: false, confirms: false }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "cancelOffer", intent: "no_disponible" },
+  },
+  {
+    name: "oferta → no gracias → cancela",
+    text: "no gracias, era solo para saber",
+    analysis: analysis({ unavailableRequest: "electrocardiograma", isQuestion: true, wantsOut: false }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "cancelOffer" },
+  },
+  {
+    name: "oferta → pregunta distinta → se responde, NO se toma como dato",
+    text: "¿Qué horarios tienen?",
+    analysis: analysis({ unavailableRequest: "electrocardiograma", isQuestion: true }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "qa", intent: "qa" },
+  },
+  {
+    name: "oferta → pregunta por pediatría → no pisa la solicitud en silencio",
+    text: "También quería preguntar si tienen pediatría",
+    analysis: analysis({ specialtyKey: "pediatria", isQuestion: true }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "qa" },
+  },
+  {
+    name: "oferta → saludo → saluda, no pide datos",
+    text: "Hola",
+    analysis: analysis(),
+    step: "collecting_lead", pendingOffer: "electrocardiograma", greetingOnly: true,
+    expect: { type: "reply", intent: "saludo" },
+  },
+  {
+    name: "oferta → pide una persona → deriva",
+    text: "quiero hablar con alguien",
+    analysis: analysis({ wantsHuman: true }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "escalate", kind: "humano" },
+  },
+  {
+    name: "recolección ACEPTADA: un 'no' suelto NO la cancela (sigue el flujo)",
+    text: "No",
+    analysis: analysis(),
+    step: "collecting_lead",
+    expect: { type: "continueLead" },
   },
 
   // ── Flujo normal de ficha: no debe cambiar ────────────────────────────────
@@ -154,6 +231,30 @@ const CASES: Case[] = [
     expect: { type: "escalate", kind: "pago", intent: "pago" },
   },
 
+  // ── REGRESIÓN: el orden de las reglas protege de un falso positivo ─────
+  // Verificado contra el modelo: "Quiero sacar ficha con cardiología, soy Juan
+  // Pérez" devuelve needsHumanAction=true. No hace daño porque la rama de ficha
+  // va ANTES que la de gestión. Si alguien invierte ese orden, un pedido de
+  // ficha normal se convierte en derivación con pausa de 12 h.
+  {
+    name: "REGRESIÓN: ficha + needsHumanAction falso → gana la ficha",
+    text: "Quiero sacar ficha con cardiología, soy Juan Pérez",
+    analysis: analysis({ specialtyKey: "cardiologia", patientName: "Juan Pérez", wantsLead: true, needsHumanAction: true }),
+    expect: { type: "startLead", kind: "ficha" },
+  },
+  {
+    name: "REGRESIÓN: servicio + needsHumanAction falso → gana el servicio",
+    text: "quiero una ecografia abdominal, me confirma",
+    analysis: analysis({ wantsLead: true, needsHumanAction: true }),
+    expect: { type: "startLead", kind: "servicio" },
+  },
+  {
+    name: "REGRESIÓN: no catalogado + needsHumanAction → gana la solicitud",
+    text: "quiero un electrocardiograma",
+    analysis: analysis({ unavailableRequest: "electrocardiograma", wantsLead: true, needsHumanAction: true }),
+    expect: { type: "startLead", kind: "no_disponible" },
+  },
+
   // ── Red de seguridad y cajón de sastre ────────────────────────────────────
   {
     name: "pide una gestión → alarma, no 'Ok'",
@@ -204,6 +305,7 @@ for (const c of CASES) {
     text: c.text,
     analysis: c.analysis ?? null,
     step: c.step ?? "idle",
+    pendingOffer: c.pendingOffer ?? null,
     proof: c.proof ?? null,
     emergencyDetectionEnabled: false,
     greetingOnly: c.greetingOnly ?? false,
@@ -229,6 +331,105 @@ for (const c of CASES) {
   }
 }
 
+// ─── needsVisitType: nunca preguntar nueva/reconsulta sin especialidad ──────
+// El fallback era `true`, y como lo que no está en catálogo nunca tiene
+// specialtyKey, terminaba preguntándole a un electrocardiograma si era
+// "consulta nueva o reconsulta".
+console.log("\n¿PREGUNTA NUEVA/RECONSULTA?\n");
+
+const VISIT: [string, LeadDraft, boolean][] = [
+  ["electrocardiograma (no catalogado)", { kind: "no_disponible", unmatchedRequestText: "electrocardiograma" }, false],
+  ["radiografía (no catalogado)", { kind: "no_disponible", unmatchedRequestText: "radiografia de torax" }, false],
+  ["análisis de laboratorio suelto", { kind: "no_disponible", unmatchedRequestText: "analisis de sangre" }, false],
+  ["fisioterapia (no catalogado)", { kind: "no_disponible", unmatchedRequestText: "fisioterapia" }, false],
+  ["ficha sin especialidad todavía", { kind: "ficha" }, false],
+  ["servicio del tarifario", { kind: "servicio", serviceName: "Ecografía abdominal" }, false],
+  ["medicina general (reconsulta 7d)", { kind: "ficha", specialtyKey: "medicina-general" }, true],
+  ["pediatría (reconsulta 3d)", { kind: "ficha", specialtyKey: "pediatria" }, true],
+  ["ginecología (reconsulta 3d)", { kind: "ficha", specialtyKey: "ginecologia" }, true],
+  ["cardiología (sin reconsulta)", { kind: "ficha", specialtyKey: "cardiologia" }, false],
+  ["neurología (sin reconsulta)", { kind: "ficha", specialtyKey: "neurologia" }, false],
+];
+
+for (const [nombre, draft, esperado] of VISIT) {
+  const got = needsVisitType(draft);
+  if (got !== esperado) {
+    failures++;
+    console.log(`  ✗ ${nombre}`.padEnd(50) + `pregunta=${got} (esperado ${esperado})`);
+  } else {
+    console.log(`  ✓ ${nombre}`.padEnd(50) + (got ? "sí pregunta" : "no pregunta"));
+  }
+}
+
+// ─── looksLikeName: "pa mi" no es un nombre ─────────────────────────────────
+// Contestan PARA QUIÉN es, no cómo se llaman. Ante la duda, null: un nombre
+// faltante se pregunta; uno inventado llega al panel y el asesor llama a "pa mi".
+console.log("\n¿ES UN NOMBRE?\n");
+
+const NOMBRES: [string, boolean][] = [
+  ["pa mi", false],
+  ["para mi", false],
+  ["para mí", false],
+  ["para mi mamá", false],
+  ["para mi hijo", false],
+  ["para mi esposa", false],
+  ["para mi señor", false],
+  ["es para mí", false],
+  ["yo mismo", false],
+  ["yo misma", false],
+  ["yo nomás", false],
+  ["yo", false],
+  ["mi hijo", false],
+  ["mi señora", false],
+  ["Juan Pérez", true],
+  ["María López", true],
+  ["Carlos Rojas", true],
+  ["Ana Fernández", true],
+  ["Juan", true],
+  ["María José Gutiérrez Vargas", true],
+];
+
+for (const [texto, esperado] of NOMBRES) {
+  const got = looksLikeName(texto);
+  if (got !== esperado) {
+    failures++;
+    console.log(`  ✗ "${texto}"`.padEnd(42) + `looksLikeName=${got} (esperado ${esperado})`);
+  } else {
+    console.log(`  ✓ "${texto}"`.padEnd(42) + (got ? "nombre" : "descartado"));
+  }
+}
+
+// ─── Saludo: la base nunca deja al bot sin texto ────────────────────────────
+// `??` solo cubre null/undefined, así que un "" guardado por error dejaba al
+// bot enviando un cuerpo vacío. Ahora cualquier texto en blanco cae al default.
+console.log("\n¿EL SALUDO SIEMPRE TIENE TEXTO?\n");
+
+const { mapClinicSettingsRowForTest } = await import("../lib/clinic/config");
+const SALUDOS: [string, unknown][] = [
+  ["null", null],
+  ["undefined", undefined],
+  ["vacío", ""],
+  ["solo espacios", "   "],
+  ["salto de línea", "\n\t "],
+  ["ausente (config antigua)", Symbol.for("ausente")],
+];
+
+for (const [nombre, valor] of SALUDOS) {
+  const replies = valor === Symbol.for("ausente") ? {} : { welcome: valor };
+  const cfg = mapClinicSettingsRowForTest({ business: "clinica-san-martin", replies });
+  const ok = typeof cfg.replies.welcome === "string" && cfg.replies.welcome.trim().length > 0;
+  if (!ok) {
+    failures++;
+    console.log(`  ✗ ${nombre}`.padEnd(42) + `welcome=${JSON.stringify(cfg.replies.welcome)}`);
+  } else {
+    console.log(`  ✓ ${nombre}`.padEnd(42) + `"${cfg.replies.welcome.slice(0, 34)}…"`);
+  }
+}
+
 console.log("\n" + "─".repeat(84));
-console.log(failures ? `✗ ${failures} caso(s) con fallos.` : `✓ Sin fallos. (${CASES.length} casos)`);
+console.log(
+  failures
+    ? `✗ ${failures} caso(s) con fallos.`
+    : `✓ Sin fallos. (${CASES.length} decisiones + ${VISIT.length} visitType + ${NOMBRES.length} nombres + ${SALUDOS.length} saludos)`,
+);
 process.exit(failures ? 1 : 0);

@@ -148,14 +148,15 @@ const NOT_A_NAME = [
   /^(?:es\s+)?p(?:a|ara)'?\s/i,
   // "mi hijo", "mi señora", "el niño", "la bebé" — parentesco sin nombre propio.
   /^(?:mi|mí|el|la|su|un|una)\s+(?:hij[oa]|niñ[oa]|beb[eé]|mam[aá]|pap[aá]|madre|padre|espos[oa]|señor[a]?|hermi?an[oa]|nieto?a?|abuel[oa]|sobrin[oa]|t[ií][oa]|prim[oa]|suegr[oa]|yern[oa]|nuera|pareja|amig[oa])\b[\s.]*$/i,
-  // Pronombres sueltos: "yo", "mi", "para mí nomás".
-  /^(?:yo|m[ií]|me|nosotros?)\b[\s.]*$/i,
+  // Pronombres sueltos, con o sin refuerzo: "yo", "yo mismo", "yo misma",
+  // "para mí nomás". Sin el refuerzo opcional, "yo mismo" pasaba como nombre.
+  /^(?:yo|m[ií]|me|nosotros?)(?:\s+(?:mism[oa]s?|sol[oa]s?|nom[aá]s|no\s?m[aá]s))?[\s.]*$/i,
 ];
 
 // true si el texto puede ser el nombre de una persona. Deliberadamente
 // permisivo con lo que SÍ deja pasar (un solo nombre, apodos, nombres
 // compuestos) y estricto solo con las formas de arriba.
-function looksLikeName(text: string): boolean {
+export function looksLikeName(text: string): boolean {
   if (NOT_A_NAME.some((re) => re.test(text))) return false;
   // Sin una sola letra no hay nombre ("123", ".", "??").
   return /\p{L}/u.test(text);
@@ -327,7 +328,7 @@ export async function answerQuestion(ctx: LeadContext, text: string): Promise<st
 
 type Field = "specialty" | "name" | "time" | "visit";
 
-function needsVisitType(draft: LeadDraft): boolean {
+export function needsVisitType(draft: LeadDraft): boolean {
   if (draft.kind !== "ficha") return false;
   // Sin especialidad resuelta no se pregunta. El fallback era `true`, y como lo
   // que no está en catálogo nunca tiene specialtyKey, terminaba preguntándole a
@@ -613,10 +614,20 @@ export async function startLead(
 export async function offerLead(
   ctx: FlowContext & { request: string; analysis: TurnAnalysis | null },
 ): Promise<LeadTurnResult> {
-  const base: LeadDraft = { kind: "no_disponible", unmatchedRequestText: ctx.request };
+  const base: LeadDraft = { kind: "no_disponible", unmatchedRequestText: ctx.request, offerPending: true };
   const draft = mergeAnalysis(base, ctx.analysis).draft;
   await saveStep(ctx, "collecting_lead", draft);
   return { reply: unlistedAnswer(ctx.request), pauseAfterReply: false };
+}
+
+// El paciente rechazó la oferta ("no", "no gracias"). Se descarta sin dejar
+// nada pendiente: nunca hubo solicitud, así que no hay fila que retirar.
+export async function cancelOffer(ctx: FlowContext): Promise<LeadTurnResult> {
+  await saveStep(ctx, "idle", null);
+  return {
+    reply: "Entendido 😊 Si más adelante lo necesita, o quiere consultar otra cosa, escríbame nomás.",
+    pauseAfterReply: false,
+  };
 }
 
 export async function continueLead(
@@ -639,7 +650,11 @@ export async function continueLead(
     };
   }
 
-  const { draft, changed } = mergeAnalysis(lead, analysis);
+  // Si venía de una oferta, llegar acá significa que el paciente la aceptó
+  // (decideAction ya descartó el rechazo y el cambio de tema): deja de estar
+  // pendiente y sigue como cualquier otra recolección.
+  const accepted = lead.offerPending ? { ...lead, offerPending: false } : lead;
+  const { draft, changed } = mergeAnalysis(accepted, analysis);
 
   if (session.step === "confirming_lead") {
     if (changed) return sendSummary(ctx, draft, "¡Listo! Actualicé sus datos 😊");
