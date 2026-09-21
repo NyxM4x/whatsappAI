@@ -37,9 +37,13 @@ import {
   quoteConsultation,
 } from "@/lib/clinic/pricing";
 import {
+  activePromo,
   formatServicePrice,
   matchService,
   mentionsOffCatalogRequest,
+  promoIntro,
+  promoMentions,
+  quoteService,
   type ServiceItem,
 } from "@/lib/clinic/services";
 import {
@@ -121,13 +125,14 @@ Reglas:
 - paymentIntention: cómo dice que va a pagar. "qr" si menciona QR, transferencia o pago por banco; "efectivo" si dice que paga al llegar, en caja, en recepción o en efectivo. null si no dice nada de pago. Es solo un dato para el asesor: no cambia nada del resto.
 - OJO con "cancelar": en Bolivia significa PAGAR, no anular. "Voy a cancelar llegando" es paymentIntention "efectivo"; "va a cancelar por QR" es "qr". Solo es una cancelación de verdad cuando dice que ya no quiere la cita o la ficha (eso va en wantsOut).
 - needsHumanAction: true si el mensaje pide una GESTIÓN o avisa de un HECHO FÍSICO que solo puede resolver una persona de la clínica: que se avise a alguien ("dígale a la doctora", "avise a la licenciada"), que se le confirme algo ("me confirma", "confírmeme"), que ya llegó o está por llegar ("ya llegué", "estoy en la puerta", "llego a las 5"), que ya pagó, o cualquier pedido de que alguien haga algo fuera de este chat. false si solo pide una ficha, un servicio o información, y también false si solo dice CÓMO va a pagar sin pedir nada más (eso ya va en paymentIntention). Pedir una ficha para un día y una hora ("quiero ficha para pediatría mañana a las 10") NO es needsHumanAction por mencionar un horario: es una solicitud normal.
-- doctorName: el médico que pide el paciente, tal como lo escribió. null si no nombra a ninguno.
+- doctorName: el médico que pide el paciente, tal como lo escribió. Si no nombra a nadie pero pide que la atienda una mujer ("con una doctora", "que sea mujer"), poné "doctora (mujer)". null si no dice nada de eso.
+- Si el apellido que nombra coincide con más de un médico de la lista (por ejemplo "Dra. Medina"), decidí por el contexto: PAP, papanicolaou, embarazo o ginecología → el de ginecología; un niño o un bebé → el de pediatría. Sin contexto, specialtyKey null.
 - preferredTime: el día y/o la hora que prefiere, en pocas palabras y como lo dijo ("mañana a las 10", "el sábado en la tarde", "lo antes posible"). null si no dijo nada de horario.
 - preferredDate: la fecha de ese día en formato YYYY-MM-DD, calculada con la fecha actual ("hoy", "ahora", "mañana", "el lunes", "20 de septiembre"). null si no dijo un día claro.
 - preferredHour: la hora en formato 24 h solo si es clara ("10 de la mañana" → 10:00, "7 de la noche" → 19:00, "15:30" → 15:30). Una hora de 1 a 6 sin mañana/tarde/noche es de la tarde (13:00 a 18:00). Una hora de 7 a 12 sin mañana/tarde/noche es ambigua → null. "ahora" o "lo antes posible" → la hora actual.
 - visitType: "nueva" si es consulta nueva o primera vez; "reconsulta" si dice reconsulta, control, o que vuelve por lo mismo o a mostrar resultados. null si no lo dice.
 - wantsLead: true si quiere pedir ficha, cita, turno o consulta, o atenderse con un médico o una especialidad.
-- wantsHuman: true SOLO si pide hablar con una persona (doctora, doctor, enfermera, recepcionista, secretaria, asesor, alguien) o dice que no quiere seguir con el asistente. Pedir una ficha o consulta con un médico NO es wantsHuman.
+- wantsHuman: true SOLO si pide hablar con una persona (doctora, doctor, enfermera, recepcionista, secretaria, asesor, alguien) o dice que no quiere seguir con el asistente. Pedir una ficha o consulta con un médico NO es wantsHuman. Pedir que la atienda una doctora o una mujer para un examen o un servicio ("quiero el PAP con una doctora", "¿me lo puede hacer una mujer?") tampoco: eso va en doctorName.
 - frustrated: true si expresa que no se le está ayudando, que no le entienden, que la respuesta no le sirve, o se queja de la atención por este chat.
 - confirms: true si confirma que los datos están bien ("sí", "correcto", "así está bien", "ok, gracias") sin pedir ningún cambio.
 - wantsOut: true si ya no quiere la ficha o el servicio, o pide dejarlo.
@@ -181,6 +186,13 @@ function cleanHour(value: unknown): string | null {
 // morir la conversación real. Acá no hace falta criterio: si lo dice, lo dice.
 const HUMAN_ACTION_PATTERN =
   /\bme confirma\b|\bconfirmeme\b|\bconf[ií]rmeme\b|\bme avisa\b|\bav[ií]sele\b|\bav[ií]sale\b|\bd[ií]gale\b|\bd[ií]cele\b|\bhable con\b|\bya llegu[eé]\b|\bestoy (aqu[ií]|afuera|en la puerta|en recepci[oó]n)\b/i;
+
+// Lo que distingue "quiero hablar con la doctora" (derivar) de "quiero el PAP
+// con una doctora" (un dato de la solicitud). El modelo marcaba wantsHuman en
+// el segundo y el bot se pausaba (verificado 2026-09-21). Es la misma regla que
+// humanHandoffIntentPatterns en config.ts: sin el verbo, no es derivación.
+const TALK_TO_SOMEONE_PATTERN =
+  /\b(?:hablar|comunic\w+|conversar|contact\w+)\b|\b(?:persona|humano|asesor[a]?|alguien)\b|\b(?:bot|robot|m[aá]quina|asistente)\b/i;
 
 function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): TurnAnalysis {
   const date = typeof raw?.preferredDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.preferredDate)
@@ -236,10 +248,15 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): Turn
   const rawName = cleanText(raw?.patientName, 80);
   const patientName = rawName && looksLikeName(rawName) ? rawName : null;
 
+  // Si lo que el modelo vio como "quiere una persona" es en realidad el médico
+  // de preferencia, y no hay verbo de hablar/comunicarse, es un dato.
+  const doctorName = cleanText(raw?.doctorName, 80);
+  const wantsHuman = raw?.wantsHuman === true && !(doctorName && !TALK_TO_SOMEONE_PATTERN.test(text));
+
   return {
     patientName,
     specialtyKey,
-    doctorName: cleanText(raw?.doctorName, 80),
+    doctorName,
     preferredTime: cleanText(raw?.preferredTime),
     preferredDate: date,
     preferredHour: cleanHour(raw?.preferredHour),
@@ -248,7 +265,7 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): Turn
     unavailableRequest,
     needsHumanAction: raw?.needsHumanAction === true || HUMAN_ACTION_PATTERN.test(text),
     wantsLead: raw?.wantsLead === true,
-    wantsHuman: raw?.wantsHuman === true,
+    wantsHuman,
     frustrated: raw?.frustrated === true,
     confirms: raw?.confirms === true,
     wantsOut: raw?.wantsOut === true,
@@ -322,8 +339,14 @@ export async function analyzeTurn(
 // Nuestros catálogos están incompletos por definición (el tarifario nunca llega
 // entero), así que el bot no está en posición de negar nada: si la respuesta
 // niega o se escuda en sus listas, no se envía.
+//
+// Lo que sigue al verbo importa: "el PAP no se realiza si está con su regla"
+// es un REQUISITO, no una negación. Sin esa salvedad, explicar los requisitos
+// de la campaña derivaba al asesor y pausaba el bot (verificado 2026-09-21).
+// Solo se exceptúan las condiciones ("si", "durante", "con la regla"…): "no
+// realizamos PAP" o "no se hace en feriados" siguen vetadas.
 const NEGATION_PATTERN =
-  /\bno\s+(?:se\s+)?(?:l[oa]s?\s+|le\s+)?(?:tengo|tenemos|ten[eé]s|contamos|cuenta|dispongo|disponemos|ofrecemos|ofrece|brindamos|brinda|realizamos|realiza|hacemos|hace|manejamos|maneja|prestamos|trabajamos|figur\w+|aparec\w+|est[aá]\s+(?:disponible|registrad\w+|en\s+(?:mi|el|la|nuestr\w+)))\b/i;
+  /\bno\s+(?:se\s+)?(?:l[oa]s?\s+|le\s+)?(?:tengo|tenemos|ten[eé]s|contamos|cuenta|dispongo|disponemos|ofrecemos|ofrece|brindamos|brinda|realizamos|realiza|hacemos|hace|manejamos|maneja|prestamos|trabajamos|figur\w+|aparec\w+|est[aá]\s+(?:disponible|registrad\w+|en\s+(?:mi|el|la|nuestr\w+)))\b(?!\s+(?:si|cuando|durante|mientras|antes|hasta|despu[eé]s)\b|\s+con\s+(?:la\s+|el\s+|su\s+)?(?:regla|peri[oó]do|menstruaci[oó]n|sangrado))/i;
 
 // Escudarse en el catálogo propio ("dentro de los servicios que tengo
 // registrados", "en mi lista"). Es la misma negación con otra ropa, y encima le
@@ -442,7 +465,7 @@ function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): { draft
     next.preferredHour = analysis.preferredHour;
   }
   // Vale para "ficha" y para "no_disponible": en los dos el paciente puede
-  // corregir qué necesita, nombrar un médico o decir si es reconsulta.
+  // corregir qué necesita o decir si es reconsulta.
   if (draft.kind !== "servicio") {
     if (analysis.specialtyKey) {
       // Llegó una especialidad de catálogo real (p. ej. el paciente corrigió lo
@@ -455,9 +478,11 @@ function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): { draft
     } else if (analysis.unavailableRequest) {
       next.unmatchedRequestText = analysis.unavailableRequest;
     }
-    if (analysis.doctorName) next.doctorPreference = analysis.doctorName;
     if (analysis.visitType) next.visitType = analysis.visitType;
   }
+  // El médico de preferencia vale también para un servicio: en el PAP, pedir
+  // que la atienda una doctora cambia el precio (es a llamado).
+  if (analysis.doctorName) next.doctorPreference = analysis.doctorName;
 
   const fields = (d: LeadDraft) =>
     JSON.stringify([
@@ -515,10 +540,31 @@ function priceLines(draft: LeadDraft, clinic: ClinicConfig): { lines: string[]; 
 
   if (draft.kind === "servicio") {
     const today = localDateISO(new Date(), clinic.timezone);
-    if (isHolidayToday(clinic.holidayDate, clinic.timezone) && (!draft.preferredDate || draft.preferredDate === today)) {
+    const holidayToday = isHolidayToday(clinic.holidayDate, clinic.timezone);
+    const service = clinic.services.find((s) => s.name === draft.serviceName);
+
+    // Con promo, el precio depende del día y la hora que pidió (la promo tiene
+    // franja y fecha de fin): se calcula acá, no se repite el de la apertura.
+    if (service && activePromo(service, draft.preferredDate ?? today)) {
+      const quote = quoteService(service, {
+        today,
+        date: draft.preferredDate,
+        hour: draft.preferredHour,
+        holidayToday,
+        doctorPreference: draft.doctorPreference,
+      });
+      return { lines: [`💰 Precio: ${quote}`], quote };
+    }
+
+    if (holidayToday && (!draft.preferredDate || draft.preferredDate === today)) {
       return { lines: [`📅 ${holidayMessage}`], quote: "Feriado: precio a confirmar" };
     }
-    return { lines: draft.serviceQuote ? [`💰 Precio: ${draft.serviceQuote}`] : [], quote: draft.serviceQuote ?? null };
+    // Si la promo venció entre la apertura y el resumen, el precio guardado ya
+    // no vale: se recalcula con el regular.
+    const serviceQuote = service
+      ? formatServicePrice(service, draft.preferredDate ?? today) + (service.note ? ` (${service.note})` : "")
+      : draft.serviceQuote;
+    return { lines: serviceQuote ? [`💰 Precio: ${serviceQuote}`] : [], quote: serviceQuote ?? null };
   }
 
   if (draft.kind === "no_disponible") {
@@ -573,7 +619,7 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
     draft.kind !== "servicio" && !spec && draft.unmatchedRequestText
       ? `🩺 Pidió: ${draft.unmatchedRequestText} _(no está en nuestro catálogo — el asesor confirma si lo ofrecemos y el precio)_`
       : null,
-    draft.kind !== "servicio" && draft.doctorPreference ? `👨‍⚕️ Médico de preferencia: ${draft.doctorPreference}` : null,
+    draft.doctorPreference ? `👨‍⚕️ Médico de preferencia: ${draft.doctorPreference}` : null,
     `🗓️ Horario que prefiere: ${draft.preferredTime}`,
     showVisitType ? `🔁 ${draft.visitType === "reconsulta" ? "Reconsulta" : "Consulta nueva"}` : null,
     // Solo se confirma lo que el paciente dijo. El bot no cobra ni manda el QR:
@@ -583,6 +629,9 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
       : null,
     "",
     ...price.lines,
+    ...(draft.kind === "ficha"
+      ? promoMentions(clinic.services, draft.specialtyKey, localDateISO(new Date(), clinic.timezone))
+      : []),
     "🪪 Recuerde traer su *carnet de identidad*. Si no lo tiene, puede mostrar una foto del carnet en recepción.",
     "",
     draft.kind === "servicio"
@@ -666,11 +715,24 @@ export async function startLead(
   }
 
   if (ctx.kind === "servicio" && ctx.service) {
+    const today = localDateISO(new Date(), ctx.clinic.timezone);
+    const holidayToday = isHolidayToday(ctx.clinic.holidayDate, ctx.clinic.timezone);
+    const promo = activePromo(ctx.service, today);
     base.serviceName = ctx.service.name;
-    base.serviceQuote = formatServicePrice(ctx.service) + (ctx.service.note ? ` (${ctx.service.note})` : "");
-    intro = isHolidayToday(ctx.clinic.holidayDate, ctx.clinic.timezone)
-      ? `Con gusto le ayudo con *${ctx.service.name}* 😊 Hoy es *feriado* y los precios cambian: el asesor le confirma el monto.`
-      : `*${ctx.service.name}*: ${base.serviceQuote} 😊`;
+    base.serviceQuote = formatServicePrice(ctx.service, today) + (ctx.service.note ? ` (${ctx.service.note})` : "");
+
+    if (promo) {
+      // La información de la campaña reemplaza a la del servicio normal (D2:
+      // todo en un mensaje, como la respuesta rápida de la clínica).
+      const holidayLine = holidayToday && promo.outside
+        ? `\n\n📅 Hoy es *feriado*: para hoy la promoción no aplica y rige ${promo.outside.price} Bs (${promo.outside.label}).`
+        : "";
+      intro = promoIntro(ctx.service, promo) + holidayLine;
+    } else {
+      intro = holidayToday
+        ? `Con gusto le ayudo con *${ctx.service.name}* 😊 Hoy es *feriado* y los precios cambian: el asesor le confirma el monto.`
+        : `*${ctx.service.name}*: ${base.serviceQuote} 😊`;
+    }
   }
 
   return askOrSummarize(ctx, mergeAnalysis(base, ctx.analysis).draft, intro);

@@ -50,6 +50,11 @@ const DEBEN_VETARSE = [
   "Le consulto con el equipo y le aviso el precio 😊",
   "¿Quiere que le pregunte al equipo de la clínica?",
   "Déjeme verificar con la clínica y le confirmo.",
+  // La excepción de los requisitos no puede abrir la puerta a negar el
+  // servicio: sin una condición detrás, sigue siendo una negación.
+  "No realizamos el PAP los fines de semana.",
+  "No hacemos papanicolaou en feriados.",
+  "Esa prueba no se realiza en la clínica.",
 ];
 
 for (const reply of DEBEN_VETARSE) {
@@ -70,6 +75,14 @@ const DEBEN_PASAR = [
   "La ecografía abdominal cuesta 100 Bs 😊 ¿Desea que le tomemos sus datos?",
   "Para la consulta recuerde traer su carnet de identidad 🙏",
   "El implante subdérmico protege 5 años y tiene 99% de efectividad 😊",
+  // Requisitos del PAP: son condiciones, no negaciones. Antes se vetaban y el
+  // bot se pausaba justo con la pregunta más común de la campaña (2026-09-21).
+  "El PAP no se realiza si está con su periodo menstrual 😊",
+  "No se hace si tuvo relaciones en las últimas 48 horas.",
+  "La toma no se realiza durante la menstruación.",
+  "No se hace con la regla: conviene venir 7 días después de terminarla.",
+  "El precio no incluye la lectura del resultado (consulta de 80 Bs).",
+  "La promoción no aplica sábados, domingos ni feriados.",
 ];
 
 for (const reply of DEBEN_PASAR) {
@@ -103,6 +116,12 @@ const FUERA_DE_CATALOGO = [
   "atienden fisioterapia?",
   "buenas, hacen odontologia?",
   "necesito un oftalmologo para mi mama",
+  // Estudios ginecológicos que NO son el PAP: con la campaña en el prompt, el
+  // modelo tendería a cotizarlos a 50 Bs.
+  "cuanto cuesta la prueba de VPH?",
+  "hacen IVAA?",
+  "quiero una colposcopia",
+  "precio de biopsia de cervix",
 ];
 
 for (const text of FUERA_DE_CATALOGO) {
@@ -120,6 +139,9 @@ const EN_CATALOGO = [
   "quiero que me saquen los puntos",
   "cuanto sale el lavado de oido",
   "colocacion de implante subdermico precio",
+  "PAPANICOLAO 50% DESCUENTO",
+  "quiero hacerme el papa nicolau",
+  "cuanto sale el papanicolado",
 ];
 
 for (const text of EN_CATALOGO) {
@@ -127,7 +149,7 @@ for (const text of EN_CATALOGO) {
 }
 
 // Mensajes cotidianos que no deben activar nada.
-for (const text of ["a que hora abren?", "donde quedan?", "quiero una ficha para pediatria", "gracias!"]) {
+for (const text of ["a que hora abren?", "donde quedan?", "quiero una ficha para pediatria", "gracias!", "mi papa esta enfermo", "quiero el pap"]) {
   check(`no activa fuera de catálogo: "${text}"`, mentionsOffCatalogRequest(text), false);
 }
 

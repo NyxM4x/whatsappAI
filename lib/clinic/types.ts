@@ -156,6 +156,8 @@ export type AuditIntent =
   | "servicio"
   | "ficha"
   | "accion"
+  // "¿Ya está mi resultado?": alarma sin pausa, el bot no ve resultados.
+  | "resultado"
   | "qa"
   | "qa_fallido"
   // El Q&A respondió negando un servicio/examen o prometiendo una gestión: la

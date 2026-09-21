@@ -50,7 +50,7 @@ type Case = {
   greetingOnly?: boolean;
   pendingOffer?: string | null;
   // Qué se espera de la Action resultante.
-  expect: { type: string; kind?: string; intent?: string };
+  expect: { type: string; kind?: string; intent?: string; pause?: boolean };
 };
 
 const CASES: Case[] = [
@@ -329,6 +329,56 @@ const CASES: Case[] = [
     analysis: null,
     expect: { type: "qa" },
   },
+
+  // ── Campaña PAP (2026-09-21) ──────────────────────────────────────────────
+  {
+    name: "texto del anuncio de Facebook → solicitud del PAP",
+    text: "PAPANICOLAO 50% DESCUENTO",
+    analysis: analysis({ isQuestion: false }),
+    expect: { type: "startLead", kind: "servicio", intent: "servicio" },
+  },
+  {
+    name: "anuncio de Facebook sin análisis (modelo caído) → igual PAP",
+    text: "PAPANICOLAO 50% DESCUENTO",
+    analysis: null,
+    expect: { type: "startLead", kind: "servicio" },
+  },
+  {
+    name: "pregunta el precio del PAP → solicitud con la info de la campaña",
+    text: "cuanto cuesta el papa nicolau?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "startLead", kind: "servicio" },
+  },
+  {
+    name: "¿ya está mi resultado? → asesor con alarma, SIN pausa",
+    text: "buenas, ya está mi resultado del pap?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "escalate", kind: "accion", intent: "resultado", pause: false },
+  },
+  {
+    name: "¿salieron los resultados? → asesor con alarma",
+    text: "ya salieron los resultados?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "escalate", intent: "resultado", pause: false },
+  },
+  {
+    name: "ficha para que lean los resultados → es una solicitud, no una consulta de estado",
+    text: "quiero una ficha para que el ginecologo lea mis resultados",
+    analysis: analysis({ specialtyKey: "ginecologia", wantsLead: true }),
+    expect: { type: "startLead", kind: "ficha" },
+  },
+  {
+    name: "¿en cuánto sale el resultado? → pregunta del servicio, no de estado",
+    text: "en cuantos dias sale el resultado?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "qa" },
+  },
+  {
+    name: "prueba de VPH sin análisis → no cae al Q&A (no es el PAP)",
+    text: "cuanto cuesta la prueba de VPH?",
+    analysis: null,
+    expect: { type: "offerLead", intent: "no_disponible" },
+  },
 ];
 
 let failures = 0;
@@ -354,6 +404,10 @@ for (const c of CASES) {
   }
   if (c.expect.intent !== undefined && action.intent !== c.expect.intent) {
     problems.push(`intent=${action.intent} (esperado ${c.expect.intent})`);
+  }
+  if (c.expect.pause !== undefined) {
+    const pause = action.type === "escalate" ? action.pause ?? true : undefined;
+    if (pause !== c.expect.pause) problems.push(`pause=${pause} (esperado ${c.expect.pause})`);
   }
 
   if (problems.length) {

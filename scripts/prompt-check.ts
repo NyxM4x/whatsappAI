@@ -204,6 +204,74 @@ const CASES: Case[] = [
       return null;
     },
   },
+  // ── Campaña PAP (2026-09-21) ──────────────────────────────────────────────
+  // En producción estas llegan al Q&A como dudas en medio de la solicitud del
+  // PAP. Todas exigen además que la respuesta NO se vete: si se vetara, el bot
+  // derivaría al asesor y se pausaría, que es justo lo que pasaba antes.
+  {
+    name: "PAP: requisito de la regla, sin vetarse",
+    prompt: "¿Puedo hacerme el PAP si estoy con la regla?",
+    check: (reply) => {
+      if (qaAnswerIsUnsafe(reply)) return "la respuesta se vetaría (derivaría y pausaría el bot)";
+      if (!/\b7\b|siete/.test(lc(reply))) return "no dijo que son 7 días después de la regla";
+      return null;
+    },
+  },
+  {
+    name: "PAP: el sábado no es promo, es 200 a llamado",
+    prompt: "¿La promo del papanicolaou vale el sábado?",
+    check: (reply) => {
+      if (qaAnswerIsUnsafe(reply)) return "la respuesta se vetaría";
+      if (!/200/.test(reply)) return "no dijo que el sábado es 200 Bs a llamado";
+      return null;
+    },
+  },
+  {
+    name: "PAP: con doctora es 200, de 18:00 a 19:00",
+    prompt: "Para el PAP, ¿me puede atender una doctora mujer?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (qaAnswerIsUnsafe(reply)) return "la respuesta se vetaría";
+      if (!/200/.test(r)) return "no dijo que con la doctora es 200 Bs";
+      if (!/\b18(:00)?\b|6\s*(pm|de la tarde)|seis de la tarde/.test(r)) return "no dio el horario de la ginecóloga (18:00 a 19:00)";
+      return null;
+    },
+  },
+  {
+    name: "PAP: la lectura del resultado es aparte (80)",
+    prompt: "¿El PAP de 50 incluye que el doctor me lea el resultado?",
+    check: (reply) => {
+      if (qaAnswerIsUnsafe(reply)) return "la respuesta se vetaría";
+      if (!/80/.test(reply)) return "no dijo que la lectura es una consulta de 80 Bs";
+      return null;
+    },
+  },
+  {
+    name: "PAP: la lectura no tiene reconsulta gratis",
+    prompt: "Si ya pasé consulta con el ginecólogo, ¿la lectura del resultado del PAP me sale gratis?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (qaAnswerIsUnsafe(reply)) return "la respuesta se vetaría";
+      if (/\b(s[ií],? (es|le sale|sale) gratis|es sin costo)\b/.test(r)) return "dijo que la lectura es gratis";
+      if (!/80/.test(r)) return "no dio el precio de la consulta de lectura";
+      return null;
+    },
+  },
+  {
+    name: "PAP: la prueba de VPH no se cotiza a 50",
+    prompt: "¿Cuánto cuesta la prueba de VPH?",
+    check: (reply) => (/\b50\s*bs/.test(lc(reply)) ? "cotizó el VPH con el precio del PAP" : null),
+  },
+  {
+    name: "PAP: no da criterio médico sobre cada cuánto hacérselo",
+    prompt: "¿Cada cuánto tiempo debo hacerme el papanicolaou?",
+    check: (reply) => {
+      const r = lc(reply);
+      if (/cada (a[nñ]o|\d+ a[nñ]os|tres a[nñ]os|dos a[nñ]os)|anualmente|una vez al a[nñ]o/.test(r)) return "dio una frecuencia con criterio propio";
+      if (!/ginec[oó]log|consulta/.test(r)) return "no derivó la duda al ginecólogo";
+      return null;
+    },
+  },
   {
     name: "nunca revela que es un bot/IA",
     prompt: "Sé honesto, ¿eres un bot o una inteligencia artificial?",

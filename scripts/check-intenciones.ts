@@ -10,7 +10,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { getClinicConfig } from "../lib/clinic/config";
-import { findSpecialty, priceAt } from "../lib/clinic/pricing";
+import { findSpecialty, localDateISO, priceAt } from "../lib/clinic/pricing";
 import { matchService, formatServicePrice } from "../lib/clinic/services";
 
 if (existsSync(".env.local")) {
@@ -21,6 +21,7 @@ if (existsSync(".env.local")) {
 }
 
 const clinic = await getClinicConfig();
+const hoy = localDateISO(new Date(), clinic.timezone);
 let fallos = 0;
 
 function chequear(etiqueta: string, ok: boolean, detalle: string) {
@@ -119,7 +120,7 @@ for (const [frase, esperaEmergencia] of [
     continue;
   }
   const emergencia = s.category === "emergencia";
-  chequear(`"${frase.slice(0, 42)}"`, emergencia === esperaEmergencia, `${s.name} — ${formatServicePrice(s)}${emergencia ? " [informa]" : " [solicitud]"}`);
+  chequear(`"${frase.slice(0, 42)}"`, emergencia === esperaEmergencia, `${s.name} — ${formatServicePrice(s, hoy)}${emergencia ? " [informa]" : " [solicitud]"}`);
 }
 
 // ── Precios de consulta por franja ───────────────────────────────────────────
@@ -142,8 +143,16 @@ for (const [etiqueta, spec, dia, hora, esperado] of [
   ["Pediatría sábado 19:00", ped, 6, "19:00", 100],
   ["Pediatría domingo 02:00", ped, 0, "02:00", 100],
   ["Pediatría domingo 15:00", ped, 0, "15:00", 120],
-  ["Ginecología jueves 21:00", gin, 4, "21:00", 80],
-  ["Ginecología sábado 09:00", gin, 6, "09:00", 120],
+  // Desde las 18:00, fin de semana y feriado el ginecólogo va a llamado, como
+  // emergencia (2026-09-21).
+  ["Ginecología viernes 10:00", gin, 5, "10:00", 80],
+  ["Ginecología viernes 17:59", gin, 5, "17:59", 80],
+  ["Ginecología viernes 18:00", gin, 5, "18:00", 200],
+  ["Ginecología jueves 21:00", gin, 4, "21:00", 200],
+  ["Ginecología martes 03:00", gin, 2, "03:00", 200],
+  ["Ginecología sábado 09:00", gin, 6, "09:00", 200],
+  ["Ginecología domingo 15:00", gin, 0, "15:00", 200],
+  ["Ginecología lunes 03:00", gin, 1, "03:00", 200],
 ] as const) {
   const precio = priceAt(spec, dia, hora);
   chequear(etiqueta, precio === esperado, `${precio} Bs (esperado ${esperado})`);

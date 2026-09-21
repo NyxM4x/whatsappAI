@@ -19,13 +19,14 @@
 
 import { getSupabaseClient } from "@/lib/engine/clients";
 import {
+  buildCampaignsBlock,
   defaultServices,
   formatServicePrice,
   SERVICE_CATEGORY_LABELS,
   SERVICE_CATEGORY_ORDER,
   type ServiceItem,
 } from "@/lib/clinic/services";
-import { buildConsultationPricingBlock, isHolidayToday } from "@/lib/clinic/pricing";
+import { buildConsultationPricingBlock, isHolidayToday, localNow } from "@/lib/clinic/pricing";
 
 export type CatalogItem = { name: string; price: number };
 
@@ -55,8 +56,9 @@ const defaultClinicConfig = {
   // la de hoy (ver isHolidayToday): así se apaga sola al cambiar el día.
   holidayDate: null as string | null,
 
+  // Dirección tal como la da la clínica en su respuesta rápida (2026-09-21).
   generalInfo: {
-    address: "Av. Moscú, a una cuadra del Mercado La Cuchilla",
+    address: "Av. Moscú n°4480, diagonal al mercado La Cuchilla, Santa Cruz",
     phone: "+591 773 85 200",
     mapsUrl: "https://maps.app.goo.gl/cZcqhWE9LGhWifvo7?g_st=ic",
     hours: "Lunes a Sábado, 8:00 a 20:00",
@@ -101,7 +103,7 @@ const defaultClinicConfig = {
     "emergencia",
   ],
   emergencyResponse:
-    "🚨 Diríjase inmediatamente a Emergencias. Comparta su ubicación en tiempo real con una persona cercana y solicite ayuda inmediata.\n\n📍 Av. Moscú, a una cuadra del Mercado La Cuchilla\n🗺️ https://maps.app.goo.gl/RcMqdE3z8NX1ZULG6\n📞 +591 773 85 200",
+    "🚨 Diríjase inmediatamente a Emergencias. Comparta su ubicación en tiempo real con una persona cercana y solicite ayuda inmediata.\n\n📍 Av. Moscú n°4480, diagonal al mercado La Cuchilla, Santa Cruz\n🗺️ https://maps.app.goo.gl/cZcqhWE9LGhWifvo7?g_st=ic\n📞 +591 773 85 200",
 
   // Dispara el flujo de agendamiento. Es un fast-path: lo que no cae acá lo
   // decide GPT en el webhook, así que conviene cubrir bien las formas comunes
@@ -141,6 +143,13 @@ const defaultClinicConfig = {
   // "qr" suelto es señal suficiente: quien lo escribe lo está pidiendo.
   qrRequestIntentPatterns:
     /\bqr\b|c[oó]digo (de|para el|para) pago|escanear para pagar|datos para (pagar|transferir)|n[uú]mero de cuenta|d[oó]nde (pago|deposito|transfiero)/i,
+
+  // "¿Ya está mi resultado?": el bot no puede ver resultados, así que no puede
+  // contestarlo; pasa a un asesor con alarma. Exige el posesivo o el "ya
+  // está/salió": "¿en cuánto sale el resultado?" es una pregunta sobre el
+  // servicio y la contesta el Q&A.
+  resultInquiryPatterns:
+    /\bmis?\s+resultados?\b|\bresultados?\s+de\s+mis?\b|\bya\s+(?:est[aá]n?|sali[oó]|salieron|lleg[oó]|llegaron|tienen)\s+(?:el\s+|los\s+|mis?\s+)?resultados?\b/i,
 
   locationRequestIntentPatterns:
     /\b(ubicaci[oó]n|direcci[oó]n|gps|mapa|google maps|c[oó]mo llego|d[oó]nde est[aá]n|d[oó]nde queda|localizaci[oó]n)\b/i,
@@ -414,7 +423,7 @@ export async function getBusinessByPhoneNumberId(phoneNumberId: string): Promise
 
 // Tarifario agrupado por categoría, en el orden de SERVICE_CATEGORY_ORDER.
 // Las categorías vacías se omiten (una clínica puede no tener ecografías).
-function buildServicesBlock(services: ServiceItem[]): string {
+function buildServicesBlock(services: ServiceItem[], today: string): string {
   return SERVICE_CATEGORY_ORDER.flatMap((category) => {
     const items = services.filter((s) => s.category === category);
     if (!items.length) return [];
@@ -422,7 +431,7 @@ function buildServicesBlock(services: ServiceItem[]): string {
       `${SERVICE_CATEGORY_LABELS[category]}:`,
       ...items.map((s) => {
         const note = s.note ? ` (${s.note})` : "";
-        return `- ${s.name}${note}: ${formatServicePrice(s)}`;
+        return `- ${s.name}${note}: ${formatServicePrice(s, today)}`;
       }),
       "",
     ];
@@ -438,10 +447,13 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
   const labs = clinic.labs.map((l) => `- ${l.name}: ${l.price} Bs`).join("\n");
   const meds = clinic.medications.map((m) => `- ${m.name}: ${m.price} Bs`).join("\n");
   const holidayToday = isHolidayToday(clinic.holidayDate, clinic.timezone);
+  const now = localNow(clinic.timezone);
+  const campaigns = buildCampaignsBlock(clinic.services, now.date);
 
   return [
     clinic.systemPromptBase,
     "DATOS DE LA CLÍNICA:",
+    `- Hoy es ${now.dayName} ${now.date}`,
     `- Nombre: ${clinic.clinicName}`,
     `- Dirección: ${clinic.generalInfo.address}`,
     `- Teléfono: ${clinic.generalInfo.phone}`,
@@ -458,8 +470,9 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
     meds,
     "",
     "TARIFARIO DE SERVICIOS (precios exactos, cítalos tal cual):",
-    buildServicesBlock(clinic.services),
+    buildServicesBlock(clinic.services, now.date),
     "",
+    ...(campaigns ? [campaigns, ""] : []),
     "CARNET: para la consulta el paciente debe traer su carnet de identidad; solo si no lo tiene, puede mostrar una foto del carnet en recepción. Nunca pidas el número de carnet.",
     "Si preguntan por una especialidad, un servicio o un examen que NO está en las listas de arriba: no lo niegues ni lo confirmes. Las listas están incompletas. Pedile con calidez los datos (nombre del paciente, día y hora que le acomodan) para pasarle el pedido a un asesor, que le confirma disponibilidad y precio. Nunca inventes especialidades ni nombres de médicos.",
     "Si preguntan por un servicio del tarifario: informá el precio; si lo quiere hacer, el sistema le pide sus datos y un asesor le confirma el horario. No confirmes vos ningún horario.",
@@ -470,7 +483,7 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
     "- PROHIBIDO ABSOLUTO negar un servicio, examen, especialidad, procedimiento o medicamento. Nunca escribas 'no tengo', 'no tenemos', 'no contamos con', 'no ofrecemos', 'no realizamos', 'no está disponible', 'no figura', 'no aparece', 'no está en mi lista/catálogo/registros/servicios registrados', ni ninguna variante. Tampoco lo digas y lo matices después: no lo digas.",
     "- Nunca hables de tus listas, catálogos, registros ni de lo que tenés o no tenés cargado: al paciente no le sirve y suena a rechazo. Hablá de lo que SÍ podés hacer: tomar su pedido para que un asesor se lo confirme.",
     "- Nunca ofrezcas hacer una gestión ('¿quiere que le consulte?', '¿quiere que pregunte al equipo?', 'le averiguo'): vos no consultás nada. Pedí los datos directamente: nombre completo del paciente, y día y hora que le queden cómodos.",
-    "- Nunca ofrezcas ni confirmes horarios, turnos ni médicos disponibles: eso lo confirma un asesor de la clínica.",
+    "- Nunca ofrezcas ni confirmes horarios, turnos ni médicos disponibles: eso lo confirma un asesor de la clínica. La única excepción es lo que diga una CAMPAÑA VIGENTE de arriba sobre su propio horario y quién la atiende: eso es información de la campaña, no un turno confirmado.",
     "- Para urgencias médicas reales indica acudir a Emergencias / llamar a la clínica; nunca des diagnósticos ni consejo médico.",
     "- Nunca menciones que sos un bot, IA o automatización, aunque te lo pregunten directamente.",
   ].join("\n");

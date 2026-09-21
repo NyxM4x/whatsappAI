@@ -437,11 +437,11 @@ export async function POST(request: Request) {
   };
 
   // Derivar a una persona: alarma en el panel, sesión limpia, aviso al
-  // paciente y pausa del bot.
-  const escalate = async (kind: LeadKind, replyText: string, intent: AuditIntent) => {
+  // paciente y pausa del bot (salvo pause=false, p. ej. "¿ya está mi resultado?").
+  const escalate = async (kind: LeadKind, replyText: string, intent: AuditIntent, pause = true) => {
     await registerEscalation({ ...leadCtx, kind, lastMessage: newText, lead: session.draft.lead ?? null });
     await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {} });
-    await send(replyText, { pauseAfter: true });
+    await send(replyText, { pauseAfter: pause });
     return ok(intent);
   };
 
@@ -511,7 +511,7 @@ export async function POST(request: Request) {
     }
 
     case "escalate":
-      return escalate(action.kind, action.reply, action.intent);
+      return escalate(action.kind, action.reply, action.intent, action.pause ?? true);
 
     case "continueLead": {
       const result = await continueLead({ ...leadCtx, session: tracked.session, analysis, text: newText });

@@ -41,6 +41,7 @@ type Expectation = {
   payment?: "qr" | "efectivo" | null;
   patientName?: string | null;
   isQuestion?: boolean;
+  doctorLike?: RegExp;        // cómo debe quedar anotado el médico de preferencia
   // Qué debe DECIDIR el ruteo con ese análisis real. Encadena las dos capas:
   // así se verifica el recorrido entero (mensaje → comprensión → decisión) sin
   // levantar el webhook. wantsLead ya no se verifica acá: dejó de ser una
@@ -118,6 +119,20 @@ const CASES: Expectation[] = [
   { text: "pago llegando nomas", payment: "efectivo", needsAction: false },
   { text: "quiero ficha para medicina general, pago en efectivo al llegar", payment: "efectivo", specialtyKey: "medicina-general", action: "startLead" },
   { text: "mañana a las 9 me viene bien", payment: null },
+
+  // ── Campaña PAP (2026-09-21) ──────────────────────────────────────────────
+  // El texto del anuncio de Facebook abre la solicitud del PAP.
+  { text: "PAPANICOLAO 50% DESCUENTO", unavailable: false, action: "startLead" },
+  // Pedir una mujer sin nombrarla queda anotado: con doctora, la promo no
+  // aplica (es a llamado, 200 Bs) y el resumen tiene que cotizarlo así.
+  // Antes esto derivaba a un humano y pausaba el bot: "con una doctora" se
+  // leía como "quiero hablar con alguien".
+  { text: "quiero hacerme el pap pero con una doctora mujer", unavailable: false, doctorLike: /doctora|mujer/i, action: "startLead" },
+  { text: "el pap me lo puede hacer una mujer?", unavailable: false, action: "startLead" },
+  // Con el verbo sí es derivación: eso no se toca.
+  { text: "quiero hablar con la doctora", action: "escalate" },
+  // Otro estudio: se toma el pedido, nunca se cotiza como el PAP.
+  { text: "cuanto cuesta la prueba de VPH?", unavailable: true, specialtyKey: null },
 ];
 
 const clinic = await getClinicConfig();
@@ -167,6 +182,9 @@ for (const c of CASES) {
   }
   if (c.isQuestion !== undefined && a.isQuestion !== c.isQuestion) {
     problems.push(`isQuestion=${a.isQuestion} (esperado ${c.isQuestion})`);
+  }
+  if (c.doctorLike && !c.doctorLike.test(a.doctorName ?? "")) {
+    problems.push(`doctorName=${JSON.stringify(a.doctorName)} (esperado algo como ${c.doctorLike})`);
   }
   // Encadenado: el análisis REAL entra al ruteo REAL.
   let decided: string | null = null;

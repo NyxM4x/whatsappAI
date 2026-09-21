@@ -25,8 +25,10 @@ import type { AuditIntent, BookingStep, LeadDraft, LeadKind } from "@/lib/clinic
 export type Action =
   // Responder un texto fijo y nada más.
   | { type: "reply"; text: string; intent: AuditIntent }
-  // Derivar: alarma en el panel, aviso al paciente y pausa del bot.
-  | { type: "escalate"; kind: LeadKind; reply: string; intent: AuditIntent }
+  // Derivar: alarma en el panel, aviso al paciente y pausa del bot. Con
+  // pause: false deja la alarma sin pausar (el paciente puede seguir
+  // preguntando otras cosas mientras el asesor le responde).
+  | { type: "escalate"; kind: LeadKind; reply: string; intent: AuditIntent; pause?: boolean }
   // Abrir una solicitud nueva y pedir lo que falte.
   | { type: "startLead"; kind: LeadDraft["kind"]; service?: ServiceItem | null; intent: AuditIntent }
   // Tomar el pedido de algo que no está en catálogo. El paciente ve una
@@ -213,6 +215,12 @@ export function decideAction(input: RoutingInput): Action {
   if (clinic.qrRequestIntentPatterns.test(text)) {
     return { type: "escalate", kind: "pago", reply: PAYMENT_REPLY, intent: "pago" };
   }
+  // "¿Ya está mi resultado?" El bot no ve resultados: si contesta, inventa.
+  // Alarma sin pausa (D6). Si en el mismo mensaje pide una ficha para que se
+  // los lean, eso manda: es una solicitud, no una consulta de estado.
+  if (clinic.resultInquiryPatterns.test(text) && !clinic.bookingIntentPatterns.test(text) && !analysis?.wantsLead) {
+    return { type: "escalate", kind: "accion", reply: RESULT_REPLY, intent: "resultado", pause: false };
+  }
 
   // ── 8. Lo que dependa del análisis ────────────────────────────────────────
   if (analysis?.wantsHuman) {
@@ -275,3 +283,4 @@ const FILE_REPLY = "¡Gracias! 🙏 Recibimos su archivo. Un asesor de la clíni
 const TO_ADVISOR_REPLY = "Le paso su pedido a un asesor de la clínica 🙏 En un momento le escribe por aquí.";
 const PAYMENT_REPLY = "Los datos de pago se los envía un asesor de la clínica cuando confirme su ficha o servicio 🙏 Ya le aviso para que le escriba por aquí.";
 const ACTION_REPLY = "Entendido 🙏 Eso se lo tiene que confirmar una persona de la clínica: ya le aviso para que le escriba por aquí en un momento.";
+const RESULT_REPLY = "Su resultado se lo confirma un asesor de la clínica 🙏 Ya le aviso para que le escriba por aquí.";
