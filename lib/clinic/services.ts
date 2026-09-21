@@ -103,8 +103,10 @@ export const defaultServices: ServiceItem[] = [
   // clínica el 2026-09-21). Los 50 Bs cubren la toma y el análisis; leer el
   // resultado es una consulta de ginecología aparte, sin reconsulta gratis.
   //
-  // Los alias con raíz ("papanicol", "papa nicol") atrapan cómo lo escribe la
-  // gente: papanicolau, papanicolao, papanicolado, papa nicolau. "Cuello
+  // Los alias con raíz ("papanicol") atrapan cómo lo escribe la gente:
+  // papanicolau, papanicolao, papanicolado; los errores de tipeo que quedan
+  // afuera ("papaniculau") los resuelve matchServiceTypo. Separado va con la
+  // terminación completa: "papa nicol" suelto enganchaba "mi papá Nicolás". "Cuello
   // uterino" va solo con "examen/prueba/muestra" delante: suelto engancharía
   // "tengo cáncer de cuello uterino" y le mandaría la promo a quien no la pidió.
   {
@@ -112,7 +114,7 @@ export const defaultServices: ServiceItem[] = [
     price: 100,
     category: "procedimiento",
     aliases: [
-      "papanicol", "papa nicol", "papanikol", "papinicol", "pananicol", "pap", "pap test", "citologia",
+      "papanicol", "papa nicolau", "papa nicolao", "papa nicolaou", "papanikol", "papinicol", "pananicol", "pap", "pap test", "citologia",
       "examen de cuello uterino", "examen del cuello uterino", "prueba de cuello uterino", "prueba del cuello uterino",
       "muestra de cuello uterino", "muestra del cuello uterino", "examen del cuello de la matriz", "examen de la matriz",
     ],
@@ -390,6 +392,62 @@ export function matchService(text: string, services: ServiceItem[]): ServiceItem
     }
   }
 
+  return best ?? matchServiceTypo(haystack, services);
+}
+
+// ─── Errores de tipeo ────────────────────────────────────────────────────────
+// "papaniculau", "papnicolau", "papancolau": el PAP se escribe de mil formas y
+// los alias no alcanzan. Caso real 2026-09-21, con la campaña al aire:
+// "papaniculau" caía en "no está en nuestro catálogo" y la paciente nunca veía
+// la promo. Solo se usa si no hubo ningún match exacto: se compara cada palabra
+// del mensaje con los nombres y alias de UNA palabra, tolerando 2 errores.
+//
+// Los candados evitan que dos palabras distintas se confundan: solo palabras
+// largas (con 2 errores, las cortas se vuelven cualquier cosa) y las 3
+// primeras letras iguales ("sicologia" está a 2 errores de "citologia").
+const TYPO_MIN_NEEDLE = 8;
+const TYPO_MIN_WORD = 7;
+const TYPO_MAX_DISTANCE = 2;
+const TYPO_SAME_PREFIX = 3;
+
+// Distancia de edición (Levenshtein). Corta apenas supera `max`: solo importa
+// saber si está dentro del margen.
+function editDistance(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      rowMin = Math.min(rowMin, curr[j]);
+    }
+    if (rowMin > max) return max + 1;
+    prev = curr;
+  }
+  return prev[b.length];
+}
+
+function matchServiceTypo(haystack: string, services: ServiceItem[]): ServiceItem | null {
+  const words = haystack.split(/[^a-z0-9]+/).filter((w) => w.length >= TYPO_MIN_WORD);
+  if (!words.length) return null;
+
+  let best: ServiceItem | null = null;
+  let bestDistance = TYPO_MAX_DISTANCE + 1;
+  for (const service of services) {
+    for (const needle of [service.name, ...(service.aliases ?? [])]) {
+      const candidate = normalize(needle);
+      if (candidate.includes(" ") || candidate.length < TYPO_MIN_NEEDLE) continue;
+      for (const word of words) {
+        if (word.slice(0, TYPO_SAME_PREFIX) !== candidate.slice(0, TYPO_SAME_PREFIX)) continue;
+        const distance = editDistance(word, candidate, TYPO_MAX_DISTANCE);
+        if (distance < bestDistance) {
+          best = service;
+          bestDistance = distance;
+        }
+      }
+    }
+  }
   return best;
 }
 

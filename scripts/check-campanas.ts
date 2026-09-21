@@ -133,6 +133,13 @@ const ES_PAP = [
   "info del pap test",
   "citologia vaginal",
   "cuanto cuesta el examen del cuello uterino",
+  // Errores de tipeo que ningún alias cubre (caso real 2026-09-21: con la
+  // campaña al aire, "papaniculau" caía en "no está en nuestro catálogo").
+  "papaniculau",
+  "cuanto el papaniculao",
+  "papancolau precio",
+  "papnicolau",
+  "info papanicolaw",
 ];
 for (const text of ES_PAP) {
   const got = matchService(text, defaultServices)?.name ?? null;
@@ -146,6 +153,12 @@ const NO_ES_PAP = [
   "mi papa esta enfermo",
   "chequeo ginecologico",
   "tengo papiloma",
+  // Palabras a 2 errores de un alias: la tolerancia a tipeos no puede
+  // confundirlas ("sicologia" está a 2 de "citologia").
+  "necesito sicologia para mi hijo",
+  "virologia",
+  "mi papa nicolas esta enfermo",
+  "le tengo panico a las agujas",
 ];
 for (const text of NO_ES_PAP) {
   const got = matchService(text, defaultServices)?.name ?? null;
