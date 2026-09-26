@@ -13,7 +13,8 @@
     "check:analisis": "tsx scripts/check-analisis.ts",
     "check:routing": "tsx scripts/check-routing.ts",
     "check:negaciones": "tsx scripts/check-negaciones.ts",
-    "check:campanas": "tsx scripts/check-campanas.ts"
+    "check:campanas": "tsx scripts/check-campanas.ts",
+    "check:fechas": "tsx scripts/check-fechas.ts"
   },
   "keywords": [],
   "author": "",

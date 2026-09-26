@@ -30,12 +30,13 @@ import { buildClinicSystemPrompt, type ClinicConfig } from "@/lib/clinic/config"
 import {
   CONSULTATION_SPECIALTIES,
   findSpecialty,
-  isHolidayToday,
+  isHoliday,
   matchSpecialtyText,
   localDateISO,
   localNow,
   quoteConsultation,
 } from "@/lib/clinic/pricing";
+import { dateConflictQuestion, longDate, readDateMention, shortDayLabel } from "@/lib/clinic/dates";
 import {
   activePromo,
   formatServicePrice,
@@ -44,6 +45,7 @@ import {
   promoIntro,
   promoMentions,
   quoteService,
+  serviceForDay,
   type ServiceItem,
 } from "@/lib/clinic/services";
 import {
@@ -110,6 +112,10 @@ export type TurnAnalysis = {
   confirms: boolean;
   wantsOut: boolean;
   isQuestion: boolean;
+  // Dijo un día que no calza con la fecha real ("hoy sábado" un viernes): la
+  // pregunta para aclararlo, armada por código. Mientras tanto el horario no
+  // se toma (ver lib/clinic/dates.ts).
+  dateConflict: string | null;
 };
 
 const ANALYSIS_SYSTEM = `Analizás mensajes de WhatsApp de pacientes de una clínica en Bolivia. Respondés ÚNICAMENTE con un JSON válido, sin texto extra:
@@ -270,7 +276,34 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): Turn
     confirms: raw?.confirms === true,
     wantsOut: raw?.wantsOut === true,
     isQuestion,
+    dateConflict: null,
   };
+}
+
+// La fecha del horario la calcula el código, no el modelo. Si el texto nombra
+// un día claro, esa fecha manda sobre la que devolvió el modelo; si no nombra
+// ninguno ("lo antes posible", "la otra semana"), queda la del modelo. Un día
+// que no calza con la fecha real anula el horario hasta que el paciente aclare.
+export function applyDateMention(analysis: TurnAnalysis, text: string, today: string): TurnAnalysis {
+  const mention = readDateMention(text, today);
+  if (mention.kind === "conflict") {
+    return {
+      ...analysis,
+      preferredTime: null,
+      preferredDate: null,
+      preferredHour: null,
+      dateConflict: dateConflictQuestion(mention, today),
+    };
+  }
+  if (mention.kind === "date" && analysis.preferredTime) return { ...analysis, preferredDate: mention.date };
+  return analysis;
+}
+
+// "mañana a las 10 (sábado 26/09)": lo que dijo, con la fecha real al lado
+// para que el paciente y el asesor vean el mismo día.
+function preferredTimeWithDate(draft: LeadDraft): string | null {
+  if (!draft.preferredTime) return null;
+  return draft.preferredDate ? `${draft.preferredTime} (${shortDayLabel(draft.preferredDate)})` : draft.preferredTime;
 }
 
 // null si el modelo falla: el flujo sigue con lo que ya tenía (vuelve a pedir
@@ -319,7 +352,8 @@ export async function analyzeTurn(
       temperature: 0,
       abortSignal: AbortSignal.timeout(10000),
     });
-    return sanitizeAnalysis(JSON.parse(text.trim().replace(/^```(?:json)?|```$/g, "").trim()), ctx.text, ctx.clinic.services);
+    const analysis = sanitizeAnalysis(JSON.parse(text.trim().replace(/^```(?:json)?|```$/g, "").trim()), ctx.text, ctx.clinic.services);
+    return applyDateMention(analysis, ctx.text, now.date);
   } catch (err) {
     console.error("analyzeTurn failed", getErrorMessage(err));
     return null;
@@ -375,11 +409,21 @@ export type QaAnswer =
 // Respuesta libre con el prompt de la clínica (dudas en medio de la solicitud o
 // Q&A general).
 export async function answerQuestion(ctx: LeadContext, text: string): Promise<QaAnswer> {
+  // "¿A qué hora atienden hoy sábado?" un viernes: la aclaración la escribe el
+  // código (no se deja a criterio del modelo) y el modelo responde por el día real.
+  const today = localNow(ctx.clinic.timezone).date;
+  const mention = readDateMention(text, today);
+  const conflict = mention.kind === "conflict" ? mention : null;
+  const correction = conflict ? `Una aclaración: hoy es *${longDate(today)}* 😊` : null;
+  const system = conflict
+    ? `${buildClinicSystemPrompt(ctx.clinic)}\n\nEl paciente dijo "${conflict.said}", pero hoy es ${longDate(today)}. Tu respuesta va a continuación de un mensaje que ya le aclara qué día es hoy: no lo repitas y respondé según la fecha real.`
+    : buildClinicSystemPrompt(ctx.clinic);
+
   try {
     const history = await getRecentConversationHistory(ctx.conversationId, 8);
     const { text: answer } = await generateText({
       model: model(),
-      system: buildClinicSystemPrompt(ctx.clinic),
+      system,
       messages: [
         ...history.map((h) => ({ role: h.role as "user" | "assistant", content: h.content })),
         { role: "user" as const, content: text },
@@ -404,7 +448,7 @@ export async function answerQuestion(ctx: LeadContext, text: string): Promise<Qa
       return { status: "unsafe" };
     }
 
-    return { status: "ok", text: clean };
+    return { status: "ok", text: correction ? `${correction}\n\n${clean}` : clean };
   } catch (err) {
     console.error("answerQuestion failed", err);
     await logSystemEvent({
@@ -502,7 +546,7 @@ function leadRowFields(draft: LeadDraft): LeadFields {
     // para que el asesor lo revise antes de avisar nada.
     specialtyUnverified: Boolean(!draft.specialtyKey && draft.unmatchedRequestText),
     doctorPreference: draft.doctorPreference ?? null,
-    preferredTime: draft.preferredTime ?? null,
+    preferredTime: preferredTimeWithDate(draft),
     visitType: draft.visitType ?? null,
     paymentIntention: draft.paymentIntention ?? null,
     serviceName: draft.serviceName ?? null,
@@ -536,34 +580,37 @@ function askMissing(draft: LeadDraft, missing: Field[], intro?: string): string 
 }
 
 function priceLines(draft: LeadDraft, clinic: ClinicConfig): { lines: string[]; quote: string | null } {
-  const holidayMessage = "Hoy es *feriado* y los precios cambian: el asesor le confirma el monto.";
-
   if (draft.kind === "servicio") {
     const today = localDateISO(new Date(), clinic.timezone);
-    const holidayToday = isHolidayToday(clinic.holidayDate, clinic.timezone);
-    const service = clinic.services.find((s) => s.name === draft.serviceName);
+    const holidays = clinic.holidayDates;
+    const day = draft.preferredDate ?? today;
+    const matched = clinic.services.find((s) => s.name === draft.serviceName);
+    // Con el día pedido se elige la variante que corresponde: "Retiro de uña"
+    // un sábado o un feriado se cobra como "Retiro de uña fin de semana".
+    const service = matched && draft.preferredDate
+      ? serviceForDay(matched, clinic.services, draft.preferredDate, holidays)
+      : matched;
 
     // Con promo, el precio depende del día y la hora que pidió (la promo tiene
     // franja y fecha de fin): se calcula acá, no se repite el de la apertura.
-    if (service && activePromo(service, draft.preferredDate ?? today)) {
+    if (service && activePromo(service, day)) {
       const quote = quoteService(service, {
         today,
         date: draft.preferredDate,
         hour: draft.preferredHour,
-        holidayToday,
+        holidays,
         doctorPreference: draft.doctorPreference,
       });
       return { lines: [`💰 Precio: ${quote}`], quote };
     }
 
-    if (holidayToday && (!draft.preferredDate || draft.preferredDate === today)) {
-      return { lines: [`📅 ${holidayMessage}`], quote: "Feriado: precio a confirmar" };
-    }
     // Si la promo venció entre la apertura y el resumen, el precio guardado ya
-    // no vale: se recalcula con el regular.
-    const serviceQuote = service
-      ? formatServicePrice(service, draft.preferredDate ?? today) + (service.note ? ` (${service.note})` : "")
-      : draft.serviceQuote;
+    // no vale: se recalcula con el regular. En feriado, la nota de la variante
+    // ("sábado y domingo") confundiría: se dice que es feriado.
+    const note = service && isHoliday(day, holidays) && draft.preferredDate
+      ? " (feriado)"
+      : service?.note ? ` (${service.note})` : "";
+    const serviceQuote = service ? formatServicePrice(service, day) + note : draft.serviceQuote;
     return { lines: serviceQuote ? [`💰 Precio: ${serviceQuote}`] : [], quote: serviceQuote ?? null };
   }
 
@@ -585,20 +632,17 @@ function priceLines(draft: LeadDraft, clinic: ClinicConfig): { lines: string[]; 
     spec,
     date: draft.preferredDate,
     hour: draft.preferredHour,
-    holidayDate: clinic.holidayDate,
-    timezone: clinic.timezone,
+    holidays: clinic.holidayDates,
   });
   const lines = [
-    quote.kind === "holiday"
-      ? `📅 ${quote.text}`
-      : quote.kind === "exact"
-        ? `💰 Precio de la consulta en ese horario: *${quote.text}*`
-        : `💰 Precio de la consulta: ${quote.text}`,
+    quote.kind === "exact"
+      ? `💰 Precio de la consulta en ese horario: *${quote.text}*`
+      : `💰 Precio de la consulta: ${quote.text}`,
   ];
   if (spec.reconsultaDays && draft.visitType === "nueva") {
     lines.push(`ℹ️ Si luego necesita reconsulta, es *gratis* dentro de los ${spec.reconsultaDays} días siguientes a su consulta.`);
   }
-  return { lines, quote: quote.kind === "holiday" ? "Feriado: precio a confirmar" : quote.text };
+  return { lines, quote: quote.text };
 }
 
 function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; priceQuote: string | null } {
@@ -620,7 +664,7 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
       ? `🩺 Pidió: ${draft.unmatchedRequestText} _(no está en nuestro catálogo — el asesor confirma si lo ofrecemos y el precio)_`
       : null,
     draft.doctorPreference ? `👨‍⚕️ Médico de preferencia: ${draft.doctorPreference}` : null,
-    `🗓️ Horario que prefiere: ${draft.preferredTime}`,
+    `🗓️ Horario que prefiere: ${preferredTimeWithDate(draft)}`,
     showVisitType ? `🔁 ${draft.visitType === "reconsulta" ? "Reconsulta" : "Consulta nueva"}` : null,
     // Solo se confirma lo que el paciente dijo. El bot no cobra ni manda el QR:
     // el asesor ve el dato y sigue desde ahí.
@@ -691,6 +735,14 @@ async function sendSummary(ctx: FlowContext, draft: LeadDraft, intro?: string): 
   return { reply: intro ? `${intro}\n\n${text}` : text, pauseAfterReply: false };
 }
 
+// El paciente dijo un día que no calza con la fecha real. Se descarta el
+// horario (el anterior también: lo está cambiando) y se le pregunta cuál quiso
+// decir; con la respuesta, el flujo sigue normal.
+async function askDateAgain(ctx: FlowContext, draft: LeadDraft, question: string, intro?: string): Promise<LeadTurnResult> {
+  await saveStep(ctx, "collecting_lead", { ...draft, preferredTime: null, preferredDate: null, preferredHour: null });
+  return { reply: intro ? `${intro}\n\n${question}` : question, pauseAfterReply: false };
+}
+
 async function askOrSummarize(ctx: FlowContext, draft: LeadDraft, intro?: string): Promise<LeadTurnResult> {
   const missing = missingFields(draft);
   if (!missing.length) return sendSummary(ctx, draft, intro);
@@ -716,7 +768,7 @@ export async function startLead(
 
   if (ctx.kind === "servicio" && ctx.service) {
     const today = localDateISO(new Date(), ctx.clinic.timezone);
-    const holidayToday = isHolidayToday(ctx.clinic.holidayDate, ctx.clinic.timezone);
+    const holidayToday = isHoliday(today, ctx.clinic.holidayDates);
     const promo = activePromo(ctx.service, today);
     base.serviceName = ctx.service.name;
     base.serviceQuote = formatServicePrice(ctx.service, today) + (ctx.service.note ? ` (${ctx.service.note})` : "");
@@ -729,13 +781,13 @@ export async function startLead(
         : "";
       intro = promoIntro(ctx.service, promo) + holidayLine;
     } else {
-      intro = holidayToday
-        ? `Con gusto le ayudo con *${ctx.service.name}* 😊 Hoy es *feriado* y los precios cambian: el asesor le confirma el monto.`
-        : `*${ctx.service.name}*: ${base.serviceQuote} 😊`;
+      intro = `*${ctx.service.name}*: ${base.serviceQuote} 😊`;
     }
   }
 
-  return askOrSummarize(ctx, mergeAnalysis(base, ctx.analysis).draft, intro);
+  const draft = mergeAnalysis(base, ctx.analysis).draft;
+  if (ctx.analysis?.dateConflict) return askDateAgain(ctx, draft, ctx.analysis.dateConflict, intro);
+  return askOrSummarize(ctx, draft, intro);
 }
 
 // El paciente PREGUNTÓ por algo que no está en catálogo ("¿tienen
@@ -789,6 +841,10 @@ export async function continueLead(
   // pendiente y sigue como cualquier otra recolección.
   const accepted = lead.offerPending ? { ...lead, offerPending: false } : lead;
   const { draft, changed } = mergeAnalysis(accepted, analysis);
+
+  // Un día que no calza manda sobre todo lo demás: si se siguiera, el resumen
+  // le confirmaría un día que no es.
+  if (analysis?.dateConflict) return askDateAgain(ctx, draft, analysis.dateConflict);
 
   if (session.step === "confirming_lead") {
     if (changed) return sendSummary(ctx, draft, "¡Listo! Actualicé sus datos 😊");

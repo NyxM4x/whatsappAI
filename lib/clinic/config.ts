@@ -27,6 +27,7 @@ import {
   type ServiceItem,
 } from "@/lib/clinic/services";
 import { buildConsultationPricingBlock, isHolidayToday, localNow } from "@/lib/clinic/pricing";
+import { longDate, upcomingDays } from "@/lib/clinic/dates";
 
 export type CatalogItem = { name: string; price: number };
 
@@ -52,9 +53,10 @@ const defaultClinicConfig = {
   // desde su propio número.
   kapsoPhoneNumberId: null as string | null,
 
-  // Fecha "YYYY-MM-DD" marcada como feriado desde el panel. Solo cuenta si es
-  // la de hoy (ver isHolidayToday): así se apaga sola al cambiar el día.
-  holidayDate: null as string | null,
+  // Fechas "YYYY-MM-DD" marcadas como feriado desde el panel (se pueden marcar
+  // por adelantado). En esos días se cobra la tarifa de domingo; las pasadas
+  // no molestan: solo cuenta la fecha que se cotiza.
+  holidayDates: [] as string[],
 
   // Dirección tal como la da la clínica en su respuesta rápida (2026-09-21).
   generalInfo: {
@@ -307,13 +309,20 @@ export function mapClinicSettingsRowForTest(row: any): ClinicConfig {
   return mapClinicSettingsRow(row);
 }
 
+// holiday_dates (lista) reemplazó a holiday_date (un solo día) el 2026-09-26.
+// Mientras la migración no esté corrida en una base, se sigue leyendo la vieja.
+function mapHolidayDates(row: any): string[] {
+  if (Array.isArray(row.holiday_dates)) return row.holiday_dates.map((d: unknown) => String(d).slice(0, 10));
+  return row.holiday_date ? [String(row.holiday_date).slice(0, 10)] : [];
+}
+
 function mapClinicSettingsRow(row: any): ClinicConfig {
   const replies = row.replies ?? {};
   return {
     ...defaultClinicConfig, // conserva los patrones de intención (regex, iguales para todas)
     slug: String(row.business),
     kapsoPhoneNumberId: row.kapso_phone_number_id ?? null,
-    holidayDate: row.holiday_date ? String(row.holiday_date).slice(0, 10) : null,
+    holidayDates: mapHolidayDates(row),
     clinicName: String(row.clinic_name ?? defaultClinicConfig.clinicName),
     timezone: String(row.timezone ?? defaultClinicConfig.timezone),
     generalInfo: {
@@ -377,23 +386,23 @@ export async function getClinicConfig(business: string = DEFAULT_BUSINESS_SLUG):
   return value;
 }
 
-// Marca (o quita, con null) el feriado del día desde el panel. Invalida la
-// caché de esta instancia para que el panel lo vea al instante; el webhook, en
-// otra instancia, lo toma en ≤45 s (CONFIG_CACHE_TTL_MS).
-export async function setClinicHolidayDate(
+// Guarda la lista de feriados que arma el panel. Invalida la caché de esta
+// instancia para que el panel lo vea al instante; el webhook, en otra
+// instancia, lo toma en ≤45 s (CONFIG_CACHE_TTL_MS).
+export async function setClinicHolidayDates(
   business: string,
-  holidayDate: string | null,
+  holidayDates: string[],
   updatedBy: string,
 ): Promise<boolean> {
   const supabase = getSupabaseClient();
   const { error } = await supabase
     .from("clinic_settings")
-    .update({ holiday_date: holidayDate, updated_by: updatedBy })
+    .update({ holiday_dates: holidayDates, updated_by: updatedBy })
     .eq("business", business);
 
   invalidateClinicConfigCache(business);
   if (error) {
-    console.error("setClinicHolidayDate failed", error);
+    console.error("setClinicHolidayDates failed", error);
     return false;
   }
   return true;
@@ -446,14 +455,16 @@ function buildServicesBlock(services: ServiceItem[], today: string): string {
 export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
   const labs = clinic.labs.map((l) => `- ${l.name}: ${l.price} Bs`).join("\n");
   const meds = clinic.medications.map((m) => `- ${m.name}: ${m.price} Bs`).join("\n");
-  const holidayToday = isHolidayToday(clinic.holidayDate, clinic.timezone);
   const now = localNow(clinic.timezone);
   const campaigns = buildCampaignsBlock(clinic.services, now.date);
 
   return [
     clinic.systemPromptBase,
     "DATOS DE LA CLÍNICA:",
-    `- Hoy es ${now.dayName} ${now.date}`,
+    // La fecha la calcula el código, no el modelo: incluye los próximos días
+    // para que "el sábado" o "pasado mañana" no dependan de su aritmética.
+    `- Hoy es ${longDate(now.date)} de ${now.date.slice(0, 4)}, son las ${now.hhmm}${isHolidayToday(clinic.holidayDates, clinic.timezone) ? " (feriado)" : ""}.`,
+    `- Próximos días: ${upcomingDays(now.date)}.`,
     `- Nombre: ${clinic.clinicName}`,
     `- Dirección: ${clinic.generalInfo.address}`,
     `- Teléfono: ${clinic.generalInfo.phone}`,
@@ -461,7 +472,7 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
     `- Horario de atención: ${clinic.generalInfo.hours}`,
     `- Formas de pago: ${clinic.paymentMethods.join(", ")} (los datos de pago y el QR los envía un asesor después de confirmar la ficha o el servicio)`,
     "",
-    buildConsultationPricingBlock(holidayToday),
+    buildConsultationPricingBlock(clinic.holidayDates, now.date),
     "",
     "EXÁMENES DE LABORATORIO (precios):",
     labs,
@@ -484,6 +495,7 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
     "- Nunca hables de tus listas, catálogos, registros ni de lo que tenés o no tenés cargado: al paciente no le sirve y suena a rechazo. Hablá de lo que SÍ podés hacer: tomar su pedido para que un asesor se lo confirme.",
     "- Nunca ofrezcas hacer una gestión ('¿quiere que le consulte?', '¿quiere que pregunte al equipo?', 'le averiguo'): vos no consultás nada. Pedí los datos directamente: nombre completo del paciente, y día y hora que le queden cómodos.",
     "- Nunca ofrezcas ni confirmes horarios, turnos ni médicos disponibles: eso lo confirma un asesor de la clínica. La única excepción es lo que diga una CAMPAÑA VIGENTE de arriba sobre su propio horario y quién la atiende: eso es información de la campaña, no un turno confirmado.",
+    "- La fecha de hoy es la de DATOS DE LA CLÍNICA, no la que diga el paciente. Si nombra un día que no calza ('hoy sábado' cuando hoy es viernes), aclarale con amabilidad qué día es hoy; nunca le confirmes un día equivocado.",
     "- Para urgencias médicas reales indica acudir a Emergencias / llamar a la clínica; nunca des diagnósticos ni consejo médico.",
     "- Nunca menciones que sos un bot, IA o automatización, aunque te lo pregunten directamente.",
   ].join("\n");

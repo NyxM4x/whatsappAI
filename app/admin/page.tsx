@@ -7,15 +7,15 @@ import {
   type AdminAppointmentFilter,
 } from "@/lib/clinic/data";
 import { getClinicConfig } from "@/lib/clinic/config";
-import { isHolidayToday } from "@/lib/clinic/pricing";
+import { localDateISO, upcomingHolidays } from "@/lib/clinic/pricing";
 import {
   cancelAppointmentAction,
   confirmAppointmentAction,
   updateAppointmentDetailsAction,
   logoutAction,
-  toggleHolidayAction,
   markPaymentReviewedAction,
 } from "./actions";
+import HolidayDialog from "./HolidayDialog";
 import LeadsBoard from "./LeadsBoard";
 
 type Tab = "solicitudes" | "pagos" | "citas";
@@ -99,7 +99,8 @@ export default async function AdminDashboardPage({
 
   const activeTab: Tab = TABS.some((t) => t.value === tab) ? (tab as Tab) : "solicitudes";
   const currentPage = Math.max(1, Number(page) || 1);
-  const holidayToday = isHolidayToday(clinic.holidayDate, clinic.timezone);
+  const today = localDateISO(new Date(), clinic.timezone);
+  const holidays = upcomingHolidays(clinic.holidayDates, today);
 
   return (
     <main className="admin-dashboard">
@@ -109,25 +110,16 @@ export default async function AdminDashboardPage({
           <p>Panel interno — {staff.name}</p>
         </div>
         <div className="admin-header-actions">
-          <form action={toggleHolidayAction}>
-            <input type="hidden" name="enable" value={holidayToday ? "0" : "1"} />
-            <button
-              type="submit"
-              className={holidayToday ? "btn-holiday active" : "btn-holiday"}
-              title="Mientras esté activo, el bot no da precios de hoy. Se desactiva solo a medianoche."
-            >
-              {holidayToday ? "📅 Hoy es feriado — quitar" : "📅 Marcar hoy como feriado"}
-            </button>
-          </form>
+          <HolidayDialog today={today} holidays={holidays} />
           <form action={logoutAction}>
             <button type="submit" className="btn-secondary">Cerrar sesión</button>
           </form>
         </div>
       </header>
 
-      {holidayToday && (
+      {holidays.includes(today) && (
         <p className="holiday-banner">
-          Hoy está marcado como <strong>feriado</strong>: el bot no da precios y avisa que cambian. Se desactiva solo a medianoche.
+          Hoy está marcado como <strong>feriado</strong>: el bot cobra la tarifa de domingo. Se desactiva solo a medianoche.
         </p>
       )}
 

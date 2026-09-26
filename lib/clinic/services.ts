@@ -237,11 +237,28 @@ export function formatServicePrice(service: ServiceItem, day: string): string {
   return promo ? promoPrice(service, promo) : regularPrice(service);
 }
 
+// Algunos servicios tienen precio de fin de semana como ítem aparte ("Retiro de
+// uña" y "Retiro de uña fin de semana"). Para el día pedido se elige el que
+// corresponde; un feriado se cobra como fin de semana.
+const WEEKEND_SUFFIX = " fin de semana";
+
+export function serviceForDay(
+  service: ServiceItem,
+  services: ServiceItem[],
+  date: string,
+  holidays: readonly string[] = [],
+): ServiceItem {
+  const weekend = [0, 6].includes(weekdayOfDate(date)) || holidays.includes(date);
+  const baseName = service.name.endsWith(WEEKEND_SUFFIX) ? service.name.slice(0, -WEEKEND_SUFFIX.length) : service.name;
+  const wanted = weekend ? `${baseName}${WEEKEND_SUFFIX}` : baseName;
+  return services.find((s) => s.name === wanted) ?? service;
+}
+
 export type ServiceQuoteInput = {
   today: string;                    // "YYYY-MM-DD" en hora de la clínica
   date?: string | null;             // el día que pidió el paciente
   hour?: string | null;             // "HH:MM"
-  holidayToday?: boolean;
+  holidays?: readonly string[];     // fechas marcadas como feriado en el panel
   doctorPreference?: string | null;
 };
 
@@ -262,8 +279,9 @@ export function quoteService(service: ServiceItem, input: ServiceQuoteInput): st
   const inPromo = promoPrice(service, promo);
   const outside = promo.outside ? `${promo.outside.price} Bs (${promo.outside.label})` : regularPrice(service);
 
-  if (input.holidayToday && (!input.date || input.date === input.today)) {
-    return `${outside}: hoy es feriado y la promoción no aplica`;
+  const day = input.date ?? input.today;
+  if (input.holidays?.includes(day)) {
+    return `${outside}: ${day === input.today ? "hoy es feriado" : "ese día es feriado"} y la promoción no aplica`;
   }
   if (promo.outsideDoctorPattern && input.doctorPreference && new RegExp(promo.outsideDoctorPattern, "i").test(input.doctorPreference)) {
     return `${outside}: ${promo.outsideDoctorNote ?? "con el médico de su preferencia la promoción no aplica"}`;

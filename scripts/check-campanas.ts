@@ -9,7 +9,8 @@
 //   3. el mensaje de apertura dice lo que la clínica pidió y no se veta;
 //   4. el PAP se reconoce como lo escribe la gente, y lo que NO es el PAP
 //      (VPH, colposcopía, "cáncer de cuello uterino") no se le parece;
-//   5. ginecología cobra 200 en fin de semana y en feriado.
+//   5. ginecología cobra 200 en fin de semana y en feriado;
+//   6. un feriado se cobra con la tarifa de domingo (consultas y servicios).
 //
 //   npx tsx scripts/check-campanas.ts
 // ============================================================================
@@ -26,6 +27,7 @@ import {
   promoIntro,
   promoMentions,
   quoteService,
+  serviceForDay,
 } from "../lib/clinic/services";
 
 let failures = 0;
@@ -54,8 +56,9 @@ const CASOS: [string, Parameters<typeof quoteService>[1], (q: string) => boolean
   ["domingo sin hora → a llamado", { today: HOY, date: "2026-09-27" }, (q) => q.startsWith("200 Bs")],
   ["martes sin hora → la regla completa", { today: HOY, date: "2026-09-22" }, (q) => q.includes("50 Bs") && q.includes("fuera de ese horario, 200 Bs")],
   ["sin día → la regla completa", { today: HOY }, (q) => q.includes("de lunes a viernes de 8:00 a 12:00") && q.includes("200 Bs")],
-  ["feriado marcado hoy → a llamado", { today: HOY, holidayToday: true }, (q) => q.startsWith("200 Bs") && q.includes("feriado")],
-  ["feriado hoy pero pide para mañana → promo", { today: HOY, date: "2026-09-22", hour: "09:00", holidayToday: true }, (q) => q === PROMO],
+  ["feriado marcado hoy → a llamado", { today: HOY, holidays: [HOY] }, (q) => q.startsWith("200 Bs") && q.includes("hoy es feriado")],
+  ["feriado hoy pero pide para mañana → promo", { today: HOY, date: "2026-09-22", hour: "09:00", holidays: [HOY] }, (q) => q === PROMO],
+  ["pide un martes marcado como feriado → a llamado", { today: HOY, date: "2026-09-22", hour: "09:00", holidays: ["2026-09-22"] }, (q) => q.startsWith("200 Bs") && q.includes("ese día es feriado")],
   ["prefiere doctora → a llamado", { today: HOY, date: "2026-09-22", hour: "09:00", doctorPreference: "doctora (mujer)" }, (q) => q.startsWith("200 Bs")],
   ["pide a la Dra. Medina → a llamado, de 18 a 19", { today: HOY, date: "2026-09-22", hour: "18:00", doctorPreference: "Dra. Medina" }, (q) => q.startsWith("200 Bs") && q.includes("18:00 a 19:00")],
   ["a llamado incluye toma y análisis", { today: HOY, date: "2026-09-26", hour: "10:00" }, (q) => q.includes("incluye la toma y el análisis")],
@@ -183,16 +186,37 @@ for (const [text, esperado] of [
 console.log("\nCONSULTA DE GINECOLOGÍA\n");
 
 const gin = findSpecialty("ginecologia")!;
-const feriado = quoteConsultation({ spec: gin, holidayDate: HOY, timezone: "America/La_Paz", now: new Date(`${HOY}T15:00:00Z`) });
+const feriado = quoteConsultation({ spec: gin, date: HOY, hour: "10:00", holidays: [HOY] });
 check("feriado marcado → 200 a llamado", feriado.kind === "exact" && feriado.price === 200, feriado.text);
-const sabado = quoteConsultation({ spec: gin, date: "2026-09-26", hour: "10:00", timezone: "America/La_Paz", now: new Date(`${HOY}T15:00:00Z`) });
+const sabado = quoteConsultation({ spec: gin, date: "2026-09-26", hour: "10:00" });
 check("sábado 10:00 → 200", sabado.price === 200, sabado.text);
-const martes = quoteConsultation({ spec: gin, date: "2026-09-22", hour: "10:00", timezone: "America/La_Paz", now: new Date(`${HOY}T15:00:00Z`) });
+const martes = quoteConsultation({ spec: gin, date: "2026-09-22", hour: "10:00" });
 check("martes 10:00 → 80", martes.price === 80, martes.text);
-const martesNoche = quoteConsultation({ spec: gin, date: "2026-09-22", hour: "18:30", timezone: "America/La_Paz", now: new Date(`${HOY}T15:00:00Z`) });
+const martesNoche = quoteConsultation({ spec: gin, date: "2026-09-22", hour: "18:30" });
 check("martes 18:30 → 200 (a llamado)", martesNoche.price === 200, martesNoche.text);
-const pediatriaFeriado = quoteConsultation({ spec: findSpecialty("pediatria")!, holidayDate: HOY, timezone: "America/La_Paz", now: new Date(`${HOY}T15:00:00Z`) });
-check("pediatría en feriado → sigue sin cotizar", pediatriaFeriado.kind === "holiday");
+
+// ─── 7. Feriado = tarifa de domingo ──────────────────────────────────────────
+console.log("\nFERIADO CON TARIFA DE DOMINGO\n");
+
+const ped = findSpecialty("pediatria")!;
+const general = findSpecialty("medicina-general")!;
+const pediatriaFeriado = quoteConsultation({ spec: ped, date: HOY, hour: "10:00", holidays: [HOY] });
+check("pediatría lunes feriado 10:00 → 120 (domingo)", pediatriaFeriado.price === 120, pediatriaFeriado.text);
+const pediatriaLunes = quoteConsultation({ spec: ped, date: HOY, hour: "10:00" });
+check("pediatría lunes normal 10:00 → 80", pediatriaLunes.price === 80, pediatriaLunes.text);
+const generalFeriado = quoteConsultation({ spec: general, date: HOY, hour: "10:00", holidays: [HOY] });
+check("medicina general feriado 10:00 → 80 (domingo)", generalFeriado.price === 80, generalFeriado.text);
+const madrugada = quoteConsultation({ spec: ped, date: "2026-09-22", hour: "03:00", holidays: [HOY] });
+check("madrugada después del feriado → 120 (noche del feriado)", madrugada.price === 120, madrugada.text);
+const diaFeriado = quoteConsultation({ spec: ped, date: HOY, holidays: [HOY] });
+check("solo el día, feriado → tramos de domingo", diaFeriado.kind === "day" && diaFeriado.text.includes("120 Bs") && diaFeriado.text.includes("feriado"), diaFeriado.text);
+
+const unaLv = defaultServices.find((s) => s.name === "Retiro de uña")!;
+check("retiro de uña un sábado → fin de semana", serviceForDay(unaLv, defaultServices, "2026-09-26").price === 100);
+check("retiro de uña un lunes feriado → fin de semana", serviceForDay(unaLv, defaultServices, HOY, [HOY]).price === 100);
+check("retiro de uña un lunes normal → lunes a viernes", serviceForDay(unaLv, defaultServices, HOY).price === 80);
+const unaFinde = defaultServices.find((s) => s.name === "Retiro de uña fin de semana")!;
+check("pidió la de fin de semana para un martes → lunes a viernes", serviceForDay(unaFinde, defaultServices, "2026-09-22").price === 80);
 
 console.log(failures === 0 ? "\n✅ Campañas en orden." : `\n${failures} fallo(s).`);
 process.exit(failures === 0 ? 0 : 1);

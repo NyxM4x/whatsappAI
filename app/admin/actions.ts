@@ -19,8 +19,8 @@ import {
   logAdminAudit,
   markPaymentProofReviewed,
 } from "@/lib/clinic/data";
-import { getClinicConfig, setClinicHolidayDate } from "@/lib/clinic/config";
-import { localDateISO } from "@/lib/clinic/pricing";
+import { getClinicConfig, setClinicHolidayDates } from "@/lib/clinic/config";
+import { localDateISO, upcomingHolidays } from "@/lib/clinic/pricing";
 import { getKapsoClient } from "@/lib/engine/clients";
 import { isWithinServiceWindow } from "@/lib/engine/data";
 import { getErrorMessage } from "@/lib/engine/logging";
@@ -180,29 +180,52 @@ export async function confirmAppointmentAction(formData: FormData) {
   revalidatePath("/admin");
 }
 
-// Feriado del día: lo activa la enfermera desde el panel. Se guarda la FECHA
-// de hoy (no un sí/no), así se apaga sola a medianoche sin ningún cron. Mientras
-// está activo, el bot no cotiza precios para hoy (ver lib/clinic/pricing.ts).
-export async function toggleHolidayAction(formData: FormData) {
+export type HolidayActionState = { error: string | null };
+
+// Feriados: la secretaria marca o quita fechas desde la ventana del panel,
+// también por adelantado. Se guardan FECHAS (no un sí/no), así cada una deja de
+// valer sola al pasar, sin ningún cron. En esos días el bot cobra la tarifa de
+// domingo (ver lib/clinic/pricing.ts).
+export async function updateHolidaysAction(_prev: HolidayActionState, formData: FormData): Promise<HolidayActionState> {
   const staff = await requireStaff();
   const clinic = await getClinicConfig(staff.business);
-  const enable = String(formData.get("enable") ?? "") === "1";
+  const intent = String(formData.get("intent") ?? "");
+  const date = String(formData.get("date") ?? "");
   const today = localDateISO(new Date(), clinic.timezone);
-  const holidayDate = enable ? today : null;
 
-  await setClinicHolidayDate(staff.business, holidayDate, staff.staffId);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(date))) {
+    return { error: "Elija una fecha válida." };
+  }
+  if (intent === "add" && date < today) {
+    return { error: "Esa fecha ya pasó: elija hoy o un día que venga." };
+  }
+
+  // Las fechas pasadas se limpian de paso: ya no cotizan nada.
+  const current = upcomingHolidays(clinic.holidayDates, today);
+  const next =
+    intent === "add"
+      ? upcomingHolidays([...current, date], today)
+      : intent === "remove"
+        ? current.filter((d) => d !== date)
+        : null;
+  if (!next) return { error: "Acción no reconocida." };
+
+  if (!(await setClinicHolidayDates(staff.business, next, staff.staffId))) {
+    return { error: "No se pudo guardar. Intente de nuevo; si sigue fallando, avise al soporte." };
+  }
   await logAdminAudit({
     business: staff.business,
     actorId: staff.staffId,
     actorName: staff.name,
-    action: enable ? "holiday.enable" : "holiday.disable",
+    action: intent === "add" ? "holiday.add" : "holiday.remove",
     entity: "clinic_settings",
     entityId: staff.business,
-    before: { holidayDate: clinic.holidayDate },
-    after: { holidayDate },
+    before: { holidayDates: current },
+    after: { holidayDates: next },
   });
 
   revalidatePath("/admin");
+  return { error: null };
 }
 
 // Marca un comprobante del listado de pagos como revisado por el staff.

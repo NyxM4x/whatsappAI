@@ -11,9 +11,9 @@
 //   - En la hora de corte rige la tarifa de DESPUÉS (a las 19:00 ya es noche).
 //   - La noche va de 19:00 a 07:00: de 00:00 a 07:00 se cobra la tarifa
 //     nocturna del día anterior.
-//   - Feriados: no se cotizan, salvo las especialidades con holidayPrice. La
-//     enfermera marca el día en el panel (clinic_settings.holiday_date) y el
-//     bot avisa que los precios cambian.
+//   - Feriados: se cobran con la tarifa de DOMINGO (pedido de la clínica,
+//     2026-09-26). La secretaria marca las fechas desde el panel
+//     (clinic_settings.holiday_dates), también por adelantado.
 // Donde el Excel no trae tarifa se conserva la que ya cobraba el sistema
 // (pediatría L-V noche y sábado de día).
 //
@@ -34,9 +34,6 @@ export type ConsultationSpecialty = {
   price: number;          // precio base: el único si no hay reglas por franja
   rules?: PriceRule[];
   scheduleNote?: string;  // franjas en texto, para el prompt y el resumen
-  // Precio cuando el panel marca feriado. Sin esto, en feriado no se cotiza y
-  // el asesor confirma el monto.
-  holidayPrice?: number;
   reconsultaDays?: number;
   // Cómo la nombra la gente por WhatsApp. Sirve para reconocer la especialidad
   // sin depender del criterio del modelo: ver matchSpecialtyText(). No hace
@@ -45,6 +42,8 @@ export type ConsultationSpecialty = {
 };
 
 const MON_FRI = [1, 2, 3, 4, 5];
+// Un feriado se cobra como este día de la semana (0 = domingo).
+const HOLIDAY_PRICED_AS = 0;
 const NIGHT_STARTS_AT = "19:00";
 const NIGHT_ENDS_AT = "07:00";
 
@@ -61,7 +60,7 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
       { weekdays: [0], from: "07:00", to: "24:00", price: 80 },
     ],
     scheduleNote:
-      "60 Bs de lunes a viernes de 7:00 a 19:00 y sábado de 7:00 a 12:00; 80 Bs de noche (19:00 a 7:00), sábado desde las 12:00 y domingo",
+      "60 Bs de lunes a viernes de 7:00 a 19:00 y sábado de 7:00 a 12:00; 80 Bs de noche (19:00 a 7:00), sábado desde las 12:00, domingo y feriados",
     reconsultaDays: 7,
     aliases: ["medico general", "medica general", "general", "medicina", "clinico", "medico clinico", "consulta general"],
   },
@@ -75,7 +74,7 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
       { weekdays: [6], from: "19:00", to: "24:00", price: 100 },
       { weekdays: [0], from: "07:00", to: "24:00", price: 120 },
     ],
-    scheduleNote: "80 Bs de lunes a viernes; sábado 120 Bs hasta las 19:00 y 100 Bs desde las 19:00; domingo 120 Bs",
+    scheduleNote: "80 Bs de lunes a viernes; sábado 120 Bs hasta las 19:00 y 100 Bs desde las 19:00; domingo y feriados 120 Bs",
     reconsultaDays: 3,
     aliases: ["pediatra", "pediatr", "medico de niños", "doctor de niños", "para mi bebe", "para mi niño", "para mi niña"],
   },
@@ -92,7 +91,6 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
       { weekdays: [0, 6], from: "07:00", to: "24:00", price: 200 },
     ],
     scheduleNote: "80 Bs de lunes a viernes de 7:00 a 18:00; desde las 18:00, sábado, domingo y feriados 200 Bs (a llamado, como emergencia)",
-    holidayPrice: 200,
     reconsultaDays: 3,
     aliases: ["ginecologo", "ginecologa", "ginecolog", "gineco", "obstetra", "obstetricia"],
   },
@@ -212,8 +210,30 @@ export function localNow(timezone: string, now: Date = new Date()) {
   return { date, hhmm, weekday, dayName: DAY_NAMES[weekday] };
 }
 
-export function isHolidayToday(holidayDate: string | null | undefined, timezone: string, now: Date = new Date()): boolean {
-  return Boolean(holidayDate) && holidayDate === localDateISO(now, timezone);
+// ─── Feriados ────────────────────────────────────────────────────────────────
+
+export function isHoliday(isoDate: string, holidays: readonly string[] = []): boolean {
+  return holidays.includes(isoDate);
+}
+
+export function isHolidayToday(holidays: readonly string[], timezone: string, now: Date = new Date()): boolean {
+  return isHoliday(localDateISO(now, timezone), holidays);
+}
+
+// Los feriados de hoy en adelante, en orden. Los pasados ya no importan.
+export function upcomingHolidays(holidays: readonly string[], today: string): string[] {
+  return [...new Set(holidays)].filter((d) => d >= today).sort();
+}
+
+// El día de la semana con cuya tarifa se cobra esa fecha: un feriado, domingo.
+export function pricingWeekday(isoDate: string, holidays: readonly string[] = []): number {
+  return isHoliday(isoDate, holidays) ? HOLIDAY_PRICED_AS : weekdayOfDate(isoDate);
+}
+
+function previousDay(isoDate: string): string {
+  const date = new Date(`${isoDate}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date.toISOString().slice(0, 10);
 }
 
 // ─── Cálculo de precio ───────────────────────────────────────────────────────
@@ -233,6 +253,14 @@ export function priceAt(spec: ConsultationSpecialty, weekday: number, hhmm: stri
   }
   const rule = spec.rules.find((r) => r.weekdays.includes(day) && r.from <= time && time < r.to);
   return rule?.price ?? spec.price;
+}
+
+// Precio en una fecha y hora concretas, con los feriados. La madrugada se
+// cobra como la noche del día anterior: la de después de un feriado, también
+// como feriado.
+export function priceOnDate(spec: ConsultationSpecialty, isoDate: string, hhmm: string, holidays: readonly string[] = []): number {
+  if (hhmm < NIGHT_ENDS_AT) return priceAt(spec, pricingWeekday(previousDay(isoDate), holidays), "23:59");
+  return priceAt(spec, pricingWeekday(isoDate, holidays), hhmm);
 }
 
 // Tramos de precio de un día, fusionando los contiguos con el mismo monto:
@@ -261,44 +289,44 @@ export function describeDayPrices(spec: ConsultationSpecialty, weekday: number):
 }
 
 export type ConsultationQuote = {
-  kind: "holiday" | "exact" | "day" | "general";
+  kind: "exact" | "day" | "general";
   text: string;
   price?: number;
 };
 
 // Cotización para el resumen de la solicitud:
-//   feriado hoy (y pide hoy o no se sabe el día) → no hay precio
 //   día + hora → precio exacto · solo día → tramos de ese día · nada → franjas generales
+// Un día marcado como feriado se cotiza con la tarifa de domingo.
 export function quoteConsultation(params: {
   spec: ConsultationSpecialty;
   date?: string | null;
   hour?: string | null;
-  holidayDate?: string | null;
-  timezone: string;
-  now?: Date;
+  holidays?: readonly string[];
 }): ConsultationQuote {
-  const { spec, date, hour, holidayDate, timezone } = params;
-  const today = localDateISO(params.now ?? new Date(), timezone);
+  const { spec, date, hour } = params;
+  const holidays = params.holidays ?? [];
 
-  if (holidayDate && holidayDate === today && (!date || date === today)) {
-    if (spec.holidayPrice) {
-      return { kind: "exact", price: spec.holidayPrice, text: `${spec.holidayPrice} Bs (feriado, a llamado)` };
-    }
-    return { kind: "holiday", text: "Hoy es *feriado* y los precios de la consulta cambian: el asesor le confirma el monto." };
-  }
-  if (date && hour) {
-    const price = priceAt(spec, weekdayOfDate(date), hour);
-    return { kind: "exact", price, text: `${price} Bs` };
-  }
   if (date) {
-    const weekday = weekdayOfDate(date);
-    return { kind: "day", text: `${describeDayPrices(spec, weekday)} (${DAY_NAMES[weekday]})` };
+    const holiday = isHoliday(date, holidays);
+    if (hour) {
+      const price = priceOnDate(spec, date, hour, holidays);
+      return { kind: "exact", price, text: holiday ? `${price} Bs (feriado)` : `${price} Bs` };
+    }
+    const weekday = pricingWeekday(date, holidays);
+    const dayName = holiday ? "feriado, tarifa de domingo" : DAY_NAMES[weekday];
+    return { kind: "day", text: `${describeDayPrices(spec, weekday)} (${dayName})` };
   }
   return { kind: "general", text: spec.scheduleNote ?? `${spec.price} Bs` };
 }
 
-// Bloque del system prompt con precios de consulta, reconsulta y feriado.
-export function buildConsultationPricingBlock(holidayToday: boolean): string {
+// "25/09"
+function shortDate(isoDate: string): string {
+  const [, month, day] = isoDate.split("-");
+  return `${day}/${month}`;
+}
+
+// Bloque del system prompt con precios de consulta, reconsulta y feriados.
+export function buildConsultationPricingBlock(holidays: readonly string[], today: string): string {
   const withReconsulta = CONSULTATION_SPECIALTIES.filter((s) => s.reconsultaDays);
   const lines = [
     `PRECIOS DE CONSULTA POR ESPECIALIDAD (cítalos tal cual; a las ${NIGHT_STARTS_AT} en punto ya rige la tarifa de noche, que dura hasta las ${NIGHT_ENDS_AT} del día siguiente):`,
@@ -308,14 +336,14 @@ export function buildConsultationPricingBlock(holidayToday: boolean): string {
       .map((s) => `${s.name} ${s.reconsultaDays} días`)
       .join(", ")}. Solo si preguntan qué pasa fuera de ese plazo, decí que se cobra como consulta nueva. En las demás especialidades no menciones la reconsulta.`,
   ];
-  if (holidayToday) {
-    const withHolidayPrice = CONSULTATION_SPECIALTIES.filter((s) => s.holidayPrice)
-      .map((s) => `${s.name} ${s.holidayPrice} Bs`)
-      .join(", ");
-    lines.push(
-      "",
-      `HOY ES FERIADO: los precios cambian. No des ningún precio para hoy (ni de consultas ni de servicios), salvo estas consultas, que tienen precio de feriado: ${withHolidayPrice}; y las CAMPAÑAS VIGENTES, que dicen qué se cobra en feriado. Para todo lo demás decí que hoy es feriado, que los precios cambian y que un asesor le confirma el monto.`,
-    );
-  }
+  const upcoming = upcomingHolidays(holidays, today);
+  lines.push(
+    "",
+    "FERIADOS: en feriado las consultas se cobran con la tarifa de DOMINGO, y los servicios que tienen precio de fin de semana (retiro de uña, lavado de oído) con el de fin de semana. Las promociones de lunes a viernes no aplican en feriado.",
+    upcoming.length
+      ? `Feriados marcados por la clínica: ${upcoming.map((d) => `${DAY_NAMES[weekdayOfDate(d)]} ${shortDate(d)}${d === today ? " (HOY)" : ""}`).join(", ")}. Solo esos días son feriado.`
+      : "No hay feriados marcados por la clínica.",
+    "Si el paciente dice que un día es feriado y no figura acá, no lo confirmes ni lo niegues: cotizá según el día de la semana y decí que el asesor le confirma el precio.",
+  );
   return lines.join("\n");
 }

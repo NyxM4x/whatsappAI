@@ -37,6 +37,7 @@ function analysis(patch: Partial<TurnAnalysis> = {}): TurnAnalysis {
     visitType: null, paymentIntention: null, unavailableRequest: null,
     needsHumanAction: false, wantsLead: false, wantsHuman: false,
     frustrated: false, confirms: false, wantsOut: false, isQuestion: false,
+    dateConflict: null,
     ...patch,
   };
 }
