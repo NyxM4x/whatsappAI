@@ -386,6 +386,31 @@ export async function getClinicConfig(business: string = DEFAULT_BUSINESS_SLUG):
   return value;
 }
 
+// Lee los feriados directo de la base, sin la caché de getClinicConfig. El panel
+// arma la lista nueva a partir de esta: con la copia en caché de otra instancia
+// (hasta 45 s vieja) una fecha recién quitada volvía a guardarse (verificado
+// 2026-09-26 con el 28/09). null si no se pudo leer.
+export async function getClinicHolidayDates(business: string): Promise<string[] | null> {
+  try {
+    const supabase = getSupabaseClient();
+    // "*" y no la columna: sin la migración, holiday_dates no existe y se lee
+    // holiday_date (ver mapHolidayDates).
+    const { data, error } = await supabase
+      .from("clinic_settings")
+      .select("*")
+      .eq("business", business)
+      .maybeSingle();
+    if (error || !data) {
+      if (error) console.error("getClinicHolidayDates failed", error);
+      return null;
+    }
+    return mapHolidayDates(data);
+  } catch (err) {
+    console.error("getClinicHolidayDates threw", err);
+    return null;
+  }
+}
+
 // Guarda la lista de feriados que arma el panel. Invalida la caché de esta
 // instancia para que el panel lo vea al instante; el webhook, en otra
 // instancia, lo toma en ≤45 s (CONFIG_CACHE_TTL_MS).

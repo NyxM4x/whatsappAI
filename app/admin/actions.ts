@@ -19,7 +19,7 @@ import {
   logAdminAudit,
   markPaymentProofReviewed,
 } from "@/lib/clinic/data";
-import { getClinicConfig, setClinicHolidayDates } from "@/lib/clinic/config";
+import { getClinicConfig, getClinicHolidayDates, setClinicHolidayDates } from "@/lib/clinic/config";
 import { localDateISO, upcomingHolidays } from "@/lib/clinic/pricing";
 import { getKapsoClient } from "@/lib/engine/clients";
 import { isWithinServiceWindow } from "@/lib/engine/data";
@@ -200,8 +200,13 @@ export async function updateHolidaysAction(_prev: HolidayActionState, formData: 
     return { error: "Esa fecha ya pasó: elija hoy o un día que venga." };
   }
 
+  // La lista se lee de la base en este momento, nunca de la caché: con una
+  // copia vieja, quitar una fecha y marcar otra la hacía reaparecer.
+  const stored = await getClinicHolidayDates(staff.business);
+  if (!stored) return { error: "No se pudieron leer los feriados. Intente de nuevo." };
+
   // Las fechas pasadas se limpian de paso: ya no cotizan nada.
-  const current = upcomingHolidays(clinic.holidayDates, today);
+  const current = upcomingHolidays(stored, today);
   const next =
     intent === "add"
       ? upcomingHolidays([...current, date], today)

@@ -6,7 +6,7 @@ import {
   ADMIN_PAGE_SIZE,
   type AdminAppointmentFilter,
 } from "@/lib/clinic/data";
-import { getClinicConfig } from "@/lib/clinic/config";
+import { getClinicConfig, getClinicHolidayDates } from "@/lib/clinic/config";
 import { localDateISO, upcomingHolidays } from "@/lib/clinic/pricing";
 import {
   cancelAppointmentAction,
@@ -100,7 +100,9 @@ export default async function AdminDashboardPage({
   const activeTab: Tab = TABS.some((t) => t.value === tab) ? (tab as Tab) : "solicitudes";
   const currentPage = Math.max(1, Number(page) || 1);
   const today = localDateISO(new Date(), clinic.timezone);
-  const holidays = upcomingHolidays(clinic.holidayDates, today);
+  // Directo de la base: la caché de getClinicConfig puede mostrar por 45 s una
+  // fecha ya quitada, y la secretaria la volvía a quitar sin ver el cambio.
+  const holidays = upcomingHolidays((await getClinicHolidayDates(staff.business)) ?? clinic.holidayDates, today);
 
   return (
     <main className="admin-dashboard">
