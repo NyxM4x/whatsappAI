@@ -149,9 +149,11 @@ const defaultClinicConfig = {
   // "¿Ya está mi resultado?": el bot no puede ver resultados, así que no puede
   // contestarlo; pasa a un asesor con alarma. Exige el posesivo o el "ya
   // está/salió": "¿en cuánto sale el resultado?" es una pregunta sobre el
-  // servicio y la contesta el Q&A.
+  // servicio y la contesta el Q&A. Al resultado mucha gente le dice "los
+  // laboratorios" o "los análisis" ("¿ya salió los laboratorios?"); esas formas
+  // solo cuentan detrás del "ya": "mis análisis" a secas puede ser hacérselos.
   resultInquiryPatterns:
-    /\bmis?\s+resultados?\b|\bresultados?\s+de\s+mis?\b|\bya\s+(?:est[aá]n?|sali[oó]|salieron|lleg[oó]|llegaron|tienen)\s+(?:el\s+|los\s+|mis?\s+)?resultados?\b/i,
+    /\bmis?\s+resultados?\b|\bresultados?\s+de\s+mis?\b|\bya\s+(?:est[aá]n?|sali[oó]|salieron|lleg[oó]|llegaron|tienen)\s+(?:el\s+|los\s+|mis?\s+|sus?\s+)?(?:resultados?|laboratorios?|an[aá]lisis|ex[aá]men(?:es)?)\b/i,
 
   locationRequestIntentPatterns:
     /\b(ubicaci[oó]n|direcci[oó]n|gps|mapa|google maps|c[oó]mo llego|d[oó]nde est[aá]n|d[oó]nde queda|localizaci[oó]n)\b/i,

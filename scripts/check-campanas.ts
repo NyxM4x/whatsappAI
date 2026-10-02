@@ -176,6 +176,10 @@ for (const [text, esperado] of [
   ["buenas, ya salió el resultado del pap?", true],
   ["me pueden mandar mis resultados", true],
   ["el resultado de mi papanicolaou", true],
+  // Al resultado le dicen "los laboratorios" (caso real 2026-09-28).
+  ["quería saber si ya salió los laboratorios de Danna", true],
+  ["ya salieron mis análisis?", true],
+  ["quiero hacerme mis análisis", false],
   ["en cuantos dias sale el resultado?", false],
   ["cuanto cuesta el pap?", false],
 ] as const) {

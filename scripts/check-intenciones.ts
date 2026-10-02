@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { getClinicConfig } from "../lib/clinic/config";
 import { findSpecialty, localDateISO, priceAt } from "../lib/clinic/pricing";
 import { matchService, formatServicePrice } from "../lib/clinic/services";
+import { matchDoctorText } from "../lib/clinic/leads";
 
 if (existsSync(".env.local")) {
   for (const line of readFileSync(".env.local", "utf8").split("\n")) {
@@ -109,10 +110,13 @@ for (const [frase, esperaEmergencia] of [
   ["cuanto sale ponerme el implante", false],
   ["pueden destaparme el oido", false],
   ["vengo a que me retiren el diu", false],
-  // Regresión: "uña" pierde la tilde de la ñ al normalizar y queda como "una".
-  // Si alguna vez se agrega borrado de artículos a normalize(), estos revientan.
+  // El retiro de uña se sigue reconociendo con la ñ conservada.
   ["tengo una uña encarnada", false],
   ["necesito retiro de uña", false],
+  ["me quiero sacar la uña del pie", false],
+  ["tengo un uñero", false],
+  ["tengo la una encarnada", false],
+  [`me quiero sacar la u${"n\u0303"}a del pie`, false],
 ] as const) {
   const s = matchService(frase, clinic.services);
   if (!s) {
@@ -121,6 +125,47 @@ for (const [frase, esperaEmergencia] of [
   }
   const emergencia = s.category === "emergencia";
   chequear(`"${frase.slice(0, 42)}"`, emergencia === esperaEmergencia, `${s.name} — ${formatServicePrice(s, hoy)}${emergencia ? " [informa]" : " [solicitud]"}`);
+}
+
+// ── Lo que NO es un servicio ─────────────────────────────────────────────────
+// Caso real 2026-09-28: la ñ se borraba al normalizar, "sacar uña" quedaba
+// "sacar una" y "sacar una consulta con el doctor" se cotizaba como retiro de
+// uña. Y por substring, "comparto" contenía "parto".
+console.log("\nNO ES UN SERVICIO  (no debe abrir una solicitud de servicio)");
+for (const frase of [
+  "Quiero saber si ya están los resultados de laboratorio así poder sacar una consulta para el doctor dagiino",
+  "quería saber si ya salió los laboratorios de Danna así poder sacar una consulta con el doctor dagiino",
+  "quiero sacar una ficha para pediatría",
+  "me puede sacar una cita para mañana",
+  "quiero retirar de una vez mis resultados",
+  "le comparto la dirección",
+  "vivo en un departamento",
+]) {
+  const s = matchService(frase, clinic.services);
+  chequear(`"${frase.slice(0, 42)}"`, !s, s ? `✗ ${s.name}` : "ninguno");
+}
+
+// ── Médico nombrado, aunque esté mal escrito ─────────────────────────────────
+console.log("\nMÉDICO NOMBRADO  (tolera errores de tipeo; ambiguo → lo decide el modelo)");
+const medicos = [
+  { name: "Dr. Miguel Edgar Daguino Delgadillo", specialtyKey: "pediatria" },
+  { name: "Dra. Rosmery Medina", specialtyKey: "pediatria" },
+  { name: "Dra. Yabdiga Medina Merida", specialtyKey: "ginecologia" },
+  { name: "Dr. Favio Tola Choque", specialtyKey: "ginecologia" },
+  { name: "Dra. Nohelia Pariente Delgadillo", specialtyKey: "medicina-general" },
+];
+for (const [frase, esperado] of [
+  ["sacar una consulta con el doctor dagiino", "pediatria"],
+  ["consulta para el dr daguino", "pediatria"],
+  ["con el doctor dahuino por favor", "pediatria"],
+  ["quiero ficha con la doctora rosmeri", "pediatria"],
+  ["con el dr tola", "ginecologia"],
+  ["con la dra medina", null],          // dos Medina, de especialidades distintas
+  ["con el doctor delgadillo", null],   // dos Delgadillo, ídem
+  ["ficha para mi hijo Miguel", null],  // sin título no es un médico
+] as const) {
+  const got = matchDoctorText(frase, medicos)?.specialtyKey ?? null;
+  chequear(`"${frase.slice(0, 42)}"`, got === esperado, got ?? "ninguno");
 }
 
 // ── Precios de consulta por franja ───────────────────────────────────────────

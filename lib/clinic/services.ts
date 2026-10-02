@@ -177,7 +177,9 @@ export const defaultServices: ServiceItem[] = [
   { name: "Absceso pequeño", price: 80, category: "enfermeria", aliases: ["drenaje de absceso pequeño", "abceso pequeño"] },
   { name: "Absceso mediano", price: 100, category: "enfermeria", aliases: ["abceso mediano"] },
   { name: "Absceso grande", price: 120, category: "enfermeria", aliases: ["abceso grande"] },
-  { name: "Retiro de uña", price: 80, category: "enfermeria", note: "lunes a viernes", aliases: ["sacar uña", "uña encarnada", "retiro de uña encarnada"] },
+  // "encarnad" y "uñero" no se confunden con nada; "uña" sin la ñ es "una", que
+  // aparece en cualquier frase, así que esa forma NO se acepta (ver needleForms).
+  { name: "Retiro de uña", price: 80, category: "enfermeria", note: "lunes a viernes", aliases: ["sacar uña", "sacar la uña", "sacar las uñas", "quitar la uña", "uña encarnada", "retiro de uña encarnada", "encarnad", "uñero"] },
   { name: "Retiro de uña fin de semana", price: 100, category: "enfermeria", note: "sábado y domingo", aliases: ["retiro de uña sabado", "retiro de uña domingo"] },
   { name: "Extracción de cuerpo extraño pequeño", price: 80, category: "enfermeria", aliases: ["cuerpo extraño pequeño", "sacar cuerpo extraño"] },
   { name: "Extracción de cuerpo extraño grande", price: 150, category: "enfermeria", aliases: ["cuerpo extraño grande"] },
@@ -189,8 +191,7 @@ export const defaultServices: ServiceItem[] = [
   { name: "Lavado de oído", price: 80, category: "enfermeria", note: "lunes a viernes", aliases: ["lavado de oido", "limpieza de oido", "destapar oido", "destapar el oido", "lavar el oido", "lavar oido"] },
   { name: "Lavado de oído fin de semana", price: 100, category: "enfermeria", note: "sábado y domingo", aliases: ["lavado de oido sabado", "lavado de oido domingo"] },
   // Los alias con artículo ("sacar los puntos") están a propósito: normalize()
-  // unifica el verbo pero no borra artículos — hacerlo rompería "retiro de uña",
-  // que al quitarle la tilde de la ñ queda como "retiro de una".
+  // unifica el verbo pero no borra artículos.
   { name: "Retiro de puntos (1 a 10 puntos)", price: 25, category: "enfermeria", aliases: ["sacar puntos", "sacar los puntos", "retiro de puntos", "quitar puntos", "quitar los puntos"] },
   { name: "Retiro de puntos (10 a 30 puntos)", price: 40, category: "enfermeria", aliases: ["retiro de muchos puntos"] },
 
@@ -368,17 +369,51 @@ const FORMAS_VERBALES: [RegExp, string][] = [
 
 // Minúsculas + sin tildes + verbos unificados, para comparar "ecografía" con
 // "ecografia" y "me saquen puntos" con "sacar puntos".
+//
+// La ñ NO es una tilde y se conserva. Quitarla convertía "uña" en "una": el
+// alias "sacar uña" quedaba "sacar una" y enganchaba "sacar una consulta", "sacar
+// una ficha para pediatría"… (caso real 2026-09-28: pidieron consulta con el
+// pediatra y el bot cotizó un retiro de uña). NFD separa la ñ en n + tilde; se
+// la vuelve a juntar antes de borrar los acentos.
 function normalize(text: string): string {
   let out = text
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/n\u0303/g, "ñ")
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 
   for (const [patron, forma] of FORMAS_VERBALES) out = out.replace(patron, forma);
 
   return out;
+}
+
+// Quien no tiene ñ en el teclado escribe "rinon" por "riñón": se acepta también
+// la forma con n. Salvo cuando esa forma es otra palabra de todos los días —
+// "uña" sin ñ es "una"—, porque ahí la variante engancharía cualquier frase.
+const AMBIGUOUS_WITHOUT_ENIE = /(^| )unas?( |$)/;
+
+function needleForms(needle: string): string[] {
+  const base = normalize(needle);
+  if (!base.includes("ñ")) return [base];
+  const withoutEnie = base.replace(/ñ/g, "n");
+  return AMBIGUOUS_WITHOUT_ENIE.test(withoutEnie) ? [base] : [base, withoutEnie];
+}
+
+// ¿El texto nombra este término? Siempre desde el comienzo de una palabra: por
+// substring puro, "comparto" contenía "parto" y "departamento" también. Las muy
+// cortas ("pap", "diu") se exigen además como palabra completa; las largas
+// pueden seguir ("papanicol" atrapa "papanicolao").
+const WORD_CHAR = "a-z0-9ñ";
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function containsTerm(haystack: string, term: string): boolean {
+  const end = term.length <= 4 ? `(?![${WORD_CHAR}])` : "";
+  return new RegExp(`(?<![${WORD_CHAR}])${escapeRegExp(term)}${end}`).test(haystack);
 }
 
 // ¿Qué servicio del catálogo menciona este mensaje? Compara el texto contra el
@@ -393,17 +428,9 @@ export function matchService(text: string, services: ServiceItem[]): ServiceItem
   let bestLength = 0;
 
   for (const service of services) {
-    const needles = [service.name, ...(service.aliases ?? [])];
-    for (const needle of needles) {
-      const candidate = normalize(needle);
-      // Muy cortas ("pap", "diu") darían falsos positivos dentro de otra
-      // palabra, así que esas se exigen como palabra completa.
-      const matches =
-        candidate.length <= 4
-          ? new RegExp(`(^|[^a-z0-9])${candidate}([^a-z0-9]|$)`).test(haystack)
-          : haystack.includes(candidate);
-
-      if (matches && candidate.length > bestLength) {
+    const needles = [service.name, ...(service.aliases ?? [])].flatMap(needleForms);
+    for (const candidate of needles) {
+      if (candidate.length > bestLength && containsTerm(haystack, candidate)) {
         best = service;
         bestLength = candidate.length;
       }
@@ -430,7 +457,7 @@ const TYPO_SAME_PREFIX = 3;
 
 // Distancia de edición (Levenshtein). Corta apenas supera `max`: solo importa
 // saber si está dentro del margen.
-function editDistance(a: string, b: string, max: number): number {
+export function editDistance(a: string, b: string, max: number): number {
   if (Math.abs(a.length - b.length) > max) return max + 1;
   let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
   for (let i = 1; i <= a.length; i++) {
@@ -447,7 +474,7 @@ function editDistance(a: string, b: string, max: number): number {
 }
 
 function matchServiceTypo(haystack: string, services: ServiceItem[]): ServiceItem | null {
-  const words = haystack.split(/[^a-z0-9]+/).filter((w) => w.length >= TYPO_MIN_WORD);
+  const words = haystack.split(new RegExp(`[^${WORD_CHAR}]+`)).filter((w) => w.length >= TYPO_MIN_WORD);
   if (!words.length) return null;
 
   let best: ServiceItem | null = null;
@@ -513,11 +540,7 @@ export function matchOffCatalogRequest(text: string): string | null {
   let best: string | null = null;
   for (const term of OFF_CATALOG_TERMS) {
     const candidate = normalize(term);
-    const matches =
-      candidate.length <= 4
-        ? new RegExp(`(^|[^a-z0-9])${candidate}([^a-z0-9]|$)`).test(haystack)
-        : haystack.includes(candidate);
-    if (matches && (!best || candidate.length > best.length)) best = candidate;
+    if (containsTerm(haystack, candidate) && (!best || candidate.length > best.length)) best = candidate;
   }
   return best;
 }

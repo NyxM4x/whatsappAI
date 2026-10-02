@@ -39,6 +39,7 @@ import {
 import { dateConflictQuestion, longDate, readDateMention, shortDayLabel } from "@/lib/clinic/dates";
 import {
   activePromo,
+  editDistance,
   formatServicePrice,
   matchService,
   mentionsOffCatalogRequest,
@@ -200,7 +201,60 @@ const HUMAN_ACTION_PATTERN =
 const TALK_TO_SOMEONE_PATTERN =
   /\b(?:hablar|comunic\w+|conversar|contact\w+)\b|\b(?:persona|humano|asesor[a]?|alguien)\b|\b(?:bot|robot|m[aá]quina|asistente)\b/i;
 
-function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): TurnAnalysis {
+// ─── Médico nombrado en el texto ─────────────────────────────────────────────
+// "consulta con el doctor dagiino": la gente escribe el apellido como lo
+// escucha. El modelo recibe la lista de médicos y suele acertar, pero reconocer
+// un nombre contra una lista cerrada es comparación de strings, igual que con
+// las especialidades: se resuelve acá, tolerando errores de tipeo.
+//
+// Solo se miran las palabras que siguen a un título ("doctor", "dra", "doc",
+// "licenciada"): sin ese ancla, el paciente que se llama Miguel se volvería el
+// Dr. Miguel Daguino.
+export type DoctorRef = { name: string; specialtyKey: string | null };
+
+const DOCTOR_TITLE =
+  /(?<![a-zñ])(?:dr|dra|doc|doct|doctor|doctora|dotor|dotora|lic|licenciad[oa])\b\.?\s+((?:[a-zñ]+\s*){1,3})/g;
+const DOCTOR_NAME_TITLE = /^(?:dr|dra|lic)\.?$/;
+const DOCTOR_MIN_WORD = 4;
+
+function normalizeName(text: string): string {
+  return text.toLowerCase().normalize("NFD").replace(/ñ/g, "ñ").replace(/[̀-ͯ]/g, "");
+}
+
+// Un error hasta 6 letras, dos desde 7 ("dagiino" → "daguino"), y la primera
+// letra igual: con menos candados, dos apellidos cortos se confunden.
+function sameNameWord(word: string, token: string): boolean {
+  if (word[0] !== token[0]) return false;
+  const max = token.length >= 7 ? 2 : 1;
+  return editDistance(word, token, max) <= max;
+}
+
+// El médico (o al menos su especialidad) que nombra el texto. Si el nombre
+// calza con médicos de especialidades distintas ("Dra. Medina", "Dr.
+// Delgadillo"), devuelve null: eso lo decide el contexto, que es cosa del modelo.
+export function matchDoctorText(
+  text: string,
+  doctors: DoctorRef[],
+): { doctor: string | null; specialtyKey: string } | null {
+  const words = [...normalizeName(text).matchAll(DOCTOR_TITLE)]
+    .flatMap((m) => m[1].trim().split(/\s+/))
+    .filter((w) => w.length >= DOCTOR_MIN_WORD);
+  if (!words.length) return null;
+
+  const hits = doctors.filter((doctor) => {
+    const tokens = normalizeName(doctor.name)
+      .split(/\s+/)
+      .filter((t) => t.length >= DOCTOR_MIN_WORD && !DOCTOR_NAME_TITLE.test(t));
+    return tokens.some((token) => words.some((word) => sameNameWord(word, token)));
+  });
+
+  const specialties = new Set(hits.map((d) => d.specialtyKey));
+  const [specialtyKey] = [...specialties];
+  if (specialties.size !== 1 || !specialtyKey) return null;
+  return { doctor: hits.length === 1 ? hits[0].name : null, specialtyKey };
+}
+
+function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[], doctors: DoctorRef[] = []): TurnAnalysis {
   const date = typeof raw?.preferredDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.preferredDate)
     ? raw.preferredDate
     : null;
@@ -226,6 +280,11 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): Turn
   // que un servicio real (con precio conocido) se tratara como "a confirmar".
   if (unavailableRequest && matchService(unavailableRequest, services)) unavailableRequest = null;
 
+  // Y contra los médicos: un apellido mal escrito ("doctor dagiino") no es un
+  // servicio que no ofrecemos.
+  const fromDoctor = matchDoctorText(text, doctors);
+  if (unavailableRequest && matchDoctorText(unavailableRequest, doctors)) unavailableRequest = null;
+
   // Refuerzo por código del caso inverso: el modelo NO lo marcó y sí correspondía.
   // Pasó con "cuanto está el electrocardiograma" y con "el precio de la
   // radiografía… para pie": el análisis volvió limpio, el mensaje cayó en el Q&A
@@ -238,10 +297,11 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): Turn
 
   const fromModel = findSpecialty(raw?.specialtyKey)?.key ?? null;
   // Con una especialidad nombrada en el texto, esa manda: es un hecho, no una
-  // inferencia. Si no hay, vale la del modelo (que ahí sí está infiriendo desde
-  // un síntoma), salvo que de verdad haya pedido algo que no tenemos.
+  // inferencia. Después, la del médico que nombró. Si no hay ninguna, vale la
+  // del modelo (que ahí sí está infiriendo desde un síntoma), salvo que de
+  // verdad haya pedido algo que no tenemos.
   const specialtyKey =
-    fromText?.key ?? unavailableIsOurs?.key ?? (unavailableRequest ? null : fromModel);
+    fromText?.key ?? unavailableIsOurs?.key ?? (unavailableRequest ? null : (fromDoctor?.specialtyKey ?? fromModel));
 
   // wantsLead sale tal cual del modelo. Antes se forzaba acá ("nombró una
   // especialidad y no preguntó => quiere ficha"), pero eso es una decisión de
@@ -256,7 +316,10 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[]): Turn
 
   // Si lo que el modelo vio como "quiere una persona" es en realidad el médico
   // de preferencia, y no hay verbo de hablar/comunicarse, es un dato.
-  const doctorName = cleanText(raw?.doctorName, 80);
+  //
+  // Si el médico se reconoció sin ambigüedad, al asesor le llega su nombre real
+  // y no "dagiino".
+  const doctorName = fromDoctor?.doctor ?? cleanText(raw?.doctorName, 80);
   const wantsHuman = raw?.wantsHuman === true && !(doctorName && !TALK_TO_SOMEONE_PATTERN.test(text));
 
   return {
@@ -352,7 +415,7 @@ export async function analyzeTurn(
       temperature: 0,
       abortSignal: AbortSignal.timeout(10000),
     });
-    const analysis = sanitizeAnalysis(JSON.parse(text.trim().replace(/^```(?:json)?|```$/g, "").trim()), ctx.text, ctx.clinic.services);
+    const analysis = sanitizeAnalysis(JSON.parse(text.trim().replace(/^```(?:json)?|```$/g, "").trim()), ctx.text, ctx.clinic.services, doctors);
     return applyDateMention(analysis, ctx.text, now.date);
   } catch (err) {
     console.error("analyzeTurn failed", getErrorMessage(err));

@@ -192,6 +192,20 @@ const CASES: Case[] = [
     analysis: analysis({ specialtyKey: "cardiologia", wantsLead: true }),
     expect: { type: "startLead", kind: "ficha", intent: "ficha" },
   },
+  // Caso real 2026-09-28: "sacar una" enganchaba el alias "sacar uña" y el
+  // pedido de consulta con el pediatra se cotizaba como retiro de uña.
+  {
+    name: "'sacar una consulta' con el doctor mal escrito → ficha, no retiro de uña",
+    text: "Quiero saber si ya están los resultados de laboratorio así poder sacar una consulta para el doctor dagiino",
+    analysis: analysis({ specialtyKey: "pediatria", doctorName: "Dr. Miguel Edgar Daguino Delgadillo", wantsLead: true }),
+    expect: { type: "startLead", kind: "ficha", intent: "ficha" },
+  },
+  {
+    name: "lo mismo con el modelo caído",
+    text: "quería saber si ya salió los laboratorios de Danna así poder sacar una consulta con el doctor dagiino",
+    analysis: null,
+    expect: { type: "startLead", kind: "ficha", intent: "ficha" },
+  },
   {
     name: "especialidad a secas, sin wantsLead del modelo (el ruteo lo deduce)",
     text: "Para ginecología",
