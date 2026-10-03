@@ -60,7 +60,7 @@ import {
   type LeadFields,
 } from "@/lib/clinic/data";
 import type { BookingDraft, BookingSession, BookingStep, LeadDraft, LeadKind, PaymentIntention, VisitType } from "@/lib/clinic/types";
-import { unlistedAnswer } from "@/lib/clinic/routing";
+import { asksHumanAction, unlistedAnswer } from "@/lib/clinic/routing";
 import { getRecentConversationHistory } from "@/lib/engine/data";
 import { getErrorMessage, logSystemEvent } from "@/lib/engine/logging";
 
@@ -121,6 +121,12 @@ export type TurnAnalysis = {
   dateConflict: string | null;
 };
 
+// La dirección ya se respondió con texto determinista; al continuar una ficha
+// no hay que volver a mandar el mismo mensaje al Q&A.
+export function analysisForLocationFollowup(analysis: TurnAnalysis | null): TurnAnalysis | null {
+  return analysis ? { ...analysis, isQuestion: false } : null;
+}
+
 const ANALYSIS_SYSTEM = `Analizás mensajes de WhatsApp de pacientes de una clínica en Bolivia. Respondés ÚNICAMENTE con un JSON válido, sin texto extra:
 {"patientName": string|null, "specialtyKey": string|null, "doctorName": string|null, "preferredTime": string|null, "preferredDate": "YYYY-MM-DD"|null, "preferredHour": "HH:MM"|null, "visitType": "nueva"|"reconsulta"|null, "paymentIntention": "qr"|"efectivo"|null, "unavailableRequest": string|null, "needsHumanAction": boolean, "wantsLead": boolean, "wantsHuman": boolean, "frustrated": boolean, "confirms": boolean, "wantsOut": boolean, "isQuestion": boolean}
 
@@ -163,6 +169,10 @@ function cleanText(value: unknown, max = 120): string | null {
 // destinatario, o que sea solo un parentesco, no es un nombre. Ante la duda se
 // descarta: un nombre faltante se pregunta, uno inventado llega al panel.
 const NOT_A_NAME = [
+  // Confirmaciones, agradecimientos y horarios no son nombres propios.
+  /^(?:s[ií]|sip+|ok(?:ay)?|bueno|dale|claro|gracias|ma[nñ]ana|hoy|ahora|tarde|noche)[.!\s]*$/i,
+  // Edad sin nombre: aparece a menudo en las fichas pediátricas.
+  /^\d+\s*(?:a[nñ]os?|mes(?:es)?|d[ií]as?)(?:\s+y\s+\d+\s*(?:a[nñ]os?|mes(?:es)?|d[ií]as?))*[.!\s]*$/i,
   // "pa mi", "para mí", "es para mi hijo", "para la señora"…
   /^(?:es\s+)?p(?:a|ara)'?\s/i,
   // "mi hijo", "mi señora", "el niño", "la bebé" — parentesco sin nombre propio.
@@ -193,8 +203,7 @@ function cleanHour(value: unknown): string | null {
 // Pide una gestión con todas las letras. El modelo se pierde con estos mensajes
 // sueltos —"Me confirma" a secas lo daba por false—, y son justo los que dejaron
 // morir la conversación real. Acá no hace falta criterio: si lo dice, lo dice.
-const HUMAN_ACTION_PATTERN =
-  /\bme confirma\b|\bconfirmeme\b|\bconf[ií]rmeme\b|\bme avisa\b|\bav[ií]sele\b|\bav[ií]sale\b|\bd[ií]gale\b|\bd[ií]cele\b|\bhable con\b|\bya llegu[eé]\b|\bestoy (aqu[ií]|afuera|en la puerta|en recepci[oó]n)\b/i;
+// El detector es el mismo que usa el ruteo con el modelo caído (asksHumanAction).
 
 // Lo que distingue "quiero hablar con la doctora" (derivar) de "quiero el PAP
 // con una doctora" (un dato de la solicitud). El modelo marcaba wantsHuman en
@@ -220,7 +229,7 @@ const DOCTOR_NAME_TITLE = /^(?:dr|dra|lic)\.?$/;
 const DOCTOR_MIN_WORD = 4;
 
 function normalizeName(text: string): string {
-  return text.toLowerCase().normalize("NFD").replace(/ñ/g, "ñ").replace(/[̀-ͯ]/g, "");
+  return text.toLowerCase().normalize("NFD").replace(/n\u0303/g, "ñ").replace(/[\u0300-\u036f]/g, "");
 }
 
 // Un error hasta 6 letras, dos desde 7 ("dagiino" → "daguino"), y la primera
@@ -349,7 +358,7 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[], docto
     visitType: visitTypeFromText(text) ?? (raw?.visitType === "nueva" || raw?.visitType === "reconsulta" ? raw.visitType : null),
     paymentIntention: raw?.paymentIntention === "qr" || raw?.paymentIntention === "efectivo" ? raw.paymentIntention : null,
     unavailableRequest,
-    needsHumanAction: raw?.needsHumanAction === true || HUMAN_ACTION_PATTERN.test(text),
+    needsHumanAction: raw?.needsHumanAction === true || asksHumanAction(text),
     wantsLead: raw?.wantsLead === true,
     wantsHuman,
     frustrated: raw?.frustrated === true,
@@ -364,9 +373,42 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[], docto
 // un día claro, esa fecha manda sobre la que devolvió el modelo; si no nombra
 // ninguno ("lo antes posible", "la otra semana"), queda la del modelo. Un día
 // que no calza con la fecha real anula el horario hasta que el paciente aclare.
+//
+// Una fecha que ya pasó puede ser el horario que pide (se le pregunta qué fecha
+// quiso decir) o un hecho que cuenta: "me hice el PAP el 24", "a mi hijo le
+// hicieron análisis el 20", "nació el 5 de marzo". Un hecho nunca es el horario:
+// si el modelo lo tomó como tal, se descarta y sigue valiendo el horario que ya
+// estaba en la solicitud.
+const HISTORICAL_DATE_CONTEXT =
+  /\b(?:me\s+hice|me\s+realic[eé]|se\s+hizo|se\s+realiz[oó]|(?:me|le|les)\s+hicieron|(?:me|le)\s+sacaron|(?:me|le|lo|la)\s+atendieron|naci[oó]|nac[ií]|fui\s+el|vine\s+el|vino\s+el|estuve|resultado\s+del\s+d[ií]a)\b/i;
+
+function stripAccents(text: string): string {
+  return text.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
+// ¿El horario que devolvió el modelo es esa fecha pasada? Por el texto ("24 de
+// septiembre"), por una fecha anterior a hoy, o por el mismo día y mes movido a
+// otro año. Si el horario es otro ("el lunes"), la fecha pasada era contexto.
+function modelTookPastDate(analysis: TurnAnalysis, past: { said: string; date: string }, today: string): boolean {
+  if (!analysis.preferredTime) return false;
+  const said = stripAccents(past.said.replace(/\s+de\s+\d{4}$/, ""));
+  if (stripAccents(analysis.preferredTime).includes(said)) return true;
+  const date = analysis.preferredDate;
+  return Boolean(date && (date < today || date.slice(5) === past.date.slice(5)));
+}
+
 export function applyDateMention(analysis: TurnAnalysis, text: string, today: string): TurnAnalysis {
   const mention = readDateMention(text, today);
-  if (mention.kind === "conflict") {
+  if (mention.kind === "past") {
+    if (!modelTookPastDate(analysis, mention, today)) return analysis;
+    const withoutTime = { ...analysis, preferredTime: null, preferredDate: null, preferredHour: null };
+    return HISTORICAL_DATE_CONTEXT.test(text)
+      ? withoutTime
+      : { ...withoutTime, dateConflict: dateConflictQuestion(mention, today) };
+  }
+  // Sin horario en el mensaje no hay nada que confirmar mal: el conflicto solo
+  // se pregunta cuando el paciente está dando el día de su solicitud.
+  if (mention.kind === "conflict" && analysis.preferredTime) {
     return {
       ...analysis,
       preferredTime: null,
@@ -582,7 +624,7 @@ function missingFields(draft: LeadDraft | null): Field[] {
 
 // Suma lo nuevo del mensaje a lo ya recopilado. Un dato nuevo pisa al anterior
 // (así el paciente corrige), pero nunca se borra uno por no mencionarlo.
-function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): { draft: LeadDraft; changed: boolean } {
+export function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): { draft: LeadDraft; changed: boolean } {
   if (!analysis) return { draft, changed: false };
   const next: LeadDraft = { ...draft };
 
@@ -737,10 +779,69 @@ function priceLines(draft: LeadDraft, clinic: ClinicConfig): { lines: string[]; 
   return { lines, quote: quote.text };
 }
 
+// "Vale" suelto no: "vale, mañana a las 10" es un "ok", no una pregunta de precio.
+const PRICE_QUESTION_PATTERN =
+  /\b(?:precio|precios|costo|costos|cuesta|cuestan|a\s+cu[aá]nto)\b|\bcu[aá]nto\s+(?:est[aá]|es|sale|salen|cuesta|vale|valen)\b/i;
+const DURATION_QUESTION_PATTERN =
+  /\bcu[aá]nto\b.{0,30}\b(?:demora|tarda|tiempo|d[ií]as?|semanas?|meses?)\b|\b(?:demora|tarda)\b|\ben\s+cu[aá]nto\s+tiempo\b/i;
+// Montos en Bs de un texto: "50 a 120 Bs" da 50 y 120, "4.200 Bs" da 4200. Las
+// horas de una franja ("de 7:00 a 19:00") no cuentan: solo cifras seguidas de
+// Bs, o la primera de un rango "N a M Bs".
+const AMOUNT_IN_BS = /(?<![\d.,:])(\d{1,3}(?:[.,]\d{3})+|\d+)(?=\s*(?:a\s*\d[\d.,]*\s*)?(?:bs|bolivianos)\b)/gi;
+
+function amountsInBs(text: string): number[] {
+  return [...text.matchAll(AMOUNT_IN_BS)].map((m) => Number(m[1].replace(/[.,]/g, "")));
+}
+
+const PRICE_DISPUTE_CLAIM_PATTERN =
+  /\b(?:no\s+(?:es|son|cuesta|vale)|me\s+dijeron|vi\s+en|publicaci[oó]n|anuncio)\b/i;
+const AVAILABILITY_QUESTION_PATTERN =
+  /\b(?:a\s+qu[eé]\s+hora|desde\s+qu[eé]\s+hora|hasta\s+qu[eé]\s+hora|qu[eé]\s+horarios?|disponibilidad|atiende|atienden|est[aá]\s+(?:el|la)\s+(?:doctor|dra|ginec[oó]log|pediatra))\b/i;
+
+// En una solicitud activa, las preguntas frecuentes se resuelven con el
+// tarifario o con una derivación clara. No se vuelve a llamar al Q&A, que puede
+// repetir el formulario, inventar disponibilidad o contradecir una publicación.
+export function answerKnownLeadQuestion(draft: LeadDraft, clinic: ClinicConfig, text: string): string | null {
+  if (DURATION_QUESTION_PATTERN.test(text)) return null;
+  if (PRICE_QUESTION_PATTERN.test(text)) {
+    if (draft.kind === "no_disponible") {
+      return "El precio y si la clínica realiza ese servicio se lo confirma un asesor 🙏";
+    }
+    return priceLines(draft, clinic).lines.join("\n") || null;
+  }
+
+  if (AVAILABILITY_QUESTION_PATTERN.test(text)) {
+    return draft.kind === "no_disponible"
+      ? "Un asesor confirma si la clínica realiza ese servicio y qué disponibilidad tiene 🙏"
+      : "Un asesor de la clínica le confirma el horario y la disponibilidad por este medio 🙏";
+  }
+
+  return null;
+}
+
+// El paciente afirma un precio que no es ninguno de los que le cotizamos ("me
+// dijeron 100 Bs", "en el anuncio dice 50 Bs"). Se comparan TODAS las cifras de
+// la cotización: una campaña trae la promo, el regular y el de fuera de franja;
+// una consulta, el de cada franja; un rango, sus dos extremos. Coincidir con
+// cualquiera no es una disputa.
+//
+// Sin cotización no hay "monto distinto del cotizado": el precio ya lo confirma
+// el asesor, que ve el mensaje en la solicitud. Solo cuentan cifras con "Bs":
+// un número suelto puede ser una hora o un día.
+export function hasPriceDispute(draft: LeadDraft, clinic: ClinicConfig, text: string): boolean {
+  if (!PRICE_DISPUTE_CLAIM_PATTERN.test(text)) return false;
+  const mentioned = amountsInBs(text);
+  if (!mentioned.length) return false;
+
+  const quoted = new Set([...amountsInBs(draft.serviceQuote ?? ""), ...amountsInBs(priceLines(draft, clinic).quote ?? "")]);
+  if (!quoted.size) return false;
+  return mentioned.some((amount) => !quoted.has(amount));
+}
+
 function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; priceQuote: string | null } {
   const spec = findSpecialty(draft.specialtyKey);
-  // En especialidades sin reconsulta no se menciona el tipo de consulta.
-  const showVisitType = draft.kind === "ficha" && draft.visitType && Boolean(spec?.reconsultaDays);
+  // En especialidades sin reconsulta no se muestra el tipo de consulta.
+  const showVisitType = draft.kind === "ficha" && Boolean(draft.visitType) && Boolean(spec?.reconsultaDays);
   const price = priceLines(draft, clinic);
 
   const lines = [
@@ -981,7 +1082,9 @@ export async function continueLead(
 
   // collecting_lead
   let intro: string | undefined;
-  if (changed) intro = "¡Gracias! 😊";
+  const knownAnswer = answerKnownLeadQuestion(draft, ctx.clinic, ctx.text);
+  if (changed) intro = knownAnswer ? `${knownAnswer}\n\n¡Gracias! 😊` : "¡Gracias! 😊";
+  else if (knownAnswer) intro = knownAnswer;
   else if (analysis?.isQuestion) {
     const answer = await answerQuestion(ctx, ctx.text);
     intro = answer.status === "ok" ? answer.text : undefined;

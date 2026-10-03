@@ -14,7 +14,8 @@
     "check:routing": "tsx scripts/check-routing.ts",
     "check:negaciones": "tsx scripts/check-negaciones.ts",
     "check:campanas": "tsx scripts/check-campanas.ts",
-    "check:fechas": "tsx scripts/check-fechas.ts"
+    "check:fechas": "tsx scripts/check-fechas.ts",
+    "check:catalog-parity": "tsx scripts/check-catalog-parity.ts"
   },
   "keywords": [],
   "author": "",

@@ -8,7 +8,7 @@
 // ============================================================================
 
 import { dateConflictQuestion, readDateMention, upcomingDays } from "../lib/clinic/dates";
-import { applyDateMention, type TurnAnalysis } from "../lib/clinic/leads";
+import { applyDateMention, mergeAnalysis, type TurnAnalysis } from "../lib/clinic/leads";
 
 let failures = 0;
 
@@ -37,7 +37,8 @@ const FECHAS: [string, string | null][] = [
   ["el miércoles", "2026-09-30"],
   ["el 30 de septiembre", "2026-09-30"],
   ["el 2 de octubre", "2026-10-02"],
-  ["el 20 de setiembre", "2027-09-20"],
+  ["el 20 de setiembre", "aclaración"],
+  ["el 20 de septiembre de 2027", "2027-09-20"],
   ["para el 5", "2026-10-05"],
   ["el 28", "2026-09-28"],
   ["02/10", "2026-10-02"],
@@ -49,7 +50,7 @@ const FECHAS: [string, string | null][] = [
 
 for (const [texto, esperado] of FECHAS) {
   const m = readDateMention(texto, VIERNES);
-  const got = m.kind === "date" ? m.date : m.kind === "conflict" ? "conflicto" : null;
+  const got = m.kind === "date" ? m.date : m.kind === "conflict" ? "conflicto" : m.kind === "past" ? "aclaración" : null;
   check(`"${texto}" → ${esperado ?? "sin fecha"}`, got === esperado, String(got));
 }
 
@@ -99,6 +100,24 @@ const base: TurnAnalysis = {
 const conflicto = applyDateMention({ ...base, preferredTime: "hoy sábado", preferredDate: "2026-09-26" }, "A que hora atiende hoy sábado", VIERNES);
 check("conflicto: se descarta el horario", conflicto.preferredTime === null && conflicto.preferredDate === null);
 check("conflicto: queda la pregunta", Boolean(conflicto.dateConflict));
+
+const pasada = applyDateMention({ ...base, preferredTime: "20 de septiembre", preferredDate: "2027-09-20" }, "20 de septiembre", VIERNES);
+check("fecha explícita pasada: no se traslada al año siguiente", pasada.preferredTime === null && pasada.preferredDate === null);
+check("fecha explícita pasada: queda una pregunta", Boolean(pasada.dateConflict?.includes("ya pasó")), pasada.dateConflict ?? "");
+// Una fecha que cuenta un hecho ("me hice el PAP el 24") no es el horario de la
+// solicitud. Si el modelo la devolvió como horario, se descarta sin preguntar, y
+// el horario que ya estaba en la solicitud sigue valiendo.
+const fechaHistorica = applyDateMention({ ...base, preferredTime: "24 de septiembre", preferredDate: "2026-09-24" }, "me hice el PAP el 24 de septiembre, ¿ya está?", VIERNES);
+check("fecha de un hecho: no pregunta", fechaHistorica.dateConflict === null);
+check("fecha de un hecho: no se toma como horario", fechaHistorica.preferredTime === null && fechaHistorica.preferredDate === null);
+const borrador = mergeAnalysis({ kind: "ficha", preferredTime: "mañana a las 10", preferredDate: "2026-09-26" }, fechaHistorica).draft;
+check("fecha de un hecho: el horario de la solicitud se conserva", borrador.preferredTime === "mañana a las 10", String(borrador.preferredTime));
+const otroAnio = applyDateMention({ ...base, preferredTime: "24 de septiembre", preferredDate: "2027-09-24" }, "me hice el PAP el 24 de septiembre", VIERNES);
+check("fecha de un hecho movida al año siguiente: tampoco es horario", otroAnio.preferredTime === null && otroAnio.dateConflict === null);
+const terceraPersona = applyDateMention({ ...base, preferredTime: "20 de septiembre" }, "a mi hijo le hicieron análisis el 20 de septiembre", VIERNES);
+check("'le hicieron… el 20': es un hecho, no pregunta", terceraPersona.dateConflict === null && terceraPersona.preferredTime === null);
+const otroHorario = applyDateMention({ ...base, preferredTime: "el lunes", preferredDate: "2026-09-28" }, "me hice análisis el 20 de septiembre, quiero ficha el lunes", VIERNES);
+check("hecho pasado + horario nuevo: queda el horario nuevo", otroHorario.preferredTime === "el lunes" && otroHorario.dateConflict === null, String(otroHorario.preferredTime));
 
 // El modelo se equivocó de día: manda el código.
 const corregido = applyDateMention({ ...base, preferredTime: "el lunes", preferredDate: "2026-09-29" }, "el lunes", VIERNES);

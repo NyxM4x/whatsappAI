@@ -165,8 +165,10 @@ const defaultClinicConfig = {
   // OJO: exige el verbo ("hablar/comunicarme con…"). "Quiero una ficha con la
   // doctora Rosmery" NO es derivación: es un dato de la solicitud. Antes el
   // patrón era "quiero hablar con" suelto y atrapaba cualquier cosa.
+  // Lo mismo con "queja": suelta atrapaba "mi hijo se queja de dolor de
+  // barriga" y pausaba el bot. Solo cuenta "una/mi/hacer… queja o reclamo".
   humanHandoffIntentPatterns:
-    /\b(?:hablar|comunicarme|conversar|contactarme)\s+con\s+(?:el|la|los|las|un|una|alg[uú]n|alguna|su)?\s*(?:persona|humano|alguien|doctora?|dra?\b|m[eé]dic[oa]|enfermer[oa]|recepcionista|recepci[oó]n|secretari[oa]|asesor[a]?|encargad[oa]|operador[a]?|responsable)|persona real|atenci[oó]n humana|no quiero (?:hablar con|que me atienda|seguir con) (?:un|una|el|la)?\s*(?:bot|robot|m[aá]quina|contestadora|asistente)|\breclamo\b|\bqueja\b|estoy molest[oa]|p[eé]sim[oa] (?:servicio|atenci[oó]n)/i,
+    /\b(?:hablar|comunicarme|conversar|contactarme)\s+con\s+(?:el|la|los|las|un|una|alg[uú]n|alguna|su)?\s*(?:persona|humano|alguien|doctora?|dra?\b|m[eé]dic[oa]|enfermer[oa]|recepcionista|recepci[oó]n|secretari[oa]|asesor[a]?|encargad[oa]|operador[a]?|responsable)|persona real|atenci[oó]n humana|no quiero (?:hablar con|que me atienda|seguir con) (?:un|una|el|la)?\s*(?:bot|robot|m[aá]quina|contestadora|asistente)|\b(?:una|mi|poner|presentar|hacer|dejar)\s+(?:queja|reclamo)\b|estoy molest[oa]|p[eé]sim[oa] (?:servicio|atenci[oó]n)/i,
 
   replies: {
     welcome: CLINIC_WELCOME_MESSAGE,

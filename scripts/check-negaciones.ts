@@ -55,6 +55,9 @@ const DEBEN_VETARSE = [
   "No realizamos el PAP los fines de semana.",
   "No hacemos papanicolaou en feriados.",
   "Esa prueba no se realiza en la clínica.",
+  // C0047: negación real del test de tuberculosis (la disponibilidad debe
+  // confirmarla una persona cuando no existe en el catálogo).
+  "Lamentablemente, no realizamos pruebas de tuberculosis en la clínica.",
 ];
 
 for (const reply of DEBEN_VETARSE) {

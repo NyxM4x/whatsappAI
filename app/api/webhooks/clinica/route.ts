@@ -54,9 +54,11 @@ import {
 import { decideAction } from "@/lib/clinic/routing";
 import {
   analyzeTurn,
+  analysisForLocationFollowup,
   answerQuestion,
   cancelOffer,
   continueLead,
+  hasPriceDispute,
   isLeadStep,
   LEAD_REPLIES,
   offerLead,
@@ -461,7 +463,7 @@ export async function POST(request: Request) {
   const needsAnalysis =
     Boolean(newText) &&
     !clinic.humanHandoffIntentPatterns.test(newText) &&
-    !clinic.locationRequestIntentPatterns.test(newText) &&
+    (!clinic.locationRequestIntentPatterns.test(newText) || isLeadStep(session.step)) &&
     !proof &&
     !GREETING_ONLY_PATTERN.test(newText);
 
@@ -499,6 +501,9 @@ export async function POST(request: Request) {
     emergencyDetectionEnabled: process.env.CLINIC_EMERGENCY_DETECTION === "true",
     greetingOnly: Boolean(newText) && GREETING_ONLY_PATTERN.test(newText),
     pendingClarify,
+    priceDispute: tracked.session.draft.lead
+      ? hasPriceDispute(tracked.session.draft.lead, clinic, newText)
+      : false,
   });
 
   // ── Ejecución ───────────────────────────────────────────────────
@@ -540,6 +545,13 @@ export async function POST(request: Request) {
         draft: { failedAttempts: tracked.session.draft.failedAttempts, clarifyService: action.serviceName },
       });
       await send(action.text);
+      return ok(action.intent);
+    }
+
+    case "locationAndContinueLead": {
+      const locationAnalysis = analysisForLocationFollowup(analysis);
+      const result = await continueLead({ ...leadCtx, session: tracked.session, analysis: locationAnalysis, text: newText });
+      await send(`${action.text}\n\n${result.reply}`, { pauseAfter: result.pauseAfterReply });
       return ok(action.intent);
     }
 

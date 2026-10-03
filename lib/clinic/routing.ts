@@ -26,6 +26,8 @@ import type { AuditIntent, BookingStep, LeadDraft, LeadKind } from "@/lib/clinic
 export type Action =
   // Responder un texto fijo y nada más.
   | { type: "reply"; text: string; intent: AuditIntent }
+  // Responder ubicación y continuar una solicitud que ya estaba en curso.
+  | { type: "locationAndContinueLead"; text: string; intent: AuditIntent }
   // Derivar: alarma en el panel, aviso al paciente y pausa del bot. Con
   // pause: false deja la alarma sin pausar (el paciente puede seguir
   // preguntando otras cosas mientras el asesor le responde).
@@ -65,6 +67,7 @@ export type RoutingInput = {
   proof: "receipt" | "unverified" | null;
   emergencyDetectionEnabled: boolean;
   greetingOnly: boolean;
+  priceDispute?: boolean;
   // Servicio sobre el que el bot preguntó "¿consulta o precio?" en el turno
   // anterior. null = no hay aclaración pendiente.
   pendingClarify?: string | null;
@@ -75,10 +78,61 @@ export type RoutingInput = {
 // —devuelve wantsOut:false para los dos— porque sin saber que hubo una oferta,
 // un "No" suelto no significa "ya no quiero la solicitud". En el contexto de
 // una pregunta de sí/no, en cambio, reconocerlo es determinista.
-// El cierre no es \b: en JS \b solo conoce letras ASCII, así que "Sí" con tilde
-// nunca coincidía.
-const AFFIRMATIVE = /^\s*(?:s[ií]|sip+|claro|dale|ya|bueno|ok(?:ay)?|por ?favor|de una|obvio|as[ií] es|est[aá] bien|me parece|dele|dal[eé])(?=$|[\s,.!?])/i;
+const AFFIRMATIVE = /^\s*(?:s[ií]|sip+|claro|dale|bueno|ok(?:ay)?|por ?favor|de una|obvio|as[ií] es|est[aá] bien|me parece|dele|dal[eé])(?=$|[\s,.!?])/i;
 const NEGATIVE = /^\s*(?:no|nop+|nel|negativo|mejor no|ya no|d[eé]j[eaá]lo|olv[ií]delo|gracias no|nada m[aá]s|as[ií] nom[aá]s)\b/i;
+const DECLINES_LEAD_CAPTURE =
+  /\bsolo\s+(?:quiero|necesito)\b.{0,80}\bno\s+(?:quiero\s+)?(?:una?\s+)?(?:ficha|cita|turno|consulta)\b|\bno\s+(?:quiero|deseo|necesito)\s+(?:una?\s+)?(?:ficha|cita|turno|consulta)\b/i;
+
+// Nunca dejamos que el Q&A ni una ficha interpreten señales clínicas. Hay dos
+// niveles, y ninguno diagnostica ni indica nada:
+//
+// - Signos graves (no respira, convulsiona, inconsciente, dolor fuerte en el
+//   pecho, hemorragia): se responde con el texto de emergencia que configuró la
+//   clínica (emergencyResponse: ir a Emergencias, dirección y teléfono) y se
+//   avisa a una persona.
+// - Golpes en zonas de riesgo y pedidos de indicación de medicamentos: se deriva
+//   a personal clínico con un texto prudente.
+//
+// La "ó" va explícita: "convulsión" con tilde no coincidía con "convulsion".
+const CLINICAL_SEVERE_PATTERN =
+  /\b(?:no puedo respirar|dificultad(?:es)? para respirar|no respira|convulsi[oó]n(?:es)?|convulsion\w*|desmay\w*|perdi[oó] el conocimiento|inconsciente|dolor(?:\s+\w+){0,3}\s+fuerte\s+(?:en\s+)?(?:el\s+)?pecho|fuerte\s+dolor\s+(?:en\s+)?(?:el\s+)?pecho|hemorragia|sangrado abundante)/i;
+// "Caída" y "corte" sin "de cabello/pelo" detrás: "caída de cabello en la
+// cabeza" no es un golpe.
+const INJURY = String.raw`(?:golpe\w*|golpearon|se\s+cay[oó]|ca[ií]da(?!\s+del?\s+(?:cabello|pelo))|ladrillo|tajo|corte(?!\s+del?\s+(?:cabello|pelo))|sangra\w*)`;
+const RISK_ZONE = String.raw`(?:cabeza|cr[aá]neo|costilla|pecho|abdomen)`;
+const CLINICAL_INJURY_PATTERN = new RegExp(String.raw`\b${INJURY}\b.{0,60}\b${RISK_ZONE}\b|\b${RISK_ZONE}\b.{0,60}\b${INJURY}`, "i");
+// Pedir una indicación es nombrar un medicamento Y preguntar cómo darlo o
+// tomarlo. Cualquiera de las dos sola no alcanza: "¿se puede dar ficha para
+// mañana?" o "le recetaron antibióticos, ¿cuánto cuesta la consulta?" no piden
+// una indicación.
+const MEDICATION = /\b(?:salbutamol|acetilciste[ií]na|antibi[oó]tic\w*|amoxicilina|paracetamol|ibuprofeno|jarabe|pastillas?|gotas|remedio|medicamento\w*)\b/i;
+const DOSING_QUESTION = /\b(?:qu[eé]\s+dosis|dosis\s+de|cu[aá]nt[oa]s?\s+(?:gotas|pastillas|ml)?\s*le\s+doy|le\s+doy|puedo\s+darle|se\s+(?:le\s+)?puede\s+dar|puedo\s+tomar|debo\s+tomar|cada\s+cu[aá]nto|debo\s+suspender|suspender\s+el\s+tratamiento|lo\s+sigo\s+tomando)\b/i;
+function asksForDosing(text: string): boolean {
+  return /\b(?:qu[eé]\s+dosis|dosis\s+de)\b/i.test(text) || (MEDICATION.test(text) && DOSING_QUESTION.test(text));
+}
+// ─── Gestiones que solo resuelve una persona ────────────────────────────────
+// "Me confirma", "avísele a la licenciada", "ya llegué", "dígale a la doctora".
+// Un solo detector para el análisis (leads.ts, que lo suma al del modelo) y para
+// el ruteo cuando el modelo no respondió: antes había dos listas distintas.
+//
+// Si en el mismo mensaje pregunta un precio o un horario, es información y se
+// responde: "me confirma el precio" o "me puede avisar cuánto cuesta" no son una
+// gestión. "Llegando" suelto tampoco ("¿a qué hora están llegando los
+// doctores?"): solo "estoy llegando".
+const HUMAN_ACTION_PATTERN =
+  /\bme\s+(?:puede\s+)?(?:confirm\w*|avis\w*|pasar\s+(?:su\s+)?n[uú]mero)\b|\bconf[ií]rmeme\b|\bav[ií]s[ea]le\b|\bd[ií][gc]ale\b|\bd[ií]cele\b|\bme\s+lo\s+dice\s+(?:a\s+)?(?:la\s+|el\s+)?(?:licen\w*|doctora?|dra|dr|m[eé]dic[oa]|enfermer[oa])\b|\bhable\s+con\b|\bqu[eé]\s+n[uú]mero\s+(?:soy|me\s+toc[oó])\b|\bya\s+llegu[eé](?=\W|$)|\b(?:ya\s+)?estoy\s+llegando\b|\bestoy\s+(?:aqu[ií]|afuera|en\s+camino|en\s+la\s+puerta|en\s+recepci[oó]n)\b/i;
+const INFO_QUESTION = /\b(?:precio|cu[aá]nto|costo|cuesta|tarifa|horarios?|a\s+qu[eé]\s+hora|qu[eé]\s+d[ií]as?)\b/i;
+
+export function asksHumanAction(text: string): boolean {
+  return HUMAN_ACTION_PATTERN.test(text) && !INFO_QUESTION.test(text);
+}
+
+// "Queja" y "reclamo" solo como sustantivo de una queja contra la clínica: "mi
+// hijo se queja de dolor" es un síntoma, no una queja.
+const FRUSTRATION_PATTERN =
+  /\b(?:racista|racismo|sin verg[uü]enza|me ofendi[oó]|me ofendiste|p[eé]sim[oa] servicio|(?:una|mi|poner|presentar|hacer|dejar)\s+(?:queja|reclamo))\b/i;
+const AMBIGUOUS_PELADA_PATTERN = /\bpelada\b/i;
+const CLEAR_PELADA_CONTEXT = /\b(?:cabello|pelo|calvicie|alopecia|piel|herida|corte|embarazad\w*|ecograf\w*|eco|ultrasonido)\b/i;
 
 // "Una consulta" al empezar el mensaje, en Bolivia, casi siempre es "tengo una
 // pregunta". El modelo lo leía como pedido de consulta médica y abría una ficha
@@ -101,9 +155,15 @@ const WANTS_SERVICE = /\b(?:quiero|quisiera|necesito|deseo)\b(?!\s+saber)|\b(?:a
 
 // Aceptó la oferta: lo dijo, o directamente pasó a dar los datos.
 function acceptsOffer(text: string, a: TurnAnalysis | null): boolean {
-  if (a?.confirms) return true;
+  // Si ya dio sus datos, aceptó, aunque además pregunte algo ("Sí, Juan Pérez,
+  // mañana a las 10. ¿Cuánto cuesta?"): descartar la oferta le perdería los datos.
   if (a?.patientName || a?.preferredTime) return true;
-  return AFFIRMATIVE.test(text);
+  // "Ya, pero ¿cuánto cuesta?": la afirmación viene con una objeción o una
+  // pregunta, así que todavía no aceptó.
+  const startsWithAffirmation = AFFIRMATIVE.test(text) || /^\s*ya(?=$|[\s,.!?])/i.test(text);
+  if (startsWithAffirmation && (/\bpero\b|[?¿]/i.test(text))) return false;
+  if (a?.confirms) return true;
+  return AFFIRMATIVE.test(text) || /^\s*ya(?:[, ]+(?:pues|bueno|por\s+favor))?(?:[, ]+dale)?[.!\s]*$/i.test(text);
 }
 
 // ¿Es el mismo pedido que ya se ofreció? Comparación laxa: el modelo no
@@ -158,6 +218,34 @@ function wantsToRequest(a: TurnAnalysis): boolean {
 export function decideAction(input: RoutingInput): Action {
   const { clinic, text, analysis, step, proof } = input;
 
+  // Prioridad absoluta: una señal clínica no se consume como dato de una ficha
+  // ni se entrega al modelo general, incluso si el detector configurable está
+  // apagado o el análisis de intención falló.
+  if (text && CLINICAL_SEVERE_PATTERN.test(text)) {
+    return { type: "escalate", kind: "accion", reply: clinic.emergencyResponse, intent: "emergencia" };
+  }
+  if (text && (CLINICAL_INJURY_PATTERN.test(text) || asksForDosing(text))) {
+    return {
+      type: "escalate",
+      kind: "accion",
+      reply: `Por seguridad, no puedo valorar lesiones ni indicar estudios, medicamentos o tratamientos por este chat. Ya aviso a personal clínico para que le oriente 🙏 Si siente que es una emergencia, acuda a Emergencias o llame al ${clinic.generalInfo.phone}.`,
+      intent: CLINICAL_INJURY_PATTERN.test(text) ? "emergencia" : "accion",
+    };
+  }
+
+  if (input.priceDispute) {
+    return {
+      type: "escalate",
+      kind: "accion",
+      reply: PRICE_REVIEW_REPLY,
+      intent: "accion",
+    };
+  }
+
+  if (FRUSTRATION_PATTERN.test(text)) {
+    return { type: "escalate", kind: "humano", reply: clinic.replies.humanHandoff, intent: "handoff_humano" };
+  }
+
   // ── 1. Emergencias (apagado salvo CLINIC_EMERGENCY_DETECTION=true) ────────
   if (input.emergencyDetectionEnabled) {
     const lower = text.toLowerCase();
@@ -174,11 +262,11 @@ export function decideAction(input: RoutingInput): Action {
 
   // ── 3. Ubicación ──────────────────────────────────────────────────────────
   if (text && clinic.locationRequestIntentPatterns.test(text)) {
-    return {
-      type: "reply",
-      text: `📍 Nuestra dirección es: ${clinic.generalInfo.address}\n\n🗺️ Ubicación en Google Maps:\n${clinic.generalInfo.mapsUrl}`,
-      intent: "ubicacion",
-    };
+    const locationReply = `📍 Nuestra dirección es: ${clinic.generalInfo.address}\n\n🗺️ Ubicación en Google Maps:\n${clinic.generalInfo.mapsUrl}`;
+    if ((step === "collecting_lead" || step === "confirming_lead") && !input.pendingOffer) {
+      return { type: "locationAndContinueLead", text: locationReply, intent: "ubicacion" };
+    }
+    return { type: "reply", text: locationReply, intent: "ubicacion" };
   }
 
   // ── 4. Comprobante o archivo ──────────────────────────────────────────────
@@ -197,11 +285,26 @@ export function decideAction(input: RoutingInput): Action {
     if (analysis?.wantsHuman) {
       return { type: "escalate", kind: "humano", reply: clinic.replies.humanHandoff, intent: "handoff_humano" };
     }
+    // Una gestión ("me confirma", "ya llegué") se deriva, salvo que esté
+    // confirmando el resumen o dando sus datos: ahí el "me confirma" es parte de
+    // la solicitud y la alarma ya la levanta la ficha.
+    const givesLeadData = Boolean(analysis?.confirms || analysis?.patientName || analysis?.preferredTime);
+    if (asksHumanAction(text) && !givesLeadData) {
+      return { type: "escalate", kind: "accion", reply: ACTION_REPLY, intent: "accion" };
+    }
 
     // Una OFERTA pendiente no es una solicitud aceptada. El paciente solo
     // preguntó si teníamos algo; que el bot se haya ofrecido a averiguarlo no
     // lo obliga a seguir por ahí.
     if (input.pendingOffer) {
+      if (DECLINES_LEAD_CAPTURE.test(text)) {
+        return {
+          type: "escalate",
+          kind: "no_disponible",
+          reply: NO_CAPTURE_REPLY,
+          intent: "no_disponible",
+        };
+      }
       if (acceptsOffer(text, analysis)) return { type: "continueLead", intent: "solicitud_en_curso" };
       if (rejectsOffer(text, analysis)) return { type: "cancelOffer", intent: "no_disponible" };
 
@@ -339,8 +442,17 @@ export function decideAction(input: RoutingInput): Action {
   // Va después de servicio y ficha para no robarle mensajes a la recolección
   // ("quiero una ficha, me confirma"), y antes del Q&A, que es donde el bot
   // contestaba "Ok" sin que nadie se enterara.
-  if (analysis?.needsHumanAction) {
+  // Con el modelo caído decide el mismo detector que el análisis suma al suyo.
+  if (analysis ? analysis.needsHumanAction : asksHumanAction(text)) {
     return { type: "escalate", kind: "accion", reply: ACTION_REPLY, intent: "accion" };
+  }
+
+  if (text && AMBIGUOUS_PELADA_PATTERN.test(text) && !CLEAR_PELADA_CONTEXT.test(text)) {
+    return {
+      type: "reply",
+      text: "Para no asumir algo incorrecto, ¿me explica qué quiere decir con *“pelada”* en este contexto y qué necesita? 😊",
+      intent: "qa",
+    };
   }
 
   // ── 12. Q&A general ───────────────────────────────────────────────────────
@@ -358,3 +470,7 @@ const QR_CAPTION =
 const PAYMENT_REPLY ="Los datos de pago se los envía un asesor de la clínica cuando confirme su ficha o servicio 🙏 Ya le aviso para que le escriba por aquí.";
 const ACTION_REPLY = "Entendido 🙏 Eso se lo tiene que confirmar una persona de la clínica: ya le aviso para que le escriba por aquí en un momento.";
 const RESULT_REPLY = "Su resultado se lo confirma un asesor de la clínica 🙏 Ya le aviso para que le escriba por aquí.";
+const NO_CAPTURE_REPLY =
+  "Entiendo, no le pediré datos para una ficha 🙏 Un asesor de la clínica le confirmará si realizamos ese servicio y su precio.";
+const PRICE_REVIEW_REPLY =
+  "Veo que menciona un monto distinto del cotizado. No le confirmaré otro precio hasta verificar cuál está vigente; ya aviso a un asesor para que lo revise 🙏";

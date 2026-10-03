@@ -22,7 +22,7 @@ if (existsSync(".env.local")) {
 
 const { getClinicConfig } = await import("../lib/clinic/config");
 const { decideAction } = await import("../lib/clinic/routing");
-const { looksLikeName, needsVisitType, visitTypeFromText } = await import("../lib/clinic/leads");
+const { analysisForLocationFollowup, answerKnownLeadQuestion, hasPriceDispute, looksLikeName, mergeAnalysis, needsVisitType, visitTypeFromText } = await import("../lib/clinic/leads");
 
 import type { TurnAnalysis } from "../lib/clinic/leads";
 import type { BookingStep, LeadDraft } from "../lib/clinic/types";
@@ -50,12 +50,225 @@ type Case = {
   proof?: "receipt" | "unverified" | null;
   greetingOnly?: boolean;
   pendingOffer?: string | null;
+  priceDispute?: boolean;
   pendingClarify?: string | null;
   // Qué se espera de la Action resultante.
   expect: { type: string; kind?: string; intent?: string; pause?: boolean; offer?: boolean };
 };
 
 const CASES: Case[] = [
+  // Casos reales: la seguridad clínica debe ganar incluso con el flag apagado
+  // y mientras ya hay una ficha en curso.
+  {
+    name: "golpe en la cabeza con ladrillo → derivación clínica, no cotización",
+    text: "Por accidente lo golpearon en la cabeza con un ladrillo y tiene un tajo",
+    analysis: null,
+    step: "collecting_lead",
+    expect: { type: "escalate", kind: "accion", intent: "emergencia" },
+  },
+  {
+    name: "golpe en costilla → no recomendar ecografía",
+    text: "¿Cuál ecografía sería para un golpe en el lado de la costilla?",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "emergencia" },
+  },
+  {
+    // Pregunta el precio, no cómo dosificar: se le da el precio de la
+    // nebulización (cargada el 2026-10-03) sin comentar la dosis.
+    name: "nebulización con medicamento recetado, pregunta precio → precio",
+    text: "¿Hacen nebulización? Me dijeron 2 gotas de salbutamol, ¿cuánto está?",
+    analysis: null,
+    expect: { type: "startLead", kind: "servicio", offer: true },
+  },
+  // ── Huecos de la auditoría del 2026-10-01: mensajes normales que la primera
+  // versión derivaba (y pausaba el bot), o casos graves que no veía ────────
+  {
+    name: "'¿se puede dar ficha?' no es pedir una dosis",
+    text: "¿se puede dar ficha para mañana?",
+    analysis: null,
+    expect: { type: "startLead", kind: "ficha" },
+  },
+  {
+    name: "'¿puedo darle el nombre después?' sigue la ficha",
+    text: "¿puedo darle el nombre después?",
+    analysis: null,
+    step: "collecting_lead",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "le recetaron antibióticos y pregunta el precio → no deriva",
+    text: "le recetaron antibióticos, ¿cuánto cuesta la consulta?",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "caída de cabello en la cabeza no es un golpe",
+    text: "tengo caída de cabello en la cabeza",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "se cayó y se golpeó la cabeza → deriva",
+    text: "mi hijo se cayó y se golpeó la cabeza",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "emergencia" },
+  },
+  {
+    name: "convulsión con tilde → emergencia",
+    text: "mi bebé tuvo una convulsión",
+    analysis: null,
+    expect: { type: "escalate", intent: "emergencia" },
+  },
+  {
+    name: "'fuerte dolor en el pecho' → emergencia",
+    text: "tengo un fuerte dolor en el pecho",
+    analysis: null,
+    expect: { type: "escalate", intent: "emergencia" },
+  },
+  {
+    name: "'se queja de dolor' es un síntoma, no una queja",
+    text: "mi hijo se queja de dolor de barriga",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "'quiero poner una queja' sí deriva",
+    text: "quiero poner una queja",
+    analysis: null,
+    expect: { type: "escalate", kind: "humano" },
+  },
+  {
+    name: "'me puede avisar el precio' se responde, no se deriva",
+    text: "me puede avisar el precio de la eco",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "'me confirma el precio' se responde, no se deriva",
+    text: "me confirma el precio por favor",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "'están llegando los doctores' no es una gestión",
+    text: "¿a qué hora están llegando los doctores?",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "'ya estoy llegando' sí es una gestión",
+    text: "ya estoy llegando",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion" },
+  },
+  {
+    name: "confirma el resumen con 'me confirma' → confirma, no deriva",
+    text: "Sí, correcto, me confirma por favor",
+    analysis: analysis({ confirms: true }),
+    step: "confirming_lead",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta → da sus datos y pregunta algo → acepta y conserva los datos",
+    text: "Sí, Juan Pérez, mañana a las 10. ¿Cuánto cuesta?",
+    analysis: analysis({ patientName: "Juan Pérez", preferredTime: "mañana a las 10", isQuestion: true }),
+    step: "collecting_lead",
+    pendingOffer: "electrocardiograma",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "pide una dosis → no dar instrucciones, deriva",
+    text: "¿cuántas gotas de salbutamol le doy a mi bebé para la nebulización?",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "accion" },
+  },
+  {
+    name: "convulsión con tilde → emergencia",
+    text: "Tuvo una convulsión",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "emergencia" },
+  },
+  {
+    name: "fuerte dolor en el pecho → emergencia",
+    text: "Siento fuerte dolor en el pecho",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "emergencia" },
+  },
+  {
+    name: "cada cuánto atienden → pregunta normal, no alarma clínica",
+    text: "¿Cada cuánto atienden los pediatras?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "qa" },
+  },
+  {
+    name: "precio de una inyección → no se confunde con dosis",
+    text: "¿Cuánto cuesta poner una inyección?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "qa" },
+  },
+  {
+    name: "ficha para tratamiento de diabetes → solicitud normal",
+    text: "Quiero ficha para tratamiento de la diabetes",
+    analysis: analysis({ specialtyKey: "medicina-general", wantsLead: true }),
+    expect: { type: "startLead", kind: "ficha" },
+  },
+  {
+    name: "horario no me sirve → pregunta otra franja, no handoff",
+    text: "El horario de la mañana no me sirve, ¿hay en la tarde?",
+    analysis: analysis({ frustrated: true, isQuestion: true }),
+    expect: { type: "qa" },
+  },
+  {
+    name: "C0066: contradicción con precio publicado → asesor verifica",
+    text: "No es 100 Bs, vi en la publicación por WhatsApp",
+    analysis: null,
+    step: "collecting_lead",
+    priceDispute: true,
+    expect: { type: "escalate", kind: "accion", intent: "accion" },
+  },
+  {
+    name: "menciona anuncio PAP sin precio distinto → no disputa",
+    text: "Vi en el anuncio el PAP, ¿cuánto cuesta?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "startLead", kind: "servicio" },
+  },
+  {
+    name: "no es urgente + precio → no disputa",
+    text: "No es urgente, ¿cuánto cuesta la consulta?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "qa" },
+  },
+  {
+    name: "vale gracias, no es necesario → no disputa",
+    text: "Vale, gracias, no es necesario",
+    analysis: analysis(),
+    expect: { type: "qa" },
+  },
+  {
+    name: "C0031: queja explícita → deriva, no repite disculpas",
+    text: "Racista",
+    analysis: null,
+    expect: { type: "escalate", kind: "humano", intent: "handoff_humano" },
+  },
+  {
+    name: "C0031: término ambiguo → pregunta antes de interpretar",
+    text: "Quiero solucionar mi pelada",
+    analysis: null,
+    expect: { type: "reply", intent: "qa" },
+  },
+  {
+    name: "embarazo y eco con 'pelada' → servicio gana a aclaración",
+    text: "Quiero una ecografía obstétrica para mi pelada embarazada",
+    analysis: analysis({ isQuestion: false, wantsLead: true }),
+    expect: { type: "startLead", kind: "servicio", intent: "servicio" },
+  },
+  {
+    name: "pelada embarazada con eco → no pedir aclaración",
+    text: "Mi pelada está embarazada, quiero una ecografía obstétrica",
+    analysis: analysis({ isQuestion: false, wantsLead: true }),
+    expect: { type: "startLead", kind: "servicio", intent: "servicio" },
+  },
+
   // ── Lo que motivó el cambio: preguntar ≠ pedir ────────────────────────────
   {
     name: "pregunta por algo no catalogado → ofrecer, NO abrir ficha",
@@ -130,6 +343,62 @@ const CASES: Case[] = [
     expect: { type: "continueLead" },
   },
   {
+    name: "oferta → sí con modelo caído → acepta",
+    text: "Sí",
+    analysis: null,
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta → ya pues sin análisis → acepta",
+    text: "Ya pues",
+    analysis: null,
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta → ya por favor sin análisis → acepta",
+    text: "Ya, por favor",
+    analysis: null,
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta → ya bueno sin análisis → acepta",
+    text: "Ya bueno",
+    analysis: null,
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta → bueno, pero pregunta horario → no acepta",
+    text: "Bueno, pero ¿atienden el sábado?",
+    analysis: analysis({ isQuestion: true, unavailableRequest: "electrocardiograma" }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "qa", intent: "qa" },
+  },
+  {
+    name: "oferta → ya aislado → acepta",
+    text: "Ya",
+    analysis: analysis({ unavailableRequest: "electrocardiograma" }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta → ya, pero pregunta precio → no acepta",
+    text: "Ya, pero ¿cuánto cuesta?",
+    analysis: analysis({ unavailableRequest: "electrocardiograma", isQuestion: true }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "qa", intent: "qa" },
+  },
+  {
+    name: "C0064: solo quiere ECG, no ficha → deja de pedir datos",
+    text: "solo quiero electrocardiograma no una ficha",
+    analysis: analysis({ unavailableRequest: "electrocardiograma", wantsLead: true }),
+    step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "escalate", kind: "no_disponible", intent: "no_disponible" },
+  },
+  {
     name: "oferta → da los datos directamente → sigue",
     text: "Juan Pérez, mañana a las 10",
     analysis: analysis({ patientName: "Juan Pérez", preferredTime: "mañana a las 10" }),
@@ -155,6 +424,13 @@ const CASES: Case[] = [
     text: "¿Qué horarios tienen?",
     analysis: analysis({ unavailableRequest: "electrocardiograma", isQuestion: true }),
     step: "collecting_lead", pendingOffer: "electrocardiograma",
+    expect: { type: "qa", intent: "qa" },
+  },
+  {
+    name: "oferta → pregunta cuánto cuesta → se responde, no repregunta ficha",
+    text: "Cuánto está su costo",
+    analysis: analysis({ unavailableRequest: "ecografía transvaginal", isQuestion: true }),
+    step: "collecting_lead", pendingOffer: "ecografía transvaginal",
     expect: { type: "qa", intent: "qa" },
   },
   {
@@ -272,7 +548,7 @@ const CASES: Case[] = [
     expect: { type: "reply", intent: "ubicacion" },
   },
   {
-    name: "oferta de servicio → 'Sí' (con tilde) → sigue la solicitud",
+    name: "oferta de servicio → 'sí' → sigue la solicitud",
     text: "Sí",
     analysis: null,
     step: "collecting_lead",
@@ -373,6 +649,20 @@ const CASES: Case[] = [
     expect: { type: "reply", intent: "ubicacion" },
   },
   {
+    name: "ubicación durante ficha → responde y conserva los datos",
+    text: "Juan Pérez, mañana a las 10. ¿Dónde están ubicados?",
+    analysis: analysis({ patientName: "Juan Pérez", preferredTime: "mañana a las 10" }),
+    step: "collecting_lead",
+    expect: { type: "locationAndContinueLead", intent: "ubicacion" },
+  },
+  {
+    name: "ubicación en ficha → no repetir dirección vía Q&A",
+    text: "¿Dónde están?",
+    analysis: analysis({ isQuestion: true }),
+    step: "collecting_lead",
+    expect: { type: "locationAndContinueLead", intent: "ubicacion" },
+  },
+  {
     name: "cancelar de verdad → deriva",
     text: "quiero cancelar mi cita",
     analysis: analysis(),
@@ -427,6 +717,43 @@ const CASES: Case[] = [
     name: "pide una gestión → alarma, no 'Ok'",
     text: "Me confirma",
     analysis: analysis({ needsHumanAction: true }),
+    expect: { type: "escalate", kind: "accion", intent: "accion" },
+  },
+  {
+    name: "me confirma con análisis caído → alarma",
+    text: "Me confirma por favor",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "accion" },
+  },
+  {
+    name: "me dice el precio con análisis caído → no deriva",
+    text: "¿Me dice el precio de la ecografía?",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "ya llegué con análisis caído → alarma",
+    text: "Ya llegué a la clínica",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "accion" },
+  },
+  {
+    name: "llegué durante una ficha con análisis caído → alarma",
+    text: "Ya llegué",
+    analysis: null,
+    step: "collecting_lead",
+    expect: { type: "escalate", kind: "accion", intent: "accion" },
+  },
+  {
+    name: "me lo dice a la licenciada con análisis caído → alarma",
+    text: "Me lo dice a la licenciada por favor",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "accion" },
+  },
+  {
+    name: "dígale a la doctora con análisis caído → alarma",
+    text: "Dígale a la doctora que ya llegué",
+    analysis: null,
     expect: { type: "escalate", kind: "accion", intent: "accion" },
   },
   {
@@ -524,6 +851,7 @@ for (const c of CASES) {
     step: c.step ?? "idle",
     pendingOffer: c.pendingOffer ?? null,
     proof: c.proof ?? null,
+    priceDispute: c.priceDispute ?? false,
     pendingClarify: c.pendingClarify ?? null,
     emergencyDetectionEnabled: false,
     greetingOnly: c.greetingOnly ?? false,
@@ -557,6 +885,94 @@ for (const c of CASES) {
   }
 }
 
+console.log("\nPREGUNTAS DURANTE UNA SOLICITUD (respuesta determinista, sin repetir el formulario)\n");
+const knownPrice = answerKnownLeadQuestion(
+  { kind: "servicio", serviceName: "Ecografía transvaginal", serviceQuote: "150 Bs" },
+  clinic,
+  "Cuánto está su costo",
+);
+if (!knownPrice?.includes("150 Bs")) {
+  failures++;
+  console.log(`  ✗ precio del catálogo: ${knownPrice ?? "sin respuesta"}`);
+} else {
+  console.log("  ✓ precio del catálogo: Ecografía transvaginal — 150 Bs");
+}
+
+const locationFollowup = analysisForLocationFollowup(analysis({
+  patientName: "Juan Pérez", preferredTime: "mañana a las 10", isQuestion: true,
+}));
+if (!locationFollowup || locationFollowup.isQuestion || locationFollowup.patientName !== "Juan Pérez" || locationFollowup.preferredTime !== "mañana a las 10") {
+  failures++;
+  console.log("  ✗ dirección+respuesta pierde datos o conserva el indicador de Q&A");
+} else {
+  console.log("  ✓ dirección+respuesta conserva nombre y horario sin repetir Q&A");
+}
+const locationDraft = locationFollowup ? mergeAnalysis({ kind: "ficha" }, locationFollowup).draft : null;
+if (locationDraft?.patientName !== "Juan Pérez" || locationDraft.preferredTime !== "mañana a las 10") {
+  failures++;
+  console.log("  ✗ los campos extraídos no llegan al borrador de la ficha");
+} else {
+  console.log("  ✓ nombre y horario se fusionan realmente en el borrador");
+}
+
+const quotedService = { kind: "servicio" as const, serviceName: "Ecografía transvaginal", serviceQuote: "150 Bs" };
+if (!hasPriceDispute(quotedService, clinic, "No es 100 Bs, vi en la publicación por WhatsApp") || hasPriceDispute(quotedService, clinic, "No es 150 Bs")) {
+  failures++;
+  console.log("  ✗ disputa de precio: no comparó la cifra con la cotización");
+} else {
+  console.log("  ✓ no confirma un precio hasta verificar la publicación");
+}
+if (hasPriceDispute(quotedService, clinic, "Vi en el anuncio el PAP, ¿cuánto cuesta?") || hasPriceDispute(quotedService, clinic, "No es urgente, ¿cuánto cuesta?") || hasPriceDispute(quotedService, clinic, "Vale gracias, no es necesario")) {
+  failures++;
+  console.log("  ✗ palabras de anuncio/negación sin importe distinto dispararon una disputa");
+} else {
+  console.log("  ✓ anuncio sin precio en conflicto no genera una disputa");
+}
+if (answerKnownLeadQuestion(quotedService, clinic, "¿Cuánto demora el resultado?") !== null || answerKnownLeadQuestion(quotedService, clinic, "¿En cuánto tiempo sale el resultado?") !== null) {
+  failures++;
+  console.log("  ✗ pregunta de duración contestada como precio");
+} else {
+  console.log("  ✓ pregunta de duración no se contesta con el precio");
+}
+
+const unknownPrice = answerKnownLeadQuestion(
+  { kind: "no_disponible", unmatchedRequestText: "electrocardiograma" },
+  clinic,
+  "Cuánto cuesta",
+);
+if (!unknownPrice?.includes("asesor")) {
+  failures++;
+  console.log(`  ✗ precio fuera de catálogo: ${unknownPrice ?? "sin respuesta"}`);
+} else {
+  console.log("  ✓ precio fuera de catálogo: deriva sin inventar ni negar");
+}
+
+// Disputa de precio: se comparan TODAS las cifras de la cotización (campaña,
+// rango, franjas). Antes solo la primera, y "fuera de horario es 200 Bs" o
+// "me dijeron 50 Bs" (en un rango 50 a 120) disparaban una disputa falsa.
+console.log("\nDISPUTA DE PRECIO\n");
+const papQuote = "50 Bs (promoción 50% de descuento, regular 100 Bs) de lunes a viernes de 8:00 a 12:00 y de 14:00 a 18:00; fuera de ese horario, 200 Bs (a llamado, como emergencia; incluye la toma y el análisis)";
+const DISPUTAS: [string, LeadDraft, string, boolean][] = [
+  ["campaña: 'fuera de horario es 200 Bs'", { kind: "servicio", serviceName: "Papanicolaou", serviceQuote: papQuote }, "me dijeron que fuera de horario es 200 bs", false],
+  ["campaña: 'no es 100, en el anuncio dice 50'", { kind: "servicio", serviceName: "Papanicolaou", serviceQuote: papQuote }, "no es 100 bs, en el anuncio dice 50 bs", false],
+  ["campaña: una cifra que no está", { kind: "servicio", serviceName: "Papanicolaou", serviceQuote: papQuote }, "me dijeron que es 30 bs", true],
+  ["rango 50 a 120: el extremo bajo", { kind: "servicio", serviceName: "Certificado de seguro médico", serviceQuote: "50 a 120 Bs" }, "me dijeron que es 50 bs", false],
+  ["rango 50 a 120: fuera del rango", { kind: "servicio", serviceName: "Certificado de seguro médico", serviceQuote: "50 a 120 Bs" }, "me dijeron que es 30 bs", true],
+  ["consulta por franja: el de noche", { kind: "ficha", specialtyKey: "medicina-general" }, "me dijeron que de noche es 80 bs", false],
+  ["consulta por franja: otra cifra", { kind: "ficha", specialtyKey: "medicina-general" }, "me dijeron que es 100 bs", true],
+  ["sin cotización: no es disputa", { kind: "ficha" }, "me dijeron 60 bs", false],
+  ["miles con punto", { kind: "servicio", serviceName: "Cesárea programada", serviceQuote: "4000 Bs" }, "me dijeron 4.000 bs", false],
+];
+for (const [nombre, draft, texto, esperado] of DISPUTAS) {
+  const got = hasPriceDispute(draft, clinic, texto);
+  if (got !== esperado) failures++;
+  console.log(`  ${got === esperado ? "✓" : "✗"} ${nombre}`.padEnd(52) + `disputa=${got}`);
+}
+
+const valeOk = answerKnownLeadQuestion({ kind: "ficha", specialtyKey: "medicina-general" }, clinic, "vale, mañana a las 10");
+if (valeOk !== null) failures++;
+console.log(`  ${valeOk === null ? "✓" : "✗"} "vale, mañana a las 10" no es pregunta de precio`);
+
 // ─── needsVisitType: nunca preguntar nueva/reconsulta sin especialidad ──────
 // El fallback era `true`, y como lo que no está en catálogo nunca tiene
 // specialtyKey, terminaba preguntándole a un electrocardiograma si era
@@ -573,6 +989,7 @@ const VISIT: [string, LeadDraft, boolean][] = [
   ["medicina general (reconsulta 7d)", { kind: "ficha", specialtyKey: "medicina-general" }, true],
   ["pediatría (reconsulta 3d)", { kind: "ficha", specialtyKey: "pediatria" }, true],
   ["ginecología (reconsulta 7d)", { kind: "ficha", specialtyKey: "ginecologia" }, true],
+  // Solo Medicina General, Ginecología y Pediatría tienen reconsulta (2026-10-03).
   ["cardiología (sin reconsulta)", { kind: "ficha", specialtyKey: "cardiologia" }, false],
   ["neurología (sin reconsulta)", { kind: "ficha", specialtyKey: "neurologia" }, false],
 ];
@@ -615,6 +1032,10 @@ for (const [texto, esperado] of VISIT_TEXT) {
 console.log("\n¿ES UN NOMBRE?\n");
 
 const NOMBRES: [string, boolean][] = [
+  ["sí", false],
+  ["ok", false],
+  ["mañana", false],
+  ["1 año y 5 meses", false],
   ["pa mi", false],
   ["para mi", false],
   ["para mí", false],

@@ -69,21 +69,22 @@ function findWeekday(text: string): number | null {
 
 // "20 de septiembre", "el 20", "20/09". Devuelve día y mes (mes null si solo
 // dijo el número). Con guion no: "de 10-12" es una franja horaria.
-function findDayOfMonth(text: string): { day: number; month: number | null } | null {
-  const numeric = text.match(/\b(\d{1,2})\s*\/\s*(\d{1,2})\b/);
+function findDayOfMonth(text: string): { day: number; month: number | null; year: number | null } | null {
+  const numeric = text.match(/\b(\d{1,2})\s*\/\s*(\d{1,2})(?:\s*\/\s*(\d{4}))?\b/);
   if (numeric) {
     const day = Number(numeric[1]);
     const month = Number(numeric[2]);
-    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) return { day, month };
+    const year = numeric[3] ? Number(numeric[3]) : null;
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) return { day, month, year };
   }
-  const named = text.match(new RegExp(`\\b(\\d{1,2})\\s+de\\s+(${MONTHS.join("|")})\\b`));
-  if (named) return { day: Number(named[1]), month: MONTHS.indexOf(named[2]) + 1 };
+  const named = text.match(new RegExp(`\\b(\\d{1,2})\\s+de\\s+(${MONTHS.join("|")})(?:\\s+(?:de\\s+)?(\\d{4}))?\\b`));
+  if (named) return { day: Number(named[1]), month: MONTHS.indexOf(named[2]) + 1, year: named[3] ? Number(named[3]) : null };
   // "el 20", "para el 5", "el sábado 27": solo con artículo o día de la semana
   // delante, para no confundir "a las 10".
   const bare = text.match(/\b(?:el|del|para el|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\s+(\d{1,2})\b(?!\s*(?::|hs?\b|horas?\b|de la (?:manana|tarde|noche)))/);
   if (bare) {
     const day = Number(bare[1]);
-    if (day >= 1 && day <= 31) return { day, month: null };
+    if (day >= 1 && day <= 31) return { day, month: null, year: null };
   }
   return null;
 }
@@ -99,9 +100,12 @@ function isoOf(year: number, month: number, day: number): string {
 
 // El próximo día del mes que coincide: si ya pasó este mes (o este año), el
 // siguiente. Nadie pide ficha para una fecha pasada.
-function nextDayOfMonth(today: string, day: number, month: number | null): string | null {
+function nextDayOfMonth(today: string, day: number, month: number | null, explicitYear: number | null): string | null {
   const [year, currentMonth] = today.split("-").map(Number);
   if (month) {
+    if (explicitYear !== null) {
+      return isValidDate(explicitYear, month, day) ? isoOf(explicitYear, month, day) : null;
+    }
     for (const y of [year, year + 1]) {
       if (!isValidDate(y, month, day)) continue;
       const iso = isoOf(y, month, day);
@@ -123,6 +127,9 @@ export type DateMention =
   | { kind: "none" }
   // Un día claro, calculado por código.
   | { kind: "date"; date: string }
+  // Una fecha explícita que ya pasó: no se mueve al año siguiente sin permiso.
+  // `date` es esa fecha tal cual la dijo ("YYYY-MM-DD", en el pasado).
+  | { kind: "past"; said: string; date: string }
   // Dijo dos cosas que no calzan ("hoy sábado" un viernes): no se elige por él.
   | { kind: "conflict"; said: string; relativeDate: string; weekdayDate: string };
 
@@ -137,7 +144,7 @@ export function readDateMention(rawText: string, today: string): DateMention {
   const relativeDate = relative ? addDays(today, relative.offset) : null;
   // "el sábado" es el próximo sábado; dicho un sábado, es hoy.
   const weekdayDate = weekday === null ? null : addDays(today, (weekday - weekdayOfDate(today) + 7) % 7);
-  const monthDate = dayOfMonth ? nextDayOfMonth(today, dayOfMonth.day, dayOfMonth.month) : null;
+  const monthDate = dayOfMonth ? nextDayOfMonth(today, dayOfMonth.day, dayOfMonth.month, dayOfMonth.year) : null;
 
   // Dos días que no calzan son un error del paciente solo si los dijo JUNTOS
   // ("hoy sábado", "mañana que es domingo", "el sábado 27"). Separados, uno
@@ -147,6 +154,14 @@ export function readDateMention(rawText: string, today: string): DateMention {
     const together = new RegExp(`\\b(?:hoy|ma[nñ]ana)\\s*,?\\s*(?:es\\s+|que\\s+es\\s+|seria\\s+)?${WEEKDAY_PATTERNS[weekday]}\\b`).test(text);
     if (!together) return { kind: "none" };
     return { kind: "conflict", said: `${relative.word} ${WEEKDAYS[weekday]}`, relativeDate, weekdayDate: weekdayDate! };
+  }
+  if (!relative && dayOfMonth?.month) {
+    const [currentYear] = today.split("-").map(Number);
+    const statedDate = isoOf(dayOfMonth.year ?? currentYear, dayOfMonth.month, dayOfMonth.day);
+    if (isValidDate(dayOfMonth.year ?? currentYear, dayOfMonth.month, dayOfMonth.day) && statedDate < today) {
+      const yearSuffix = dayOfMonth.year ? ` de ${dayOfMonth.year}` : "";
+      return { kind: "past", said: `${dayOfMonth.day} de ${MONTHS[dayOfMonth.month - 1]}${yearSuffix}`, date: statedDate };
+    }
   }
   if (monthDate && weekday !== null && weekdayOfDate(monthDate) !== weekday) {
     const together = new RegExp(`\\b${WEEKDAY_PATTERNS[weekday]}\\s+\\d{1,2}\\b`).test(text);
@@ -182,7 +197,8 @@ export function dayLabel(isoDate: string, today: string): string {
 
 // La pregunta que se le hace ante un día que no calza. Siempre dice primero
 // qué día es hoy: es lo que el paciente tenía mal.
-export function dateConflictQuestion(mention: Extract<DateMention, { kind: "conflict" }>, today: string): string {
+export function dateConflictQuestion(mention: Extract<DateMention, { kind: "conflict" | "past" }>, today: string): string {
+  if (mention.kind === "past") return `La fecha que indicó (*${mention.said}*) ya pasó. ¿Qué fecha quería indicar?`;
   const options = [...new Set([mention.relativeDate, mention.weekdayDate])]
     .sort()
     .map((date) => `*${dayLabel(date, today)}*`)
