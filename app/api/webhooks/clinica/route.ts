@@ -407,7 +407,7 @@ export async function POST(request: Request) {
     metadata: { decision: "AI_PROCESSING_ALLOWED", bot_paused: false },
   });
 
-  const send = (replyText: string, options: { pauseAfter?: boolean } = {}) =>
+  const send = (replyText: string, options: { pauseAfter?: boolean; imageUrl?: string } = {}) =>
     sendAndPersist({
       kapso,
       phoneNumberId,
@@ -416,6 +416,7 @@ export async function POST(request: Request) {
       replyText,
       lastMessage,
       pauseAfter: options.pauseAfter,
+      imageUrl: options.imageUrl,
     });
   const session = normalizeSession(await getBookingSession(conversationId));
 
@@ -482,9 +483,12 @@ export async function POST(request: Request) {
   // ── Decisión ──────────────────────────────────────────────────────────────
   // Función pura (lib/clinic/routing.ts): no toca base de datos ni red. Todo lo
   // que sigue es ejecución.
+  // Una oferta puede ser de algo fuera de catálogo o de un servicio del
+  // tarifario del que solo preguntó el precio.
   const pendingOffer = session.draft.lead?.offerPending
-    ? session.draft.lead.unmatchedRequestText ?? null
+    ? session.draft.lead.unmatchedRequestText ?? session.draft.lead.serviceName ?? null
     : null;
+  const pendingClarify = session.step === "idle" ? session.draft.clarifyService ?? null : null;
   const action = decideAction({
     clinic,
     text: newText,
@@ -494,6 +498,7 @@ export async function POST(request: Request) {
     proof,
     emergencyDetectionEnabled: process.env.CLINIC_EMERGENCY_DETECTION === "true",
     greetingOnly: Boolean(newText) && GREETING_ONLY_PATTERN.test(newText),
+    pendingClarify,
   });
 
   // ── Ejecución ───────────────────────────────────────────────────
@@ -503,9 +508,37 @@ export async function POST(request: Request) {
   if (pendingOffer && action.type !== "continueLead" && action.type !== "cancelOffer") {
     await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {} });
   }
+  // La aclaración vale un solo turno: contestó (o habló de otra cosa) y se olvida.
+  if (pendingClarify && action.type !== "clarify") {
+    await saveBookingSession({
+      conversationId,
+      business: clinic.slug,
+      step: "idle",
+      draft: { failedAttempts: tracked.session.draft.failedAttempts },
+    });
+  }
 
   switch (action.type) {
     case "reply": {
+      await send(action.text);
+      return ok(action.intent);
+    }
+
+    // El QR se envía y queda la alarma de pago para que un asesor verifique; el
+    // bot sigue atendiendo (sin pausa) y la sesión no se toca.
+    case "sendQr": {
+      await registerEscalation({ ...leadCtx, kind: "pago", lastMessage: newText, lead: session.draft.lead ?? null });
+      await send(action.caption, { imageUrl: clinic.qrImageUrl ?? undefined });
+      return ok(action.intent);
+    }
+
+    case "clarify": {
+      await saveBookingSession({
+        conversationId,
+        business: clinic.slug,
+        step: "idle",
+        draft: { failedAttempts: tracked.session.draft.failedAttempts, clarifyService: action.serviceName },
+      });
       await send(action.text);
       return ok(action.intent);
     }
@@ -537,6 +570,7 @@ export async function POST(request: Request) {
         session: tracked.session,
         kind: action.kind,
         service: action.service,
+        offer: action.offer,
         analysis,
       });
       await send(result.reply, { pauseAfter: result.pauseAfterReply });
@@ -631,8 +665,10 @@ async function sendAndPersist(params: {
   lastMessage: IncomingMessage;
   // Pausar el bot después de enviar (derivación a una persona).
   pauseAfter?: boolean;
+  // Si viene, se envía esta imagen con replyText al pie (el QR de pago).
+  imageUrl?: string;
 }) {
-  const { kapso, phoneNumberId, contactPhone, conversationId, replyText, lastMessage } = params;
+  const { kapso, phoneNumberId, contactPhone, conversationId, replyText, lastMessage, imageUrl } = params;
 
   try {
     // Barrera B (justo antes de enviar): una persona puede tomar el control
@@ -662,16 +698,24 @@ async function sendAndPersist(params: {
     }
 
     try {
-      await kapso.messages.sendText({
-        phoneNumberId,
-        to: contactPhone,
-        body: replyText,
-      });
+      if (imageUrl) {
+        await kapso.messages.sendImage({
+          phoneNumberId,
+          to: contactPhone,
+          image: { link: imageUrl, caption: replyText },
+        });
+      } else {
+        await kapso.messages.sendText({
+          phoneNumberId,
+          to: contactPhone,
+          body: replyText,
+        });
+      }
     } catch (err) {
-      console.error("kapso sendText failed", err);
+      console.error(imageUrl ? "kapso sendImage failed" : "kapso sendText failed", err);
       await logSystemEvent({
         level: "critical",
-        eventType: "kapso_send_text_failed",
+        eventType: imageUrl ? "kapso_send_image_failed" : "kapso_send_text_failed",
         conversationId,
         contactPhone,
         errorMessage: getErrorMessage(err),

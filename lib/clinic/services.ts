@@ -190,6 +190,10 @@ export const defaultServices: ServiceItem[] = [
   { name: "Sutura por punto (médico)", price: 20, category: "enfermeria", aliases: ["punto de sutura medico", "sutura medico", "sutura", "suturar"] },
   { name: "Lavado de oído", price: 80, category: "enfermeria", note: "lunes a viernes", aliases: ["lavado de oido", "limpieza de oido", "destapar oido", "destapar el oido", "lavar el oido", "lavar oido"] },
   { name: "Lavado de oído fin de semana", price: 100, category: "enfermeria", note: "sábado y domingo", aliases: ["lavado de oido sabado", "lavado de oido domingo"] },
+  // Precio que dio la clínica por WhatsApp el 2026-10-03: 2 Bs por minuto. El
+  // precio del ítem es el de una sesión de 10 minutos. "nebuliz"/"nebulis"
+  // atrapan nebulización, nebulizar, nebulizaciones y la forma con s.
+  { name: "Nebulización", price: 20, category: "enfermeria", note: "10 minutos; 2 Bs por minuto", aliases: ["nebuliz", "nebulis"] },
   // Los alias con artículo ("sacar los puntos") están a propósito: normalize()
   // unifica el verbo pero no borra artículos.
   { name: "Retiro de puntos (1 a 10 puntos)", price: 25, category: "enfermeria", aliases: ["sacar puntos", "sacar los puntos", "retiro de puntos", "quitar puntos", "quitar los puntos"] },

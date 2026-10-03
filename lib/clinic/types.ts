@@ -109,6 +109,9 @@ export type BookingDraft = {
   serviceQuote?: string; // su precio ya formateado, para repetirlo al confirmar
   rescheduleConfirmed?: boolean; // true si la cita original ya estaba `confirmed`
   lead?: LeadDraft;              // solicitud en curso (collecting_lead / confirming_lead)
+  // El bot preguntó "¿consulta para X o el precio de X?" y espera la respuesta.
+  // Guarda el nombre del servicio del catálogo; se descarta en el turno siguiente.
+  clarifyService?: string;
   // Momentos (ISO) en que el paciente dijo que no se le está ayudando. Al llegar
   // a 3 dentro de la ventana, el bot deriva a una persona.
   failedAttempts?: string[];

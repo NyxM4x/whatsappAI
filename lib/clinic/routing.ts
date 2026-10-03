@@ -16,6 +16,7 @@
 // ============================================================================
 
 import type { ClinicConfig } from "@/lib/clinic/config";
+import { matchSpecialtyText } from "@/lib/clinic/pricing";
 import { matchService, mentionsOffCatalogRequest, type ServiceItem } from "@/lib/clinic/services";
 import type { TurnAnalysis } from "@/lib/clinic/leads";
 import type { AuditIntent, BookingStep, LeadDraft, LeadKind } from "@/lib/clinic/types";
@@ -29,8 +30,15 @@ export type Action =
   // pause: false deja la alarma sin pausar (el paciente puede seguir
   // preguntando otras cosas mientras el asesor le responde).
   | { type: "escalate"; kind: LeadKind; reply: string; intent: AuditIntent; pause?: boolean }
-  // Abrir una solicitud nueva y pedir lo que falte.
-  | { type: "startLead"; kind: LeadDraft["kind"]; service?: ServiceItem | null; intent: AuditIntent }
+  // Abrir una solicitud nueva y pedir lo que falte. Con offer, el paciente solo
+  // preguntó el precio: se le da y se le ofrece el servicio, sin darlo por pedido.
+  | { type: "startLead"; kind: LeadDraft["kind"]; service?: ServiceItem | null; offer?: boolean; intent: AuditIntent }
+  // Enviar la imagen del QR de pago (con este texto al pie) y avisar al asesor,
+  // sin pausar el bot.
+  | { type: "sendQr"; caption: string; intent: AuditIntent }
+  // El mensaje admite dos lecturas que llevan a lugares distintos: se pregunta
+  // cuál quiso decir y se recuerda el servicio para entender la respuesta.
+  | { type: "clarify"; text: string; serviceName: string; intent: AuditIntent }
   // Tomar el pedido de algo que no está en catálogo. El paciente ve una
   // solicitud normal (se le piden los datos); por dentro queda como oferta, así
   // que si contesta otra cosa el mensaje se re-decide en vez de consumirse.
@@ -57,6 +65,9 @@ export type RoutingInput = {
   proof: "receipt" | "unverified" | null;
   emergencyDetectionEnabled: boolean;
   greetingOnly: boolean;
+  // Servicio sobre el que el bot preguntó "¿consulta o precio?" en el turno
+  // anterior. null = no hay aclaración pendiente.
+  pendingClarify?: string | null;
 };
 
 // Respuestas a una pregunta cerrada. Se resuelven con patrones y no con el
@@ -64,8 +75,29 @@ export type RoutingInput = {
 // —devuelve wantsOut:false para los dos— porque sin saber que hubo una oferta,
 // un "No" suelto no significa "ya no quiero la solicitud". En el contexto de
 // una pregunta de sí/no, en cambio, reconocerlo es determinista.
-const AFFIRMATIVE = /^\s*(?:s[ií]|sip+|claro|dale|ya|bueno|ok(?:ay)?|por ?favor|de una|obvio|as[ií] es|est[aá] bien|me parece|dele|dal[eé])\b/i;
+// El cierre no es \b: en JS \b solo conoce letras ASCII, así que "Sí" con tilde
+// nunca coincidía.
+const AFFIRMATIVE = /^\s*(?:s[ií]|sip+|claro|dale|ya|bueno|ok(?:ay)?|por ?favor|de una|obvio|as[ií] es|est[aá] bien|me parece|dele|dal[eé])(?=$|[\s,.!?])/i;
 const NEGATIVE = /^\s*(?:no|nop+|nel|negativo|mejor no|ya no|d[eé]j[eaá]lo|olv[ií]delo|gracias no|nada m[aá]s|as[ií] nom[aá]s)\b/i;
+
+// "Una consulta" al empezar el mensaje, en Bolivia, casi siempre es "tengo una
+// pregunta". El modelo lo leía como pedido de consulta médica y abría una ficha
+// (caso real 2026-10-03: "Una consulta / La nebulización cuánto está???" terminó
+// pidiendo especialidad, nombre y horario). "Quiero/necesito una consulta" o
+// "sacar una consulta" no entran: ahí sí está pidiendo una consulta médica.
+const CONSULTA_AS_QUESTION =
+  /^\s*(?:(?:hola|buen[oa]s?(?:\s+(?:d[ií]as|tardes|noches))?)[\s,.!]*)?(?:(?:tengo|le\s+hago|hago|quisiera\s+hacer(?:le)?|quiero\s+hacer(?:le)?)\s+)?una\s+consult(?:a|ita)\b/i;
+// Con esto en el mensaje no hay duda de que pide atención médica.
+const CLEAR_CONSULTATION_REQUEST = /\b(?:ficha|cita|turno|agend\w*|reserv\w*|dr|dra|doctora?|m[eé]dic[oa])\b/i;
+
+// La respuesta a "¿consulta para X o el precio de X?".
+const CLARIFY_PRICE = /\b(?:precio|cu[aá]nto|costo|valor|tarifa|lo\s+segundo|la\s+segunda|el\s+segundo)\b|^\s*2\s*[.)]?\s*$/i;
+const CLARIFY_CONSULTATION = /\b(?:consulta|ficha|cita|turno|m[eé]dic[oa]|doctora?|lo\s+primero|la\s+primera|el\s+primero)\b|^\s*1\s*[.)]?\s*$/i;
+
+// Pregunta el precio de un servicio sin decir que lo quiere hacer: se le da el
+// precio y se le ofrece. "Quiero saber cuánto cuesta" sigue siendo pregunta.
+const PRICE_QUESTION = /\b(?:cu[aá]nto|precio|costo|cuesta|vale|tarifa)\b/i;
+const WANTS_SERVICE = /\b(?:quiero|quisiera|necesito|deseo)\b(?!\s+saber)|\b(?:agend\w*|reserv\w*|ficha|cita|turno)\b/i;
 
 // Aceptó la oferta: lo dijo, o directamente pasó a dar los datos.
 function acceptsOffer(text: string, a: TurnAnalysis | null): boolean {
@@ -109,10 +141,9 @@ function rejectsOffer(text: string, a: TurnAnalysis | null): boolean {
 // lugar de consumirse. Dar los datos ya cuenta como aceptar (ver acceptsOffer).
 export function unlistedAnswer(request: string): string {
   return (
-    `¡Con gusto le ayudo con *${request}*! 😊 El precio y el horario se los confirma ` +
-    `un asesor de la clínica por aquí mismo.\n\n` +
-    `¿Me dice el *nombre completo del paciente* y qué *día y hora* le quedarían cómodos? ` +
-    `Así le paso su pedido 🙏`
+    `¡Con gusto le ayudo con *${request}*! 😊 Le paso su solicitud a un asesor de la ` +
+    `clínica para que le responda lo antes posible con el precio y la disponibilidad.\n\n` +
+    `¿Qué *día y hora* le quedarían cómodos? 🙏`
   );
 }
 
@@ -201,6 +232,16 @@ export function decideAction(input: RoutingInput): Action {
   if (!text) return { type: "reply", text: clinic.replies.welcome, intent: "bienvenida" };
   if (input.greetingOnly) return { type: "reply", text: clinic.replies.welcome, intent: "saludo" };
 
+  // Respuesta a la aclaración del turno anterior. Si no contesta ninguna de las
+  // dos cosas, el mensaje sigue de largo como cualquier otro.
+  if (input.pendingClarify) {
+    const clarified = clinic.services.find((s) => s.name === input.pendingClarify);
+    if (clarified && CLARIFY_PRICE.test(text)) {
+      return { type: "startLead", kind: "servicio", service: clarified, offer: true, intent: "servicio" };
+    }
+    if (CLARIFY_CONSULTATION.test(text)) return { type: "startLead", kind: "ficha", intent: "ficha" };
+  }
+
   // ── 7. Pedidos que solo resuelve una persona ──────────────────────────────
   // "Cancelar" con un medio o un momento de pago al lado es PAGAR, no anular.
   if (clinic.cancelIntentPatterns.test(text) && !clinic.cancelMeansPayingPatterns.test(text)) {
@@ -212,8 +253,13 @@ export function decideAction(input: RoutingInput): Action {
   if (clinic.checkAppointmentIntentPatterns.test(text)) {
     return { type: "escalate", kind: "consulta_cita", reply: TO_ADVISOR_REPLY, intent: "consulta_cita" };
   }
+  // Pide el QR: se le envía (decisión de la clínica, 2026-10-03: solo cuando el
+  // paciente lo pide) y queda la alarma para que un asesor verifique el pago.
+  // Sin imagen cargada, como antes: lo manda el asesor.
   if (clinic.qrRequestIntentPatterns.test(text)) {
-    return { type: "escalate", kind: "pago", reply: PAYMENT_REPLY, intent: "pago" };
+    return clinic.qrImageUrl
+      ? { type: "sendQr", caption: QR_CAPTION, intent: "pago" }
+      : { type: "escalate", kind: "pago", reply: PAYMENT_REPLY, intent: "pago" };
   }
   // "¿Ya está mi resultado?" El bot no ve resultados: si contesta, inventa.
   // Alarma sin pausa (D6). Si en el mismo mensaje pide una ficha para que se
@@ -225,6 +271,28 @@ export function decideAction(input: RoutingInput): Action {
   // ── 8. Lo que dependa del análisis ────────────────────────────────────────
   if (analysis?.wantsHuman) {
     return { type: "escalate", kind: "humano", reply: clinic.replies.humanHandoff, intent: "handoff_humano" };
+  }
+
+  // "Una consulta" como pregunta. Si en el mismo mensaje nombra un servicio, las
+  // dos lecturas chocan (¿consulta médica para eso, o el precio?) y se pregunta
+  // cuál. Sola, se le pide que cuente qué necesita. Con una especialidad, un
+  // médico o "ficha/cita", no hay choque: está pidiendo una consulta.
+  const consultaAsQuestion =
+    CONSULTA_AS_QUESTION.test(text) && !CLEAR_CONSULTATION_REQUEST.test(text) && !matchSpecialtyText(text);
+  if (consultaAsQuestion) {
+    const mentioned = matchService(text, clinic.services);
+    if (mentioned && mentioned.category !== "emergencia") {
+      const label = mentioned.name.toLowerCase();
+      return {
+        type: "clarify",
+        text: `¿Quisiera una *consulta* para ${label} o el *precio* de ${label}? 😊`,
+        serviceName: mentioned.name,
+        intent: "qa",
+      };
+    }
+    if (!text.replace(CONSULTA_AS_QUESTION, "").replace(/[\s.,;:!¡?¿😊🙏]/g, "")) {
+      return { type: "reply", text: "¡Claro! 😊 Dígame, ¿en qué le puedo ayudar?", intent: "qa" };
+    }
   }
 
   // Algo que no está en ningún catálogo nuestro. Acá está la corrección de
@@ -253,13 +321,17 @@ export function decideAction(input: RoutingInput): Action {
 
   // ── 9. Servicio del tarifario ─────────────────────────────────────────────
   // Las consultas de emergencia solo se informan: no esperan a un asesor.
+  // Si solo pregunta el precio, se le da y se le ofrece el servicio; si dice
+  // que lo quiere, se abre la solicitud directamente.
   const service = matchService(text, clinic.services);
   if (service && service.category !== "emergencia") {
-    return { type: "startLead", kind: "servicio", service, intent: "servicio" };
+    const offer = PRICE_QUESTION.test(text) && !WANTS_SERVICE.test(text);
+    return { type: "startLead", kind: "servicio", service, offer, intent: "servicio" };
   }
 
   // ── 10. Ficha / consulta ──────────────────────────────────────────────────
-  if (clinic.bookingIntentPatterns.test(text) || (analysis && wantsToRequest(analysis))) {
+  // "Una consulta" como pregunta no es un pedido, aunque el modelo diga wantsLead.
+  if (clinic.bookingIntentPatterns.test(text) || (analysis && !consultaAsQuestion && wantsToRequest(analysis))) {
     return { type: "startLead", kind: "ficha", intent: "ficha" };
   }
 
@@ -281,6 +353,8 @@ export function decideAction(input: RoutingInput): Action {
 const RECEIPT_REPLY = "¡Gracias! 🙏 Recibimos su comprobante. Un asesor de la clínica lo revisará y le confirmará por aquí.";
 const FILE_REPLY = "¡Gracias! 🙏 Recibimos su archivo. Un asesor de la clínica lo revisará.";
 const TO_ADVISOR_REPLY = "Le paso su pedido a un asesor de la clínica 🙏 En un momento le escribe por aquí.";
-const PAYMENT_REPLY = "Los datos de pago se los envía un asesor de la clínica cuando confirme su ficha o servicio 🙏 Ya le aviso para que le escriba por aquí.";
+const QR_CAPTION =
+  "Este es el QR de pago de la clínica 😊 Cuando pague, envíeme el comprobante por aquí y un asesor lo verifica.";
+const PAYMENT_REPLY ="Los datos de pago se los envía un asesor de la clínica cuando confirme su ficha o servicio 🙏 Ya le aviso para que le escriba por aquí.";
 const ACTION_REPLY = "Entendido 🙏 Eso se lo tiene que confirmar una persona de la clínica: ya le aviso para que le escriba por aquí en un momento.";
 const RESULT_REPLY = "Su resultado se lo confirma un asesor de la clínica 🙏 Ya le aviso para que le escriba por aquí.";

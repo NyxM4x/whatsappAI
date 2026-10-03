@@ -17,8 +17,10 @@
 // Donde el Excel no trae tarifa se conserva la que ya cobraba el sistema
 // (pediatría L-V noche y sábado de día).
 //
-// Reconsulta: gratis dentro de N días calendario desde la consulta, SOLO en las
-// especialidades con reconsultaDays. En las demás el bot no la menciona.
+// Reconsulta: gratis dentro de N días calendario desde la consulta, SOLO en
+// Medicina General (7), Ginecología (7) y Pediatría (3) — confirmado por la
+// clínica el 2026-10-03. Las demás especialidades NO tienen reconsulta: no
+// agregarles reconsultaDays.
 // ============================================================================
 
 export type PriceRule = {
@@ -68,13 +70,15 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
     key: "pediatria",
     name: "Pediatría",
     price: 80,
+    // Tarifa confirmada por la clínica el 2026-10-03: el sábado se cobra como
+    // día de semana hasta las 12:00 (antes era 120 hasta las 19:00 y 100 después).
     rules: [
       { weekdays: MON_FRI, from: "07:00", to: "24:00", price: 80 },
-      { weekdays: [6], from: "07:00", to: "19:00", price: 120 },
-      { weekdays: [6], from: "19:00", to: "24:00", price: 100 },
+      { weekdays: [6], from: "07:00", to: "12:00", price: 80 },
+      { weekdays: [6], from: "12:00", to: "24:00", price: 100 },
       { weekdays: [0], from: "07:00", to: "24:00", price: 120 },
     ],
-    scheduleNote: "80 Bs de lunes a viernes; sábado 120 Bs hasta las 19:00 y 100 Bs desde las 19:00; domingo y feriados 120 Bs",
+    scheduleNote: "80 Bs de lunes a viernes y sábado hasta las 12:00; sábado desde las 12:00 100 Bs; domingo y feriados 120 Bs",
     reconsultaDays: 3,
     aliases: ["pediatra", "pediatr", "medico de niños", "doctor de niños", "para mi bebe", "para mi niño", "para mi niña"],
   },
@@ -91,7 +95,7 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
       { weekdays: [0, 6], from: "07:00", to: "24:00", price: 200 },
     ],
     scheduleNote: "80 Bs de lunes a viernes de 7:00 a 18:00; desde las 18:00, sábado, domingo y feriados 200 Bs (a llamado, como emergencia)",
-    reconsultaDays: 3,
+    reconsultaDays: 7,
     aliases: ["ginecologo", "ginecologa", "ginecolog", "gineco", "obstetra", "obstetricia"],
   },
   // Especialidades con precio en el tarifario de la clínica: precio único.

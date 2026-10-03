@@ -10,7 +10,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { getClinicConfig } from "../lib/clinic/config";
-import { findSpecialty, localDateISO, priceAt } from "../lib/clinic/pricing";
+import { CONSULTATION_SPECIALTIES, findSpecialty, localDateISO, priceAt } from "../lib/clinic/pricing";
 import { matchService, formatServicePrice } from "../lib/clinic/services";
 import { matchDoctorText } from "../lib/clinic/leads";
 
@@ -115,6 +115,10 @@ for (const [frase, esperaEmergencia] of [
   ["necesito retiro de uña", false],
   ["me quiero sacar la uña del pie", false],
   ["tengo un uñero", false],
+  // Nebulización (2 Bs por minuto, 10 min = 20 Bs; cargada el 2026-10-03).
+  ["La nebulización cuánto está???", false],
+  ["cuanto cuesta nebulizar a mi bebe", false],
+  ["hacen nebulisaciones?", false],
   ["tengo la una encarnada", false],
   [`me quiero sacar la u${"n\u0303"}a del pie`, false],
 ] as const) {
@@ -168,6 +172,19 @@ for (const [frase, esperado] of [
   chequear(`"${frase.slice(0, 42)}"`, got === esperado, got ?? "ninguno");
 }
 
+// ── Reconsulta gratis ────────────────────────────────────────────────────────
+// Confirmado por la clínica el 2026-10-03: SOLO estas tres. Las demás no tienen
+// reconsulta; si alguna aparece con días, el bot le promete gratis algo que no lo es.
+console.log("\nRECONSULTA GRATIS  (solo Medicina General, Ginecología y Pediatría)");
+{
+  const esperado: Record<string, number> = { "medicina-general": 7, ginecologia: 7, pediatria: 3 };
+  const reales = Object.fromEntries(
+    CONSULTATION_SPECIALTIES.filter((s) => s.reconsultaDays).map((s) => [s.key, s.reconsultaDays!]),
+  );
+  const ok = JSON.stringify(reales, Object.keys(reales).sort()) === JSON.stringify(esperado, Object.keys(esperado).sort());
+  chequear("especialidades con reconsulta", ok, JSON.stringify(reales));
+}
+
 // ── Precios de consulta por franja ───────────────────────────────────────────
 // Franjas confirmadas el 2026-09-15: a las 19:00 rige la tarifa de después, y
 // la madrugada se cobra como la noche del día anterior.
@@ -184,7 +201,11 @@ for (const [etiqueta, spec, dia, hora, esperado] of [
   ["Medicina General lunes 06:59", mg, 1, "06:59", 80],
   ["Medicina General lunes 07:00", mg, 1, "07:00", 60],
   ["Pediatría viernes 20:00", ped, 5, "20:00", 80],
-  ["Pediatría sábado 10:00", ped, 6, "10:00", 120],
+  // Tarifa del 2026-10-03: sábado 80 hasta las 12:00 y 100 desde las 12:00.
+  ["Pediatría sábado 10:00", ped, 6, "10:00", 80],
+  ["Pediatría sábado 11:59", ped, 6, "11:59", 80],
+  ["Pediatría sábado 12:00", ped, 6, "12:00", 100],
+  ["Pediatría sábado 17:00 (turno Dr. Daguino)", ped, 6, "17:00", 100],
   ["Pediatría sábado 19:00", ped, 6, "19:00", 100],
   ["Pediatría domingo 02:00", ped, 0, "02:00", 100],
   ["Pediatría domingo 15:00", ped, 0, "15:00", 120],

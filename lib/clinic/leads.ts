@@ -9,8 +9,10 @@
 //
 // Ficha (consulta): nombre del paciente (en pediatría, el del niño),
 //   especialidad o médico de preferencia, día y hora cómodos, y consulta nueva
-//   o reconsulta (esto último no se pregunta en especialidades sin reconsulta).
-// Servicio (ecografía, procedimiento…): nombre y día y hora cómodos.
+//   o reconsulta (solo en las especialidades con reconsulta; lo declara el
+//   paciente).
+// Servicio (ecografía, procedimiento…): nombre y día y hora cómodos, sin
+//   consulta nueva o reconsulta.
 // No se pide motivo ni número de carnet: solo se recuerda traer el carnet.
 //
 // Con los datos completos se crea la fila en clinic_leads (hace sonar la alarma)
@@ -137,8 +139,8 @@ Reglas:
 - preferredTime: el día y/o la hora que prefiere, en pocas palabras y como lo dijo ("mañana a las 10", "el sábado en la tarde", "lo antes posible"). null si no dijo nada de horario.
 - preferredDate: la fecha de ese día en formato YYYY-MM-DD, calculada con la fecha actual ("hoy", "ahora", "mañana", "el lunes", "20 de septiembre"). null si no dijo un día claro.
 - preferredHour: la hora en formato 24 h solo si es clara ("10 de la mañana" → 10:00, "7 de la noche" → 19:00, "15:30" → 15:30). Una hora de 1 a 6 sin mañana/tarde/noche es de la tarde (13:00 a 18:00). Una hora de 7 a 12 sin mañana/tarde/noche es ambigua → null. "ahora" o "lo antes posible" → la hora actual.
-- visitType: "nueva" si es consulta nueva o primera vez; "reconsulta" si dice reconsulta, control, o que vuelve por lo mismo o a mostrar resultados. null si no lo dice.
-- wantsLead: true si quiere pedir ficha, cita, turno o consulta, o atenderse con un médico o una especialidad.
+- visitType: lo DECLARA el paciente, no se deduce. "reconsulta" solo si dice que es reconsulta o que vuelve con el mismo médico por la misma consulta. "nueva" solo si dice consulta nueva, primera vez o que nunca vino. Pedir "una consulta" o "una ficha", hablar de "control" o de mostrar resultados NO alcanza: en esos casos null, y el asistente se lo pregunta.
+- wantsLead: true si quiere pedir ficha, cita, turno o consulta, o atenderse con un médico o una especialidad. OJO: "una consulta", "tengo una consulta" o "le hago una consulta" al empezar el mensaje significan que tiene una PREGUNTA, no que pide una consulta médica: eso solo no es wantsLead. Preguntar el precio de algo tampoco es wantsLead.
 - wantsHuman: true SOLO si pide hablar con una persona (doctora, doctor, enfermera, recepcionista, secretaria, asesor, alguien) o dice que no quiere seguir con el asistente. Pedir una ficha o consulta con un médico NO es wantsHuman. Pedir que la atienda una doctora o una mujer para un examen o un servicio ("quiero el PAP con una doctora", "¿me lo puede hacer una mujer?") tampoco: eso va en doctorName.
 - frustrated: true si expresa que no se le está ayudando, que no le entienden, que la respuesta no le sirve, o se queja de la atención por este chat.
 - confirms: true si confirma que los datos están bien ("sí", "correcto", "así está bien", "ok, gracias") sin pedir ningún cambio.
@@ -254,6 +256,21 @@ export function matchDoctorText(
   return { doctor: hits.length === 1 ? hits[0].name : null, specialtyKey };
 }
 
+// Consulta nueva o reconsulta, cuando el paciente lo dice con todas las letras
+// (o contesta "nueva" a la pregunta). Lo que diga así manda sobre el modelo,
+// que llegó a deducir "reconsulta" de un "traigo resultados" y a prometer que
+// era gratis.
+const NOT_RECONSULTA = /\bno\s+(?:es\s+)?(?:una\s+)?re\s?-?consulta\b/i;
+const RECONSULTA = /\bre\s?-?consulta\b/i;
+const NUEVA = /\b(?:consulta\s+nueva|nueva\s+consulta|primera\s+vez|nunca\s+(?:vine|vino|fui|fue))\b|^\s*(?:es\s+)?(?:una\s+)?nuev[oa]\b/i;
+
+export function visitTypeFromText(text: string): VisitType | null {
+  if (NOT_RECONSULTA.test(text)) return "nueva";
+  if (RECONSULTA.test(text)) return "reconsulta";
+  if (NUEVA.test(text)) return "nueva";
+  return null;
+}
+
 function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[], doctors: DoctorRef[] = []): TurnAnalysis {
   const date = typeof raw?.preferredDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.preferredDate)
     ? raw.preferredDate
@@ -329,7 +346,7 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[], docto
     preferredTime: cleanText(raw?.preferredTime),
     preferredDate: date,
     preferredHour: cleanHour(raw?.preferredHour),
-    visitType: raw?.visitType === "nueva" || raw?.visitType === "reconsulta" ? raw.visitType : null,
+    visitType: visitTypeFromText(text) ?? (raw?.visitType === "nueva" || raw?.visitType === "reconsulta" ? raw.visitType : null),
     paymentIntention: raw?.paymentIntention === "qr" || raw?.paymentIntention === "efectivo" ? raw.paymentIntention : null,
     unavailableRequest,
     needsHumanAction: raw?.needsHumanAction === true || HUMAN_ACTION_PATTERN.test(text),
@@ -530,6 +547,9 @@ export async function answerQuestion(ctx: LeadContext, text: string): Promise<Qa
 
 type Field = "specialty" | "name" | "time" | "visit";
 
+// Solo en las especialidades con reconsulta (Medicina General, Ginecología y
+// Pediatría, confirmado 2026-10-03): en las demás no existe, así que la
+// respuesta no cambiaría nada. En servicios tampoco se pregunta.
 export function needsVisitType(draft: LeadDraft): boolean {
   if (draft.kind !== "ficha") return false;
   // Sin especialidad resuelta no se pregunta. El fallback era `true`, y como lo
@@ -552,7 +572,9 @@ function missingFields(draft: LeadDraft | null): Field[] {
   // que nunca falta; se deja la misma condición para que un draft sin ninguno
   // de los dos vuelva a preguntar en vez de seguir a ciegas.
   if (draft.kind !== "servicio" && !draft.specialtyKey && !draft.unmatchedRequestText) missing.push("specialty");
-  if (!draft.patientName) missing.push("name");
+  // Lo que no está en catálogo solo pide día y hora (pedido de la clínica,
+  // 2026-10-03): el asesor responde lo antes posible y el nombre lo toma él.
+  if (!draft.patientName && draft.kind !== "no_disponible") missing.push("name");
   if (!draft.preferredTime) missing.push("time");
   if (needsVisitType(draft) && !draft.visitType) missing.push("visit");
   return missing;
@@ -684,9 +706,11 @@ function priceLines(draft: LeadDraft, clinic: ClinicConfig): { lines: string[]; 
   const spec = findSpecialty(draft.specialtyKey);
   if (!spec) return { lines: ["💰 El asesor le confirma el precio de la consulta."], quote: null };
 
+  // Reconsulta: la declara el paciente y se le confirma en una línea, con el
+  // plazo entre paréntesis.
   if (draft.visitType === "reconsulta" && spec.reconsultaDays) {
     return {
-      lines: [`💰 La reconsulta es *gratis* si es dentro de los ${spec.reconsultaDays} días desde su consulta.`],
+      lines: [`💰 Reconsulta *gratis* (si pasaron más de ${spec.reconsultaDays} días desde su consulta, se cobra como consulta nueva).`],
       quote: `Reconsulta gratis dentro de ${spec.reconsultaDays} días`,
     };
   }
@@ -705,6 +729,11 @@ function priceLines(draft: LeadDraft, clinic: ClinicConfig): { lines: string[]; 
   if (spec.reconsultaDays && draft.visitType === "nueva") {
     lines.push(`ℹ️ Si luego necesita reconsulta, es *gratis* dentro de los ${spec.reconsultaDays} días siguientes a su consulta.`);
   }
+  // Dijo "reconsulta" en una especialidad que no la tiene: se lo aclaramos en
+  // vez de dejarle creer que es gratis.
+  if (!spec.reconsultaDays && draft.visitType === "reconsulta") {
+    lines.push(`ℹ️ En ${spec.name} no hay reconsulta gratis: se cobra como consulta.`);
+  }
   return { lines, quote: quote.text };
 }
 
@@ -717,7 +746,7 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
   const lines = [
     "📋 *Resumen de su solicitud*",
     "",
-    `${draft.specialtyKey === "pediatria" ? "👶" : "👤"} Paciente: ${draft.patientName}`,
+    draft.patientName ? `${draft.specialtyKey === "pediatria" ? "👶" : "👤"} Paciente: ${draft.patientName}` : null,
     draft.kind === "servicio" ? `🩺 Servicio: ${draft.serviceName}` : null,
     draft.kind === "ficha" && spec ? `🩺 Especialidad: ${spec.name}` : null,
     // Fuera de catálogo (especialidad, servicio o examen): se anota tal cual
@@ -814,7 +843,7 @@ async function askOrSummarize(ctx: FlowContext, draft: LeadDraft, intro?: string
 }
 
 export async function startLead(
-  ctx: FlowContext & { kind: LeadDraft["kind"]; service?: ServiceItem | null; analysis: TurnAnalysis | null },
+  ctx: FlowContext & { kind: LeadDraft["kind"]; service?: ServiceItem | null; offer?: boolean; analysis: TurnAnalysis | null },
 ): Promise<LeadTurnResult> {
   const base: LeadDraft = { kind: ctx.kind };
   let intro = "¡Con gusto le ayudo a pedir su ficha! 😊";
@@ -825,8 +854,8 @@ export async function startLead(
     const pedido = mergeAnalysis(base, ctx.analysis).draft.unmatchedRequestText;
     base.unmatchedRequestText = pedido ?? null;
     intro = pedido
-      ? `Con gusto le ayudo con *${pedido}* 😊 Se lo confirma un asesor de la clínica, junto con el precio.`
-      : "Con gusto le ayudo 😊 Se lo confirma un asesor de la clínica.";
+      ? `Con gusto le ayudo con *${pedido}* 😊 Le paso su solicitud a un asesor de la clínica para que le responda lo antes posible con el precio y la disponibilidad.`
+      : "Con gusto le ayudo 😊 Le paso su solicitud a un asesor de la clínica para que le responda lo antes posible.";
   }
 
   if (ctx.kind === "servicio" && ctx.service) {
@@ -850,6 +879,19 @@ export async function startLead(
 
   const draft = mergeAnalysis(base, ctx.analysis).draft;
   if (ctx.analysis?.dateConflict) return askDateAgain(ctx, draft, ctx.analysis.dateConflict, intro);
+
+  // Solo preguntó el precio: se le da y se le ofrece el servicio, sin darlo por
+  // pedido. Queda como oferta, así que si contesta otra cosa el mensaje se
+  // re-decide en vez de consumirse como dato (ver decideAction).
+  const missing = missingFields(draft);
+  if (ctx.offer && ctx.kind === "servicio" && missing.length) {
+    await saveStep(ctx, "collecting_lead", { ...draft, offerPending: true });
+    const asks = missing.map((f) => (f === "name" ? "el *nombre del paciente*" : "el *día y la hora* que le quedarían cómodos"));
+    return {
+      reply: `${intro}\n\n¿Desea hacerse el servicio? Si es así, dígame ${asks.join(" y ")} 😊`,
+      pauseAfterReply: false,
+    };
+  }
   return askOrSummarize(ctx, draft, intro);
 }
 

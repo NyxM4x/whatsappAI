@@ -22,7 +22,7 @@ if (existsSync(".env.local")) {
 
 const { getClinicConfig } = await import("../lib/clinic/config");
 const { decideAction } = await import("../lib/clinic/routing");
-const { looksLikeName, needsVisitType } = await import("../lib/clinic/leads");
+const { looksLikeName, needsVisitType, visitTypeFromText } = await import("../lib/clinic/leads");
 
 import type { TurnAnalysis } from "../lib/clinic/leads";
 import type { BookingStep, LeadDraft } from "../lib/clinic/types";
@@ -50,8 +50,9 @@ type Case = {
   proof?: "receipt" | "unverified" | null;
   greetingOnly?: boolean;
   pendingOffer?: string | null;
+  pendingClarify?: string | null;
   // Qué se espera de la Action resultante.
-  expect: { type: string; kind?: string; intent?: string; pause?: boolean };
+  expect: { type: string; kind?: string; intent?: string; pause?: boolean; offer?: boolean };
 };
 
 const CASES: Case[] = [
@@ -192,6 +193,109 @@ const CASES: Case[] = [
     analysis: analysis({ specialtyKey: "cardiologia", wantsLead: true }),
     expect: { type: "startLead", kind: "ficha", intent: "ficha" },
   },
+  // ── "Una consulta" y el precio de un servicio (caso real 2026-10-03) ──────
+  // "Una consulta / La nebulización cuánto está???" terminó pidiendo
+  // especialidad, nombre y horario cuando solo quería el precio.
+  {
+    name: "una consulta + precio de un servicio → pregunta cuál de las dos",
+    text: "Buenos dias\nUna consulta\nLa nebulización cuánto está???",
+    analysis: null,
+    expect: { type: "clarify", intent: "qa" },
+  },
+  {
+    name: "lo mismo con el modelo diciendo wantsLead",
+    text: "Buenos dias\nUna consulta\nLa nebulización cuánto está???",
+    analysis: analysis({ wantsLead: true, isQuestion: true }),
+    expect: { type: "clarify" },
+  },
+  {
+    name: "'una consulta' sola → pregunta en qué ayudar, no abre ficha",
+    text: "Una consulta",
+    analysis: analysis({ wantsLead: true }),
+    expect: { type: "reply", intent: "qa" },
+  },
+  {
+    name: "'tengo una consulta' + pregunta general → no abre ficha",
+    text: "tengo una consulta, ¿atienden los domingos?",
+    analysis: analysis({ wantsLead: true, isQuestion: true }),
+    expect: { type: "qa" },
+  },
+  {
+    name: "'una consulta para pediatría' → es pedido de consulta, sin aclaración",
+    text: "una consulta para pediatría",
+    analysis: analysis({ specialtyKey: "pediatria", wantsLead: true }),
+    expect: { type: "startLead", kind: "ficha" },
+  },
+  {
+    name: "'quiero una consulta' → pedido claro",
+    text: "quiero una consulta para mi hijo",
+    analysis: analysis({ wantsLead: true }),
+    expect: { type: "startLead", kind: "ficha" },
+  },
+  {
+    name: "precio de un servicio sin choque → precio y se le ofrece",
+    text: "La nebulización cuánto está???",
+    analysis: null,
+    expect: { type: "startLead", kind: "servicio", offer: true },
+  },
+  {
+    name: "pide el servicio → solicitud directa",
+    text: "quiero hacerle nebulización a mi hijo mañana",
+    analysis: null,
+    expect: { type: "startLead", kind: "servicio", offer: false },
+  },
+  {
+    name: "'quiero saber cuánto cuesta' sigue siendo pregunta",
+    text: "quiero saber cuánto cuesta la ecografía abdominal",
+    analysis: null,
+    expect: { type: "startLead", kind: "servicio", offer: true },
+  },
+  {
+    name: "aclaración → 'el precio' → precio y oferta",
+    text: "el precio",
+    analysis: null,
+    pendingClarify: "Nebulización",
+    expect: { type: "startLead", kind: "servicio", offer: true },
+  },
+  {
+    name: "aclaración → 'una consulta' → ficha",
+    text: "una consulta",
+    analysis: null,
+    pendingClarify: "Nebulización",
+    expect: { type: "startLead", kind: "ficha" },
+  },
+  {
+    name: "aclaración → habla de otra cosa → se decide normal",
+    text: "¿dónde están ubicados?",
+    analysis: null,
+    pendingClarify: "Nebulización",
+    expect: { type: "reply", intent: "ubicacion" },
+  },
+  {
+    name: "oferta de servicio → 'Sí' (con tilde) → sigue la solicitud",
+    text: "Sí",
+    analysis: null,
+    step: "collecting_lead",
+    pendingOffer: "Nebulización",
+    expect: { type: "continueLead" },
+  },
+  {
+    name: "oferta de servicio → 'no gracias' → se descarta",
+    text: "no gracias",
+    analysis: null,
+    step: "collecting_lead",
+    pendingOffer: "Nebulización",
+    expect: { type: "cancelOffer" },
+  },
+  {
+    name: "oferta de servicio → pregunta otro servicio → se atiende ese",
+    text: "¿y el lavado de oído cuánto está?",
+    analysis: null,
+    step: "collecting_lead",
+    pendingOffer: "Nebulización",
+    expect: { type: "startLead", kind: "servicio", offer: true },
+  },
+
   // Caso real 2026-09-28: "sacar una" enganchaba el alias "sacar uña" y el
   // pedido de consulta con el pediatra se cotizaba como retiro de uña.
   {
@@ -278,7 +382,20 @@ const CASES: Case[] = [
     name: "'cancelar' como pagar NO deriva como cancelación",
     text: "va cancelar por QR",
     analysis: analysis({ paymentIntention: "qr" }),
-    expect: { type: "escalate", kind: "pago", intent: "pago" },
+    expect: { type: "sendQr", intent: "pago" },
+  },
+  // QR, opción (b) de la clínica (2026-10-03): se envía solo si lo pide.
+  {
+    name: "pide el QR → se le envía",
+    text: "me puede pasar el QR para pagar",
+    analysis: null,
+    expect: { type: "sendQr", intent: "pago" },
+  },
+  {
+    name: "pregunta el precio sin pedir QR → no se envía",
+    text: "¿cuánto cuesta la ecografía abdominal?",
+    analysis: null,
+    expect: { type: "startLead", kind: "servicio" },
   },
 
   // ── REGRESIÓN: el orden de las reglas protege de un falso positivo ─────
@@ -407,6 +524,7 @@ for (const c of CASES) {
     step: c.step ?? "idle",
     pendingOffer: c.pendingOffer ?? null,
     proof: c.proof ?? null,
+    pendingClarify: c.pendingClarify ?? null,
     emergencyDetectionEnabled: false,
     greetingOnly: c.greetingOnly ?? false,
   });
@@ -419,6 +537,10 @@ for (const c of CASES) {
   }
   if (c.expect.intent !== undefined && action.intent !== c.expect.intent) {
     problems.push(`intent=${action.intent} (esperado ${c.expect.intent})`);
+  }
+  if (c.expect.offer !== undefined) {
+    const offer = action.type === "startLead" ? Boolean(action.offer) : undefined;
+    if (offer !== c.expect.offer) problems.push(`offer=${offer} (esperado ${c.expect.offer})`);
   }
   if (c.expect.pause !== undefined) {
     const pause = action.type === "escalate" ? action.pause ?? true : undefined;
@@ -450,7 +572,7 @@ const VISIT: [string, LeadDraft, boolean][] = [
   ["servicio del tarifario", { kind: "servicio", serviceName: "Ecografía abdominal" }, false],
   ["medicina general (reconsulta 7d)", { kind: "ficha", specialtyKey: "medicina-general" }, true],
   ["pediatría (reconsulta 3d)", { kind: "ficha", specialtyKey: "pediatria" }, true],
-  ["ginecología (reconsulta 3d)", { kind: "ficha", specialtyKey: "ginecologia" }, true],
+  ["ginecología (reconsulta 7d)", { kind: "ficha", specialtyKey: "ginecologia" }, true],
   ["cardiología (sin reconsulta)", { kind: "ficha", specialtyKey: "cardiologia" }, false],
   ["neurología (sin reconsulta)", { kind: "ficha", specialtyKey: "neurologia" }, false],
 ];
@@ -463,6 +585,28 @@ for (const [nombre, draft, esperado] of VISIT) {
   } else {
     console.log(`  ✓ ${nombre}`.padEnd(50) + (got ? "sí pregunta" : "no pregunta"));
   }
+}
+
+// La reconsulta la declara el paciente: el código la toma cuando la dice con
+// todas las letras, y pedir "una consulta" o traer resultados no la decide.
+console.log("\n¿NUEVA O RECONSULTA EN EL TEXTO?\n");
+const VISIT_TEXT: [string, string | null][] = [
+  ["es reconsulta", "reconsulta"],
+  ["Reconsulta", "reconsulta"],
+  ["es re-consulta con el pediatra", "reconsulta"],
+  ["no es reconsulta, es la primera vez", "nueva"],
+  ["nueva", "nueva"],
+  ["es consulta nueva", "nueva"],
+  ["primera vez que vengo", "nueva"],
+  ["quiero sacar una consulta", null],
+  ["quiero una ficha nueva para mi hijo", null],
+  ["vengo a mostrar resultados", null],
+  ["para control", null],
+];
+for (const [texto, esperado] of VISIT_TEXT) {
+  const got = visitTypeFromText(texto);
+  if (got !== esperado) failures++;
+  console.log(`  ${got === esperado ? "✓" : "✗"} "${texto}"`.padEnd(50) + String(got));
 }
 
 // ─── looksLikeName: "pa mi" no es un nombre ─────────────────────────────────

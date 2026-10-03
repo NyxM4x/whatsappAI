@@ -99,7 +99,10 @@ for (const pedido of ["Radiografía para pie", "electrocardiograma", "fisioterap
   check(`unlistedAnswer("${pedido}") no niega`, qaAnswerIsUnsafe(texto), false);
   check(`unlistedAnswer("${pedido}") repite el pedido`, texto.includes(pedido), true);
   // Si no pide los datos, el paciente queda esperando y nadie recopila nada.
-  check(`unlistedAnswer("${pedido}") pide los datos`, /nombre completo/i.test(texto) && /d[ií]a y hora/i.test(texto), true);
+  // Desde el 2026-10-03 solo se pide día y hora, y se avisa que un asesor
+  // responde lo antes posible.
+  check(`unlistedAnswer("${pedido}") pide día y hora`, /d[ií]a y hora/i.test(texto), true);
+  check(`unlistedAnswer("${pedido}") avisa que responde un asesor`, /asesor/i.test(texto) && /lo antes posible/i.test(texto), true);
 }
 
 // ─── 3. Pedidos que el código reconoce como fuera de catálogo ────────────────
@@ -142,6 +145,8 @@ const EN_CATALOGO = [
   "PAPANICOLAO 50% DESCUENTO",
   "quiero hacerme el papa nicolau",
   "cuanto sale el papanicolado",
+  // Cargada en el tarifario el 2026-10-03 (antes estaba fuera de catálogo).
+  "hacen nebulizacion?",
 ];
 
 for (const text of EN_CATALOGO) {
