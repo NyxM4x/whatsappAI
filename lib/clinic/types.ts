@@ -112,6 +112,9 @@ export type BookingDraft = {
   // El bot preguntó "¿consulta para X o el precio de X?" y espera la respuesta.
   // Guarda el nombre del servicio del catálogo; se descarta en el turno siguiente.
   clarifyService?: string;
+  // El bot preguntó "¿Es urgente?" por un signo dudoso ("muy decaído"). Vale
+  // un turno: "sí" lo convierte en emergencia.
+  urgencyCheck?: boolean;
   // Momentos (ISO) en que el paciente dijo que no se le está ayudando. Al llegar
   // a 3 dentro de la ventana, el bot deriva a una persona.
   failedAttempts?: string[];
@@ -132,7 +135,8 @@ export type LeadKind =
   | "consulta_cita" // "¿cuándo es mi cita?"
   | "pago"          // pidió el QR o datos de pago
   | "no_disponible" // pidió algo que la clínica no ofrece (fisioterapia, odontología…)
-  | "accion";       // pide una gestión: "avísele a la doctora", "ya llegué", "me confirma"
+  | "accion"        // pide una gestión: "avísele a la doctora", "ya llegué", "me confirma"
+  | "emergencia";   // signo grave (no respira, convulsiona, no reacciona…): va primero en el panel
 
 // Cómo dijo el paciente que va a pagar. Es un dato para el asesor: el bot nunca
 // cobra ni manda el QR.

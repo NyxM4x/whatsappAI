@@ -49,6 +49,7 @@ const POLL_MS = 5000;
 const WHATSAPP_WINDOW = "clinica-whatsapp";
 
 const KIND_LABEL: Record<string, string> = {
+  emergencia: "🚨 EMERGENCIA — atender ya",
   ficha: "🩺 Ficha",
   servicio: "🧾 Servicio",
   humano: "🙋 Pide hablar con una persona",
@@ -281,7 +282,12 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
       const data = (await res.json()) as { pending: LeadDTO[]; recent: LeadDTO[] };
       setSessionExpired(false);
       setOffline(false);
-      setPending(data.pending.filter((lead) => !attendedRef.current.has(lead.id)));
+      // Las emergencias van primero, sin importar cuándo llegaron.
+      setPending(
+        data.pending
+          .filter((lead) => !attendedRef.current.has(lead.id))
+          .sort((a, b) => Number(b.kind === "emergencia") - Number(a.kind === "emergencia")),
+      );
       setRecent(data.recent);
       setLoaded(true);
     } catch {

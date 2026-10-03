@@ -21,7 +21,7 @@ if (existsSync(".env.local")) {
 }
 
 const { getClinicConfig } = await import("../lib/clinic/config");
-const { decideAction } = await import("../lib/clinic/routing");
+const { decideAction, isEmergencyText } = await import("../lib/clinic/routing");
 const { analysisForLocationFollowup, answerKnownLeadQuestion, hasPriceDispute, looksLikeName, mergeAnalysis, needsVisitType, visitTypeFromText } = await import("../lib/clinic/leads");
 
 import type { TurnAnalysis } from "../lib/clinic/leads";
@@ -52,6 +52,7 @@ type Case = {
   pendingOffer?: string | null;
   priceDispute?: boolean;
   pendingClarify?: string | null;
+  pendingUrgency?: boolean;
   // Qué se espera de la Action resultante.
   expect: { type: string; kind?: string; intent?: string; pause?: boolean; offer?: boolean };
 };
@@ -176,6 +177,97 @@ const CASES: Case[] = [
     pendingOffer: "electrocardiograma",
     expect: { type: "continueLead" },
   },
+  // ── Emergencias con motivo propio (2026-10-03) ────────────────────────────
+  {
+    name: "'fiebre de 40 y no reacciona' → emergencia",
+    text: "mi bebé tiene fiebre de 40 y no reacciona",
+    analysis: null,
+    expect: { type: "escalate", kind: "emergencia", intent: "emergencia" },
+  },
+  {
+    name: "'se atragantó' → emergencia",
+    text: "mi hijo se atragantó con una moneda",
+    analysis: null,
+    expect: { type: "escalate", kind: "emergencia" },
+  },
+  {
+    name: "emergencia en medio de una ficha → emergencia igual",
+    text: "no respira bien, se está ahogando",
+    analysis: null,
+    step: "collecting_lead",
+    expect: { type: "escalate", kind: "emergencia" },
+  },
+  // Signo dudoso: una sola pregunta (decisión de la clínica, 2026-10-03).
+  {
+    name: "'mi bebé está muy decaído' → pregunta si es urgente",
+    text: "mi bebé está muy decaído",
+    analysis: null,
+    expect: { type: "askUrgency" },
+  },
+  {
+    name: "¿es urgente? → 'sí' → emergencia, lo esperan listos",
+    text: "sí",
+    analysis: null,
+    pendingUrgency: true,
+    expect: { type: "escalate", kind: "emergencia", intent: "emergencia" },
+  },
+  {
+    name: "¿es urgente? → 'sí, es urgente' → emergencia",
+    text: "Sí, es urgente",
+    analysis: null,
+    pendingUrgency: true,
+    expect: { type: "escalate", kind: "emergencia" },
+  },
+  {
+    name: "¿es urgente? → 'no' → se ofrece la ficha",
+    text: "no",
+    analysis: null,
+    pendingUrgency: true,
+    expect: { type: "reply", intent: "qa" },
+  },
+  {
+    name: "¿es urgente? → habla de otra cosa → se decide normal",
+    text: "¿dónde están ubicados?",
+    analysis: null,
+    pendingUrgency: true,
+    expect: { type: "reply", intent: "ubicacion" },
+  },
+  {
+    name: "'sí' sin pregunta de urgencia pendiente no es una emergencia",
+    text: "sí",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "'ecografía de emergencia' es un servicio, no una emergencia",
+    text: "¿cuánto cuesta la ecografía de emergencia?",
+    analysis: null,
+    expect: { type: "startLead", kind: "servicio" },
+  },
+  {
+    name: "'consulta de emergencia' (precio) no es una emergencia",
+    text: "¿cuánto sale la consulta de emergencia?",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "validar una dosis ('¿está bien?') → deriva",
+    text: "Me dijeron 2 gotas de salbutamol, ¿está bien?",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "accion" },
+  },
+  {
+    name: "'está bien' como 'ok' no es validar una dosis",
+    text: "le recetaron antibióticos, está bien, ¿cuánto cuesta la consulta?",
+    analysis: null,
+    expect: { type: "qa" },
+  },
+  {
+    name: "preguntar si hay un producto no es pedir una dosis (farmacia)",
+    text: "¿tienen salbutamol?",
+    analysis: null,
+    expect: { type: "qa" },
+  },
   {
     name: "pide una dosis → no dar instrucciones, deriva",
     text: "¿cuántas gotas de salbutamol le doy a mi bebé para la nebulización?",
@@ -186,13 +278,13 @@ const CASES: Case[] = [
     name: "convulsión con tilde → emergencia",
     text: "Tuvo una convulsión",
     analysis: null,
-    expect: { type: "escalate", kind: "accion", intent: "emergencia" },
+    expect: { type: "escalate", kind: "emergencia", intent: "emergencia" },
   },
   {
     name: "fuerte dolor en el pecho → emergencia",
     text: "Siento fuerte dolor en el pecho",
     analysis: null,
-    expect: { type: "escalate", kind: "accion", intent: "emergencia" },
+    expect: { type: "escalate", kind: "emergencia", intent: "emergencia" },
   },
   {
     name: "cada cuánto atienden → pregunta normal, no alarma clínica",
@@ -853,6 +945,7 @@ for (const c of CASES) {
     proof: c.proof ?? null,
     priceDispute: c.priceDispute ?? false,
     pendingClarify: c.pendingClarify ?? null,
+    pendingUrgency: c.pendingUrgency ?? false,
     emergencyDetectionEnabled: false,
     greetingOnly: c.greetingOnly ?? false,
   });
@@ -972,6 +1065,79 @@ for (const [nombre, draft, texto, esperado] of DISPUTAS) {
 const valeOk = answerKnownLeadQuestion({ kind: "ficha", specialtyKey: "medicina-general" }, clinic, "vale, mañana a las 10");
 if (valeOk !== null) failures++;
 console.log(`  ${valeOk === null ? "✓" : "✗"} "vale, mañana a las 10" no es pregunta de precio`);
+
+// ─── Qué se le responde ──────────────────────────────────────────────────────
+// Dosis: se le confirma que su duda llegó a la clínica, sin "no puedo…"
+// (pedido de la clínica, 2026-10-03). Emergencia: el texto que configuró la
+// clínica, sin preguntarle nada.
+console.log("\nRESPUESTAS DE SEGURIDAD\n");
+const decide = (text: string) =>
+  decideAction({ clinic, text, analysis: null, step: "idle", pendingOffer: null, proof: null, emergencyDetectionEnabled: false, greetingOnly: false });
+const dosis = decide("¿Cuántas gotas de salbutamol le doy a mi bebé?");
+const dosisText = dosis.type === "escalate" ? dosis.reply : "";
+const dosisOk = /llegar a personal de la cl[ií]nica/i.test(dosisText) && /lo antes posible/i.test(dosisText) && !/no puedo/i.test(dosisText);
+if (!dosisOk) failures++;
+console.log(`  ${dosisOk ? "✓" : "✗"} dosis: confirma que su duda llegó, sin "no puedo"`);
+const emergencia = decide("mi bebé tuvo una convulsión");
+// "¿" y no "?": el texto trae el link de Maps, que lleva un "?" adentro.
+const emergenciaOk = emergencia.type === "escalate" && emergencia.reply === clinic.emergencyResponse && !/¿/.test(emergencia.reply);
+if (!emergenciaOk) failures++;
+console.log(`  ${emergenciaOk ? "✓" : "✗"} emergencia: texto de la clínica, sin preguntas`);
+
+// La detección temprana del webhook (antes de esperar y de llamar al modelo).
+console.log("\n¿EMERGENCIA? (detección temprana)\n");
+const EMERGENCIAS: [string, boolean][] = [
+  ["mi bebé tuvo una convulsión", true],
+  ["está convulsionando", true],
+  ["no puede respirar", true],
+  ["no respira", true],
+  ["no está respirando", true],
+  ["dejó de respirar", true],
+  ["le cuesta respirar", true],
+  ["respira con dificultad", true],
+  ["se puso morado", true],
+  ["no puedo respirar", true],
+  ["tengo un morado en la pierna", false],
+  // Expresiones de todos los días (2026-10-03): no son un desmayo ni un ataque.
+  ["casi me desmayo de la risa", false],
+  ["me desmayo de hambre jaja", false],
+  ["le dio un ataque de risa", false],
+  ["le dio un ataque de tos", false],
+  ["se desmayó en el baño", true],
+  ["le dio un ataque y no reacciona", true],
+  ["no respiren el humo, nos vemos mañana", false],
+  ["se desmayó", true],
+  ["tiene fiebre de 40 y no reacciona", true],
+  ["no despierta", true],
+  ["se está ahogando", true],
+  ["se atragantó con un caramelo", true],
+  ["le dio un ataque", true],
+  ["tengo un dolor muy fuerte en el pecho", true],
+  ["tiene una hemorragia", true],
+  // Decisiones de la clínica del 2026-10-03.
+  ["¡Emergencia!!!", true],
+  ["emergencia", true],
+  ["es una emergencia, mi hijo se cortó", true],
+  ["sangra mucho de la cabeza", true],
+  ["tengo sangrado abundante en mi regla", false],
+  ["hemorragia en mi periodo", false],
+  ["tengo dolor de pecho", false],
+  ["ayuda urgente", false],
+  ["emergencia de cardiología cuánto cuesta", false],
+  ["¿atienden emergencias?", false],
+  ["mi bebé está muy decaído", false],
+  ["¿cuánto cuesta la consulta de emergencia?", false],
+  ["quiero una ecografía de emergencia", false],
+  ["mi hijo se queja de dolor de barriga", false],
+  ["tengo caída de cabello", false],
+  ["me ahogo de calor jaja", false],
+  ["¿se puede dar ficha para mañana?", false],
+];
+for (const [texto, esperado] of EMERGENCIAS) {
+  const got = isEmergencyText(texto);
+  if (got !== esperado) failures++;
+  console.log(`  ${got === esperado ? "✓" : "✗"} "${texto}"`.padEnd(52) + (got ? "emergencia" : "no"));
+}
 
 // ─── needsVisitType: nunca preguntar nueva/reconsulta sin especialidad ──────
 // El fallback era `true`, y como lo que no está en catálogo nunca tiene

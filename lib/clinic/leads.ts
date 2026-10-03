@@ -1112,7 +1112,7 @@ export async function registerEscalation(
     return existing.id;
   }
 
-  const id = await createLead({
+  let id = await createLead({
     business: ctx.clinic.slug,
     conversationId: ctx.conversationId,
     contactPhone: ctx.contactPhone,
@@ -1120,6 +1120,20 @@ export async function registerEscalation(
     kind: ctx.kind,
     ...fields,
   });
+  // Una emergencia no puede quedarse sin alarma. Si la base todavía no acepta el
+  // motivo "emergencia" (falta la migración 20261003010000), se registra como
+  // gestión con el aviso en el mensaje, para que el panel suene igual.
+  if (!id && ctx.kind === "emergencia") {
+    id = await createLead({
+      business: ctx.clinic.slug,
+      conversationId: ctx.conversationId,
+      contactPhone: ctx.contactPhone,
+      contactName: ctx.contactName,
+      kind: "accion",
+      ...fields,
+      lastMessage: `🚨 EMERGENCIA — ${fields.lastMessage ?? ""}`.slice(0, 1000),
+    });
+  }
   if (!id) {
     await logSystemEvent({
       level: "critical",

@@ -51,7 +51,7 @@ import {
   getBusinessByPhoneNumberId,
   DEFAULT_BUSINESS_SLUG,
 } from "@/lib/clinic/config";
-import { decideAction } from "@/lib/clinic/routing";
+import { confirmsUrgency, decideAction, isEmergencyText, urgentConfirmedReply } from "@/lib/clinic/routing";
 import {
   analyzeTurn,
   analysisForLocationFollowup,
@@ -353,6 +353,40 @@ export async function POST(request: Request) {
     }
   }
 
+  // ── Emergencia: antes de la espera y del modelo ──────────────────────────
+  // Lo grave no espera los segundos de agrupación ni la llamada a OpenAI (hasta
+  // 10 s más). Apenas llega: texto de emergencia de la clínica, alarma propia en
+  // el panel y pausa para que una persona tome el chat. No se le pregunta nada
+  // al paciente (síntomas, signos vitales): cada pregunta es tiempo perdido.
+  // También el "sí" a "¿Es urgente?" (signo dudoso del turno anterior).
+  const arrivedText = newMessages.map((m) => m.text ?? "").filter((t) => t.trim()).join("\n");
+  const emergencySession = normalizeSession(await getBookingSession(conversationId));
+  const urgentConfirmed = Boolean(emergencySession.draft.urgencyCheck) && confirmsUrgency(arrivedText);
+  if (isEmergencyText(arrivedText) || urgentConfirmed) {
+    await Promise.all([
+      registerEscalation({ ...leadCtx, kind: "emergencia", lastMessage: arrivedText, lead: emergencySession.draft.lead ?? null }),
+      sendAndPersist({
+        kapso,
+        phoneNumberId,
+        contactPhone,
+        conversationId,
+        replyText: urgentConfirmed ? urgentConfirmedReply(clinic) : clinic.emergencyResponse,
+        lastMessage,
+        pauseAfter: true,
+      }),
+    ]);
+    await saveBookingSession({ conversationId, business: clinic.slug, step: "idle", draft: {} });
+    await recordWebhookAudit({
+      business: clinic.slug,
+      conversationId,
+      contactPhone,
+      intent: "emergencia",
+      analysis: null,
+      step: emergencySession.step,
+    });
+    return new Response("ok", { status: 200 });
+  }
+
   // ── Debounce: agrupar mensajes seguidos del mismo cliente ─────────────────
   // Kapso entrega cada mensaje en un webhook aparte. Esperamos una ventana
   // corta; si mientras tanto llega otro mensaje, esta invocación cede el turno
@@ -491,6 +525,7 @@ export async function POST(request: Request) {
     ? session.draft.lead.unmatchedRequestText ?? session.draft.lead.serviceName ?? null
     : null;
   const pendingClarify = session.step === "idle" ? session.draft.clarifyService ?? null : null;
+  const pendingUrgency = Boolean(session.draft.urgencyCheck);
   const action = decideAction({
     clinic,
     text: newText,
@@ -501,6 +536,7 @@ export async function POST(request: Request) {
     emergencyDetectionEnabled: process.env.CLINIC_EMERGENCY_DETECTION === "true",
     greetingOnly: Boolean(newText) && GREETING_ONLY_PATTERN.test(newText),
     pendingClarify,
+    pendingUrgency,
     priceDispute: tracked.session.draft.lead
       ? hasPriceDispute(tracked.session.draft.lead, clinic, newText)
       : false,
@@ -522,8 +558,29 @@ export async function POST(request: Request) {
       draft: { failedAttempts: tracked.session.draft.failedAttempts },
     });
   }
+  // "¿Es urgente?" también vale un turno. Se quita la marca sin tocar la
+  // solicitud que estuviera en curso.
+  if (pendingUrgency && action.type !== "askUrgency") {
+    const draft = { ...tracked.session.draft };
+    delete draft.urgencyCheck;
+    tracked.session = { ...tracked.session, draft };
+    await saveBookingSession({ conversationId, business: clinic.slug, step: tracked.session.step, draft });
+  }
 
   switch (action.type) {
+    // Signo dudoso: una sola pregunta. Se recuerda la marca y se conserva la
+    // solicitud en curso, si la había.
+    case "askUrgency": {
+      await saveBookingSession({
+        conversationId,
+        business: clinic.slug,
+        step: tracked.session.step,
+        draft: { ...tracked.session.draft, urgencyCheck: true },
+      });
+      await send(action.text);
+      return ok(action.intent);
+    }
+
     case "reply": {
       await send(action.text);
       return ok(action.intent);
@@ -656,6 +713,15 @@ async function watchWhilePaused(ctx: LeadContext, messages: IncomingMessage[]) {
 
     const text = messages.map((m) => m.text ?? "").filter((t) => t.trim()).join("\n");
     if (!text) return;
+
+    // Una emergencia levanta su alarma aunque el bot esté en pausa. La pausa no
+    // siempre es una persona escribiendo en ese momento: el bot también se
+    // pausa solo, por ejemplo después de confirmar una ficha. Sin esto, "mi bebé
+    // no respira" en un chat pausado no avisaba a nadie.
+    if (isEmergencyText(text)) {
+      await registerEscalation({ ...ctx, kind: "emergencia", lastMessage: text });
+      return;
+    }
 
     const kind: LeadKind | null = ctx.clinic.cancelIntentPatterns.test(text)
       ? "cancelar"

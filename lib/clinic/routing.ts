@@ -38,6 +38,8 @@ export type Action =
   // Enviar la imagen del QR de pago (con este texto al pie) y avisar al asesor,
   // sin pausar el bot.
   | { type: "sendQr"; caption: string; intent: AuditIntent }
+  // Un signo que puede ser grave o no: se pregunta una sola vez si es urgente.
+  | { type: "askUrgency"; text: string; intent: AuditIntent }
   // El mensaje admite dos lecturas que llevan a lugares distintos: se pregunta
   // cuál quiso decir y se recuerda el servicio para entender la respuesta.
   | { type: "clarify"; text: string; serviceName: string; intent: AuditIntent }
@@ -71,6 +73,8 @@ export type RoutingInput = {
   // Servicio sobre el que el bot preguntó "¿consulta o precio?" en el turno
   // anterior. null = no hay aclaración pendiente.
   pendingClarify?: string | null;
+  // El bot preguntó "¿Es urgente?" en el turno anterior.
+  pendingUrgency?: boolean;
 };
 
 // Respuestas a una pregunta cerrada. Se resuelven con patrones y no con el
@@ -94,8 +98,71 @@ const DECLINES_LEAD_CAPTURE =
 //   a personal clínico con un texto prudente.
 //
 // La "ó" va explícita: "convulsión" con tilde no coincidía con "convulsion".
+//
+// "No reacciona", "no despierta", "se ahoga" y "se atragantó" se sumaron el
+// 2026-10-03: "mi bebé tiene fiebre de 40 y no reacciona" caía al Q&A. Las
+// formas de "no respira" también ("no está respirando", "dejó de respirar", "le
+// cuesta respirar", "se puso morado"): solo estaba la primera persona.
+//
+// Es una lista de frases, no un triage: cubre lo que se probó, no toda forma
+// posible de contar un cuadro grave. La red de abajo es la persona del panel.
 const CLINICAL_SEVERE_PATTERN =
-  /\b(?:no puedo respirar|dificultad(?:es)? para respirar|no respira|convulsi[oó]n(?:es)?|convulsion\w*|desmay\w*|perdi[oó] el conocimiento|inconsciente|dolor(?:\s+\w+){0,3}\s+fuerte\s+(?:en\s+)?(?:el\s+)?pecho|fuerte\s+dolor\s+(?:en\s+)?(?:el\s+)?pecho|hemorragia|sangrado abundante)/i;
+  /\b(?:no\s+(?:puedo\s+|puede\s+|est[aá]\s+)?respir(?:a|o|aba|ando|ar)\b|dej[oó]\s+de\s+respirar|(?:le|me)\s+cuesta\s+respirar|respira\s+con\s+dificultad|dificultad(?:es)?\s+para\s+respirar|se\s+(?:puso|est[aá]\s+poniendo)\s+morad[oa]|labios\s+morados|convulsi[oó]n(?:es)?|convulsion\w*|desmay\w*\b(?!\s+de\s+(?:la\s+)?(?:risa|hambre|sue[nñ]o|cansancio|calor))|perdi[oó] el conocimiento|inconsciente|no reacciona|no despierta|se\s+(?:est[aá]\s+)?ahog\w*|atragant\w*|(?:le|me)\s+dio\s+un\s+ataque\b(?!\s+de\s+(?:risa|tos|nervios|hambre|celos))|ataque\s+(?:al\s+coraz[oó]n|card[ií]aco|epil[eé]ptico)|dolor(?:\s+\w+){0,3}\s+fuerte\s+(?:en\s+)?(?:el\s+)?pecho|fuerte\s+dolor\s+(?:en\s+)?(?:el\s+)?pecho)/i;
+// El sangrado va aparte porque la regla abundante NO es una emergencia
+// (decisión de la clínica, 2026-10-03): "sangrado abundante en mi regla" se
+// atiende como cualquier consulta.
+const SEVERE_BLEEDING = /\b(?:hemorragia|sangrado\s+abundante|sangra\s+mucho|no\s+para\s+de\s+sangrar)\b/i;
+const MENSTRUAL = /\b(?:regla|menstrua\w*|periodo|per[ií]odo)\b/i;
+// "¡Emergencia!" o "es una emergencia" sí (decisión de la clínica); el servicio
+// no: "ecografía de emergencia", "consulta de emergencia", "emergencia de
+// cardiología" tienen precio. "Ayuda urgente" sin más tampoco.
+const EMERGENCY_CALL = /^[\s¡!]*emergencia\b(?!\s+de\b)|\b(?:es|tengo|tenemos)\s+una\s+emergencia\b/i;
+
+// Una sola pregunta para el webhook (que la hace apenas llega el mensaje, antes
+// de esperar a que termine de escribir y antes de llamar al modelo) y para el
+// ruteo normal. Lo grave no espera.
+export function isEmergencyText(text: string): boolean {
+  if (!text) return false;
+  return (
+    CLINICAL_SEVERE_PATTERN.test(text) ||
+    EMERGENCY_CALL.test(text) ||
+    (SEVERE_BLEEDING.test(text) && !MENSTRUAL.test(text))
+  );
+}
+
+// Signos que pueden ser graves o no ("mi bebé está muy decaído"): no se decide
+// por el paciente ni se le hace un interrogatorio. Una sola pregunta, sí o no:
+// si es urgente, se avisa al personal para que lo esperen listos (decisión de
+// la clínica, 2026-10-03). La lista crece con lo que la clínica defina.
+const MAYBE_URGENT = /\bdeca[ií]d[oa]s?\b/i;
+const URGENT_YES = /^\s*(?:s[ií]|sip|ya|urgente|es\s+urgente|s[ií],?\s+es\s+urgente|r[aá]pido|ayuda|por\s+favor)(?=$|[\s,.!?])/i;
+const URGENT_NO = /^\s*(?:no|nop|no\s+es\s+urgente)(?=$|[\s,.!?])/i;
+
+export function needsUrgencyCheck(text: string): boolean {
+  return Boolean(text) && MAYBE_URGENT.test(text) && !isEmergencyText(text);
+}
+
+export function confirmsUrgency(text: string): boolean {
+  return URGENT_YES.test(text) && !URGENT_NO.test(text);
+}
+
+export const URGENCY_QUESTION =
+  "¿Es urgente? 🙏 Si lo es, respóndame *sí* y aviso ya mismo al personal de la clínica para que lo esperen listos en Emergencias.";
+
+// Lo que se le dice cuando confirma que es urgente: ya se avisó y lo esperan,
+// con cómo llegar. Sin preguntas.
+export function urgentConfirmedReply(clinic: ClinicConfig): string {
+  const info = clinic.generalInfo;
+  return [
+    "🚨 Ya avisamos al personal de la clínica: lo esperan en Emergencias. Venga lo antes posible.",
+    "",
+    `📍 ${info.address}`,
+    info.mapsUrl ? `🗺️ ${info.mapsUrl}` : null,
+    info.phone ? `📞 ${info.phone}` : null,
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
+}
 // "Caída" y "corte" sin "de cabello/pelo" detrás: "caída de cabello en la
 // cabeza" no es un golpe.
 const INJURY = String.raw`(?:golpe\w*|golpearon|se\s+cay[oó]|ca[ií]da(?!\s+del?\s+(?:cabello|pelo))|ladrillo|tajo|corte(?!\s+del?\s+(?:cabello|pelo))|sangra\w*)`;
@@ -105,8 +172,16 @@ const CLINICAL_INJURY_PATTERN = new RegExp(String.raw`\b${INJURY}\b.{0,60}\b${RI
 // tomarlo. Cualquiera de las dos sola no alcanza: "¿se puede dar ficha para
 // mañana?" o "le recetaron antibióticos, ¿cuánto cuesta la consulta?" no piden
 // una indicación.
+//
+// PENDIENTE (módulo de farmacia): nombrar un producto tampoco es hablar de una
+// receta; puede ser preguntar si lo hay en farmacia ("¿tienen salbutamol?").
+// Hoy eso no se deriva porque falta la pregunta de dosis, pero cuando exista el
+// módulo de farmacia esta lista va a chocar con la de productos: revisarlas
+// juntas.
 const MEDICATION = /\b(?:salbutamol|acetilciste[ií]na|antibi[oó]tic\w*|amoxicilina|paracetamol|ibuprofeno|jarabe|pastillas?|gotas|remedio|medicamento\w*)\b/i;
-const DOSING_QUESTION = /\b(?:qu[eé]\s+dosis|dosis\s+de|cu[aá]nt[oa]s?\s+(?:gotas|pastillas|ml)?\s*le\s+doy|le\s+doy|puedo\s+darle|se\s+(?:le\s+)?puede\s+dar|puedo\s+tomar|debo\s+tomar|cada\s+cu[aá]nto|debo\s+suspender|suspender\s+el\s+tratamiento|lo\s+sigo\s+tomando)\b/i;
+// También cuenta pedir que le validen la dosis: "me dijeron 2 gotas de
+// salbutamol, ¿está bien?" caía al Q&A, que podía opinar.
+const DOSING_QUESTION = /\b(?:qu[eé]\s+dosis|dosis\s+de|cu[aá]nt[oa]s?\s+(?:gotas|pastillas|ml)?\s*le\s+doy|le\s+doy|puedo\s+darle|se\s+(?:le\s+)?puede\s+dar|puedo\s+tomar|debo\s+tomar|cada\s+cu[aá]nto|debo\s+suspender|suspender\s+el\s+tratamiento|lo\s+sigo\s+tomando)\b|\b(?:est[aá]\s+bien|es\s+(?:mucho|poco|correct[oa]))\s*\?/i;
 function asksForDosing(text: string): boolean {
   return /\b(?:qu[eé]\s+dosis|dosis\s+de)\b/i.test(text) || (MEDICATION.test(text) && DOSING_QUESTION.test(text));
 }
@@ -221,17 +296,42 @@ export function decideAction(input: RoutingInput): Action {
   // Prioridad absoluta: una señal clínica no se consume como dato de una ficha
   // ni se entrega al modelo general, incluso si el detector configurable está
   // apagado o el análisis de intención falló.
-  if (text && CLINICAL_SEVERE_PATTERN.test(text)) {
-    return { type: "escalate", kind: "accion", reply: clinic.emergencyResponse, intent: "emergencia" };
+  // El webhook ya atiende las emergencias antes de esperar y de llamar al
+  // modelo; esto las vuelve a ver en el texto completo, por si el signo grave
+  // quedó repartido entre varios mensajes.
+  if (isEmergencyText(text)) {
+    return { type: "escalate", kind: "emergencia", reply: clinic.emergencyResponse, intent: "emergencia" };
   }
-  if (text && (CLINICAL_INJURY_PATTERN.test(text) || asksForDosing(text))) {
+  if (text && CLINICAL_INJURY_PATTERN.test(text)) {
     return {
       type: "escalate",
       kind: "accion",
       reply: `Por seguridad, no puedo valorar lesiones ni indicar estudios, medicamentos o tratamientos por este chat. Ya aviso a personal clínico para que le oriente 🙏 Si siente que es una emergencia, acuda a Emergencias o llame al ${clinic.generalInfo.phone}.`,
-      intent: CLINICAL_INJURY_PATTERN.test(text) ? "emergencia" : "accion",
+      intent: "emergencia",
     };
   }
+  // Dudas de dosis: no se le dice lo que el bot no puede hacer; se le confirma
+  // que su duda ya llegó a la clínica y que le responden pronto (pedido de la
+  // clínica, 2026-10-03).
+  if (text && asksForDosing(text)) {
+    return { type: "escalate", kind: "accion", reply: DOSING_REPLY, intent: "accion" };
+  }
+
+  // Respuesta a "¿Es urgente?": sí → emergencia, se avisa y lo esperan listos;
+  // no → sigue como una consulta. Otra cosa: el mensaje se decide normal.
+  if (input.pendingUrgency) {
+    if (confirmsUrgency(text)) {
+      return { type: "escalate", kind: "emergencia", reply: urgentConfirmedReply(clinic), intent: "emergencia" };
+    }
+    if (URGENT_NO.test(text)) {
+      return {
+        type: "reply",
+        text: "Entendido 😊 Si desea que lo vea un médico, le ayudo a pedir una ficha. ¿Para qué especialidad sería?",
+        intent: "qa",
+      };
+    }
+  }
+  if (needsUrgencyCheck(text)) return { type: "askUrgency", text: URGENCY_QUESTION, intent: "qa" };
 
   if (input.priceDispute) {
     return {
@@ -465,6 +565,8 @@ export function decideAction(input: RoutingInput): Action {
 const RECEIPT_REPLY = "¡Gracias! 🙏 Recibimos su comprobante. Un asesor de la clínica lo revisará y le confirmará por aquí.";
 const FILE_REPLY = "¡Gracias! 🙏 Recibimos su archivo. Un asesor de la clínica lo revisará.";
 const TO_ADVISOR_REPLY = "Le paso su pedido a un asesor de la clínica 🙏 En un momento le escribe por aquí.";
+const DOSING_REPLY =
+  "Recibimos su consulta sobre el medicamento 🙏 Ya se la hicimos llegar a personal de la clínica y le responderán por aquí lo antes posible.";
 const QR_CAPTION =
   "Este es el QR de pago de la clínica 😊 Cuando pague, envíeme el comprobante por aquí y un asesor lo verifica.";
 const PAYMENT_REPLY ="Los datos de pago se los envía un asesor de la clínica cuando confirme su ficha o servicio 🙏 Ya le aviso para que le escriba por aquí.";

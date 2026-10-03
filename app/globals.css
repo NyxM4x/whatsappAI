@@ -595,6 +595,17 @@ a {
   animation: leads-glow 1.4s ease-out infinite;
 }
 
+/* Emergencia: se distingue del resto de las alarmas de un vistazo. */
+.lead-card.lead-kind-emergencia {
+  background: #fee2e2;
+  border-width: 4px;
+}
+
+.lead-card.lead-kind-emergencia .lead-kind {
+  color: #b91c1c;
+  font-weight: 800;
+}
+
 .lead-card-header {
   display: flex;
   justify-content: space-between;
