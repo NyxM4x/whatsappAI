@@ -105,7 +105,7 @@ const defaultClinicConfig = {
     "emergencia",
   ],
   emergencyResponse:
-    "🚨 Diríjase inmediatamente a Emergencias. Comparta su ubicación en tiempo real con una persona cercana y solicite ayuda inmediata.\n\n📍 Av. Moscú n°4480, diagonal al mercado La Cuchilla, Santa Cruz\n🗺️ https://maps.app.goo.gl/cZcqhWE9LGhWifvo7?g_st=ic\n📞 +591 773 85 200",
+    "🚨 Por lo que nos cuenta, puede ser una emergencia: no espere, acuda de inmediato a Emergencias. Ya avisamos al personal de la clínica.\n\n📍 Av. Moscú n°4480, diagonal al mercado La Cuchilla, Santa Cruz\n🗺️ https://maps.app.goo.gl/cZcqhWE9LGhWifvo7?g_st=ic\n📞 +591 773 85 200",
 
   // Dispara el flujo de agendamiento. Es un fast-path: lo que no cae acá lo
   // decide GPT en el webhook, así que conviene cubrir bien las formas comunes

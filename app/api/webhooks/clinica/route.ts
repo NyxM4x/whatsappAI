@@ -72,6 +72,7 @@ import {
   getBookingSession,
   saveBookingSession,
   expireStalePaymentAppointments,
+  findRecentPendingLead,
   recordWebhookAudit,
 } from "@/lib/clinic/data";
 import type { AuditIntent, BookingSession, LeadKind } from "@/lib/clinic/types";
@@ -92,6 +93,10 @@ const GREETING_ONLY_PATTERN =
 // Al llegar al límite dentro de la ventana, se deriva a una persona.
 const FAILED_ATTEMPTS_LIMIT = 3;
 const FAILED_ATTEMPTS_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+// Con el bot en pausa, el texto de emergencia no se repite mientras haya una
+// alarma de emergencia pendiente de ese paciente dentro de esta ventana.
+const EMERGENCY_RESEND_WINDOW_MS = 12 * 60 * 60 * 1000;
 
 // ─── GET: verificación del webhook de Kapso ───────────────────────────────────
 
@@ -307,6 +312,26 @@ export async function POST(request: Request) {
   const contactName = lastMessage.contactName ?? firstMessage.contactName ?? null;
   const leadCtx: LeadContext = { clinic, conversationId, contactPhone, contactName };
 
+  const kapso = getKapsoClient();
+  // Responder desde el número PROPIO de la clínica resuelta; si todavía no
+  // tiene uno cargado en clinic_settings, cae al env var global (caso
+  // single-tenant / mientras se completa el alta de una clínica nueva).
+  const phoneNumberId = clinic.kapsoPhoneNumberId ?? getRequiredEnv("KAPSO_PHONE_NUMBER_ID");
+
+  // Con el bot en pausa, una emergencia igual recibe el texto de emergencia
+  // (decisión de la clínica, 2026-10-03): ir a Emergencias no contradice nada
+  // de lo que diga la persona que atiende el chat.
+  const sendEmergencyWhilePaused = () =>
+    sendAndPersist({
+      kapso,
+      phoneNumberId,
+      contactPhone,
+      conversationId,
+      replyText: clinic.emergencyResponse,
+      lastMessage,
+      evenIfPaused: true,
+    });
+
   // ── Pausa del bot ─────────────────────────────────────────────────────────
   // La identidad durable es el teléfono; conversationId queda como referencia.
   // En pausa el bot no responde, pero sigue mirando (ver watchWhilePaused).
@@ -326,7 +351,7 @@ export async function POST(request: Request) {
         pause_expires_at: pauseState.expiresAt ?? null,
       },
     });
-    await watchWhilePaused(leadCtx, newMessages);
+    await watchWhilePaused(leadCtx, newMessages, sendEmergencyWhilePaused);
     return new Response("bot paused", { status: 200 });
   }
 
@@ -335,12 +360,6 @@ export async function POST(request: Request) {
   }
 
   // ── Marcar como leído ─────────────────────────────────────────────────────
-  const kapso = getKapsoClient();
-  // Responder desde el número PROPIO de la clínica resuelta; si todavía no
-  // tiene uno cargado en clinic_settings, cae al env var global (caso
-  // single-tenant / mientras se completa el alta de una clínica nueva).
-  const phoneNumberId = clinic.kapsoPhoneNumberId ?? getRequiredEnv("KAPSO_PHONE_NUMBER_ID");
-
   if (lastMessage.messageId) {
     try {
       await kapso.messages.markRead({
@@ -430,7 +449,7 @@ export async function POST(request: Request) {
         pause_expires_at: currentPauseState.expiresAt ?? null,
       },
     });
-    await watchWhilePaused(leadCtx, newMessages);
+    await watchWhilePaused(leadCtx, newMessages, sendEmergencyWhilePaused);
     return new Response("bot paused", { status: 200 });
   }
 
@@ -704,10 +723,16 @@ async function trackFailedAttempts(
 
 // Con el bot en pausa (lo atiende una persona) no se responde nada, pero:
 //   - los comprobantes se anotan en el listado de pagos del panel;
-//   - si el paciente pide cancelar o reprogramar, salta una alarma nueva.
+//   - si el paciente pide cancelar o reprogramar, salta una alarma nueva;
+//   - una emergencia levanta su alarma y recibe el texto de emergencia (la
+//     única respuesta que el bot da en pausa).
 // Así se cubre al paciente ya confirmado por un humano y al que cambió de idea
 // antes de que lo atiendan, sin que el bot se despierte.
-async function watchWhilePaused(ctx: LeadContext, messages: IncomingMessage[]) {
+async function watchWhilePaused(
+  ctx: LeadContext,
+  messages: IncomingMessage[],
+  sendEmergency: () => Promise<void>,
+) {
   try {
     for (const message of messages) await registerIncomingProof({ ...ctx, message });
 
@@ -718,8 +743,15 @@ async function watchWhilePaused(ctx: LeadContext, messages: IncomingMessage[]) {
     // siempre es una persona escribiendo en ese momento: el bot también se
     // pausa solo, por ejemplo después de confirmar una ficha. Sin esto, "mi bebé
     // no respira" en un chat pausado no avisaba a nadie.
+    //
+    // El texto se envía una vez por alarma: si ya hay una emergencia pendiente
+    // de este paciente, ya lo recibió, y repetirlo a cada mensaje ("ayuda", "no
+    // respira", "rápido") solo llenaría el chat.
     if (isEmergencyText(text)) {
+      const since = new Date(Date.now() - EMERGENCY_RESEND_WINDOW_MS).toISOString();
+      const alreadyAlerted = await findRecentPendingLead(ctx.clinic.slug, ctx.contactPhone, "emergencia", since);
       await registerEscalation({ ...ctx, kind: "emergencia", lastMessage: text });
+      if (!alreadyAlerted) await sendEmergency();
       return;
     }
 
@@ -745,15 +777,18 @@ async function sendAndPersist(params: {
   pauseAfter?: boolean;
   // Si viene, se envía esta imagen con replyText al pie (el QR de pago).
   imageUrl?: string;
+  // Solo para el texto de emergencia: se envía aunque una persona tenga el chat.
+  evenIfPaused?: boolean;
 }) {
-  const { kapso, phoneNumberId, contactPhone, conversationId, replyText, lastMessage, imageUrl } = params;
+  const { kapso, phoneNumberId, contactPhone, conversationId, replyText, lastMessage, imageUrl, evenIfPaused } = params;
 
   try {
     // Barrera B (justo antes de enviar): una persona puede tomar el control
     // mientras OpenAI procesa. Solo frena una pausa VIGENTE — una pausa temporal
-    // ya expirada no debe silenciar esta respuesta.
+    // ya expirada no debe silenciar esta respuesta. El texto de emergencia la
+    // atraviesa a propósito (evenIfPaused).
     const pauseState = await getBotPauseState(conversationId, contactPhone);
-    if (pauseState.paused && !pauseState.expired) {
+    if (pauseState.paused && !pauseState.expired && !evenIfPaused) {
       console.log("ai response omitted because bot is paused", {
         conversationId,
         reason: pauseState.reason,
@@ -808,8 +843,9 @@ async function sendAndPersist(params: {
     // esto era invisible. Ahora queda como evento CRÍTICO para poder medir cuán
     // seguido pasa y decidir si hace falta acortar la latencia del turno.
     try {
+      // Con evenIfPaused el chat ya estaba en pausa: no es una carrera.
       const postSendPauseState = await getBotPauseState(conversationId, contactPhone);
-      if (postSendPauseState.paused && !postSendPauseState.expired) {
+      if (postSendPauseState.paused && !postSendPauseState.expired && !evenIfPaused) {
         console.error("ai response sent during a race window with a human takeover", { conversationId });
         await logSystemEvent({
           level: "critical",
