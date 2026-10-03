@@ -100,6 +100,7 @@ export function isLeadStep(step: BookingStep): boolean {
 
 export type TurnAnalysis = {
   patientName: string | null;
+  patientAge: string | null;
   specialtyKey: string | null;
   doctorName: string | null;
   preferredTime: string | null;
@@ -128,11 +129,12 @@ export function analysisForLocationFollowup(analysis: TurnAnalysis | null): Turn
 }
 
 const ANALYSIS_SYSTEM = `Analizás mensajes de WhatsApp de pacientes de una clínica en Bolivia. Respondés ÚNICAMENTE con un JSON válido, sin texto extra:
-{"patientName": string|null, "specialtyKey": string|null, "doctorName": string|null, "preferredTime": string|null, "preferredDate": "YYYY-MM-DD"|null, "preferredHour": "HH:MM"|null, "visitType": "nueva"|"reconsulta"|null, "paymentIntention": "qr"|"efectivo"|null, "unavailableRequest": string|null, "needsHumanAction": boolean, "wantsLead": boolean, "wantsHuman": boolean, "frustrated": boolean, "confirms": boolean, "wantsOut": boolean, "isQuestion": boolean}
+{"patientName": string|null, "patientAge": string|null, "specialtyKey": string|null, "doctorName": string|null, "preferredTime": string|null, "preferredDate": "YYYY-MM-DD"|null, "preferredHour": "HH:MM"|null, "visitType": "nueva"|"reconsulta"|null, "paymentIntention": "qr"|"efectivo"|null, "unavailableRequest": string|null, "needsHumanAction": boolean, "wantsLead": boolean, "wantsHuman": boolean, "frustrated": boolean, "confirms": boolean, "wantsOut": boolean, "isQuestion": boolean}
 
 Reglas:
 - Solo extraés lo que el mensaje dice de verdad. Ante la duda, null o false. Nunca inventes.
 - patientName: nombre del PACIENTE que se va a atender, tal como lo escribió. Si la ficha es para otra persona (un hijo, la mamá), es el nombre de esa persona. Nunca es el nombre de un médico.
+- patientAge: la edad del paciente si la dice, como la dijo ("5 años", "8 meses"). Un tiempo de síntomas ("hace 3 días") NO es una edad. null si no la dice.
 - specialtyKey: la clave de la lista si nombra la especialidad o un sinónimo ("pediatra" → pediatria, "ginecólogo" → ginecologia, "médico general" → medicina-general). Si nombra a un médico de la lista, usá la especialidad de ese médico. Si SOLO describe un síntoma o malestar y no nombra ninguna especialidad, elegí la especialidad más apropiada de la lista y ante la duda medicina-general. Si no hay ninguna pista, null.
 - unavailableRequest: si el paciente PIDE POR SU NOMBRE (o pregunta el precio de) una especialidad, un servicio, un examen o un procedimiento que NO está en la lista de especialidades (por ejemplo fisioterapia, odontología, oftalmología, psiquiatría, oncología, rehabilitación, kinesiología, nutrición, electrocardiograma, radiografía, un examen de laboratorio puntual), poné acá eso que pidió, tal como lo escribió. Esto NO es un rechazo: solo marca que hay que verificarlo con un asesor. Si lo que pide SÍ está en la lista de especialidades, null.
 - ANTES de marcar unavailableRequest, repasá la lista entera. La gente nombra al médico, no a la especialidad: "ginecólogo" es ginecologia, "pediatra" es pediatria, "traumatólogo" es traumatologia, "cardiólogo" es cardiologia, "urólogo" es urologia, "médico general" o "clínico" es medicina-general. Todas esas SÍ las tenemos: van en specialtyKey y unavailableRequest queda en null. Marcá unavailableRequest solo cuando no haya NINGUNA de la lista que corresponda.
@@ -339,6 +341,8 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[], docto
   // hijo" cuando el paciente contesta PARA QUIEN es en vez de como se llama.
   const rawName = cleanText(raw?.patientName, 80);
   const patientName = rawName && looksLikeName(rawName) ? rawName : null;
+  // La edad también la lee el código, por si el modelo no la devolvió.
+  const patientAge = readAge(cleanText(raw?.patientAge, 40) ?? "") ?? readAge(text);
 
   // Si lo que el modelo vio como "quiere una persona" es en realidad el médico
   // de preferencia, y no hay verbo de hablar/comunicarse, es un dato.
@@ -350,6 +354,7 @@ function sanitizeAnalysis(raw: any, text: string, services: ServiceItem[], docto
 
   return {
     patientName,
+    patientAge,
     specialtyKey,
     doctorName,
     preferredTime: cleanText(raw?.preferredTime),
@@ -585,9 +590,52 @@ export async function answerQuestion(ctx: LeadContext, text: string): Promise<Qa
   }
 }
 
+// ─── Edad en pediatría ───────────────────────────────────────────────────────
+// Pediatría atiende hasta los 12 años (confirmado por la clínica el
+// 2026-10-03). En pediatría se pide la edad junto con el nombre; si tiene más,
+// se le explica y la ficha pasa a Medicina General, que es la que corresponde.
+export const PEDIATRIC_MAX_AGE = 12;
+
+// "5 años", "un año", "8 meses", "3 añitos". Un tiempo de síntomas no es una
+// edad: "hace 3 días", "desde hace 2 meses", "cada 3 meses", "hasta los 12
+// años" no cuentan.
+const AGE_PATTERN =
+  /(?<!\b(?:hace|desde|por|durante|cada|en|hasta|los|dentro\s+de)\s{1,3})\b(\d{1,2}|un|una)\s*(a[nñ]os?|a[nñ]itos?|meses|mes|mesecitos?)\b/i;
+
+export function readAge(text: string): string | null {
+  const m = text.match(AGE_PATTERN);
+  if (!m) return null;
+  const amount = /^un/i.test(m[1]) ? "1" : m[1];
+  const isYears = /^a/i.test(m[2]);
+  const unit = isYears ? (amount === "1" ? "año" : "años") : amount === "1" ? "mes" : "meses";
+  return `${amount} ${unit}`;
+}
+
+// Años cumplidos de una edad normalizada por readAge ("8 meses" → 0).
+export function ageInYears(age: string | null | undefined): number | null {
+  const m = age?.match(/^(\d+)\s+(año|años|mes|meses)$/);
+  if (!m) return null;
+  return m[2].startsWith("año") ? Number(m[1]) : 0;
+}
+
+// Si un paciente de pediatría pasa el límite, la ficha va a Medicina General
+// y se le dice por qué. Devuelve la nota para el paciente, o null si no cambió.
+export function applyPediatricAgeLimit(draft: LeadDraft): { draft: LeadDraft; note: string | null } {
+  const years = ageInYears(draft.patientAge);
+  if (draft.specialtyKey !== "pediatria" || years === null || years <= PEDIATRIC_MAX_AGE) {
+    return { draft, note: null };
+  }
+  return {
+    draft: { ...draft, specialtyKey: "medicina-general" },
+    note:
+      `ℹ️ Pediatría atiende hasta los ${PEDIATRIC_MAX_AGE} años. Con ${draft.patientAge} le corresponde ` +
+      "*Medicina General*, así que anoté su ficha ahí. Si prefiere otra especialidad, dígamelo 😊",
+  };
+}
+
 // ─── Datos de la solicitud ───────────────────────────────────────────────────
 
-type Field = "specialty" | "name" | "time" | "visit";
+type Field = "specialty" | "name" | "age" | "time" | "visit";
 
 // Solo en las especialidades con reconsulta (Medicina General, Ginecología y
 // Pediatría, confirmado 2026-10-03): en las demás no existe, así que la
@@ -602,7 +650,7 @@ export function needsVisitType(draft: LeadDraft): boolean {
   return spec ? Boolean(spec.reconsultaDays) : false;
 }
 
-function missingFields(draft: LeadDraft | null): Field[] {
+export function missingFields(draft: LeadDraft | null): Field[] {
   if (!draft) return [];
   const missing: Field[] = [];
   // La especialidad es obligatoria SIEMPRE. Antes bastaba con nombrar un médico
@@ -617,6 +665,8 @@ function missingFields(draft: LeadDraft | null): Field[] {
   // Lo que no está en catálogo solo pide día y hora (pedido de la clínica,
   // 2026-10-03): el asesor responde lo antes posible y el nombre lo toma él.
   if (!draft.patientName && draft.kind !== "no_disponible") missing.push("name");
+  // En pediatría la edad decide si le corresponde (hasta los 12 años).
+  if (draft.kind === "ficha" && draft.specialtyKey === "pediatria" && !draft.patientAge) missing.push("age");
   if (!draft.preferredTime) missing.push("time");
   if (needsVisitType(draft) && !draft.visitType) missing.push("visit");
   return missing;
@@ -629,6 +679,7 @@ export function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): 
   const next: LeadDraft = { ...draft };
 
   if (analysis.patientName) next.patientName = analysis.patientName;
+  if (analysis.patientAge) next.patientAge = analysis.patientAge;
   if (analysis.paymentIntention) next.paymentIntention = analysis.paymentIntention;
   if (analysis.preferredTime) {
     next.preferredTime = analysis.preferredTime;
@@ -657,15 +708,22 @@ export function mergeAnalysis(draft: LeadDraft, analysis: TurnAnalysis | null): 
 
   const fields = (d: LeadDraft) =>
     JSON.stringify([
-      d.patientName, d.preferredTime, d.preferredDate, d.preferredHour,
+      d.patientName, d.patientAge, d.preferredTime, d.preferredDate, d.preferredHour,
       d.specialtyKey, d.unmatchedRequestText, d.doctorPreference, d.visitType, d.paymentIntention,
     ]);
   return { draft: next, changed: fields(next) !== fields(draft) };
 }
 
+// "Juan Pérez (5 años)": la edad viaja con el nombre para que el asesor la vea
+// en el panel sin una columna nueva.
+function patientLabel(draft: LeadDraft): string | null {
+  if (!draft.patientName) return null;
+  return draft.patientAge ? `${draft.patientName} (${draft.patientAge})` : draft.patientName;
+}
+
 function leadRowFields(draft: LeadDraft): LeadFields {
   return {
-    patientName: draft.patientName ?? null,
+    patientName: patientLabel(draft),
     specialty: findSpecialty(draft.specialtyKey)?.name ?? draft.unmatchedRequestText ?? null,
     // true cuando lo único que tenemos es el texto libre del paciente (una
     // especialidad, un servicio o un examen que no está en ningún catálogo
@@ -687,6 +745,7 @@ function askMissing(draft: LeadDraft, missing: Field[], intro?: string): string 
   const items: Record<Field, string> = {
     specialty: "🩺 La *especialidad* que necesita",
     name: pediatric ? "👶 El *nombre completo del niño o niña* que será atendido" : "👤 El *nombre completo del paciente*",
+    age: "🎂 La *edad* del niño o niña",
     time: "🗓️ El *día y la hora* que le quedarían cómodos",
     visit: "🔁 Si es *consulta nueva* o *reconsulta*",
   };
@@ -695,6 +754,7 @@ function askMissing(draft: LeadDraft, missing: Field[], intro?: string): string 
     name: pediatric
       ? "¿Cuál es el *nombre completo del niño o niña* que será atendido? 😊"
       : "¿Cuál es el *nombre completo del paciente*? 😊",
+    age: `¿Qué *edad* tiene ${draft.patientName ?? "el niño o niña"}? 😊`,
     time: "¿Qué *día y hora* le quedarían cómodos? 😊",
     visit: "¿Es *consulta nueva* o *reconsulta*? 😊",
   };
@@ -847,7 +907,7 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
   const lines = [
     "📋 *Resumen de su solicitud*",
     "",
-    draft.patientName ? `${draft.specialtyKey === "pediatria" ? "👶" : "👤"} Paciente: ${draft.patientName}` : null,
+    draft.patientName ? `${draft.specialtyKey === "pediatria" ? "👶" : "👤"} Paciente: ${patientLabel(draft)}` : null,
     draft.kind === "servicio" ? `🩺 Servicio: ${draft.serviceName}` : null,
     draft.kind === "ficha" && spec ? `🩺 Especialidad: ${spec.name}` : null,
     // Fuera de catálogo (especialidad, servicio o examen): se anota tal cual
@@ -978,7 +1038,8 @@ export async function startLead(
     }
   }
 
-  const draft = mergeAnalysis(base, ctx.analysis).draft;
+  const { draft, note: ageNote } = applyPediatricAgeLimit(mergeAnalysis(base, ctx.analysis).draft);
+  if (ageNote) intro = `${intro}\n\n${ageNote}`;
   if (ctx.analysis?.dateConflict) return askDateAgain(ctx, draft, ctx.analysis.dateConflict, intro);
 
   // Solo preguntó el precio: se le da y se le ofrece el servicio, sin darlo por
@@ -1046,14 +1107,18 @@ export async function continueLead(
   // (decideAction ya descartó el rechazo y el cambio de tema): deja de estar
   // pendiente y sigue como cualquier otra recolección.
   const accepted = lead.offerPending ? { ...lead, offerPending: false } : lead;
-  const { draft, changed } = mergeAnalysis(accepted, analysis);
+  const merged = mergeAnalysis(accepted, analysis);
+  // Pediatría hasta los 12 años: si la edad lo deja afuera, pasa a Medicina
+  // General y se le explica.
+  const { draft, note: ageNote } = applyPediatricAgeLimit(merged.draft);
+  const changed = merged.changed || Boolean(ageNote);
 
   // Un día que no calza manda sobre todo lo demás: si se siguiera, el resumen
   // le confirmaría un día que no es.
   if (analysis?.dateConflict) return askDateAgain(ctx, draft, analysis.dateConflict);
 
   if (session.step === "confirming_lead") {
-    if (changed) return sendSummary(ctx, draft, "¡Listo! Actualicé sus datos 😊");
+    if (changed) return sendSummary(ctx, draft, ageNote ?? "¡Listo! Actualicé sus datos 😊");
 
     if (analysis?.confirms) {
       // Si al enviar el resumen no se pudo crear la fila, se reintenta: sin ella
@@ -1089,6 +1154,7 @@ export async function continueLead(
     const answer = await answerQuestion(ctx, ctx.text);
     intro = answer.status === "ok" ? answer.text : undefined;
   }
+  if (ageNote) intro = intro ? `${intro}\n\n${ageNote}` : ageNote;
   return askOrSummarize(ctx, draft, intro);
 }
 

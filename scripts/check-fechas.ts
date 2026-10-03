@@ -88,7 +88,7 @@ check("ofrece hoy viernes y mañana sábado", pregunta.includes("hoy viernes 25/
 console.log("\nEL ANÁLISIS USA LA FECHA DEL CÓDIGO\n");
 
 const base: TurnAnalysis = {
-  patientName: null, specialtyKey: null, doctorName: null,
+  patientName: null, patientAge: null, specialtyKey: null, doctorName: null,
   preferredTime: null, preferredDate: null, preferredHour: null,
   visitType: null, paymentIntention: null, unavailableRequest: null,
   needsHumanAction: false, wantsLead: false, wantsHuman: false,

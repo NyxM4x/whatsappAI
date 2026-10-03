@@ -184,6 +184,7 @@ export type LeadDraft = {
   // nueva/reconsulta ni se le habla de "su ficha").
   kind: "ficha" | "servicio" | "no_disponible";
   patientName?: string | null;
+  patientAge?: string | null;       // "5 años", como lo dijo (en pediatría se pide)
   specialtyKey?: string | null;     // clave de CONSULTATION_SPECIALTIES
   // Lo que el paciente pidió tal cual (especialidad, servicio o examen), cuando
   // NO está en CONSULTATION_SPECIALTIES ni en el catálogo de servicios. No

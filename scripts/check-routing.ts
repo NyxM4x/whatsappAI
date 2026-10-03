@@ -22,7 +22,7 @@ if (existsSync(".env.local")) {
 
 const { getClinicConfig } = await import("../lib/clinic/config");
 const { decideAction, isEmergencyText } = await import("../lib/clinic/routing");
-const { analysisForLocationFollowup, answerKnownLeadQuestion, hasPriceDispute, looksLikeName, mergeAnalysis, needsVisitType, visitTypeFromText } = await import("../lib/clinic/leads");
+const { analysisForLocationFollowup, answerKnownLeadQuestion, hasPriceDispute, looksLikeName, mergeAnalysis, needsVisitType, visitTypeFromText, readAge, applyPediatricAgeLimit, missingFields } = await import("../lib/clinic/leads");
 
 import type { TurnAnalysis } from "../lib/clinic/leads";
 import type { BookingStep, LeadDraft } from "../lib/clinic/types";
@@ -32,7 +32,7 @@ const clinic = await getClinicConfig();
 // Análisis vacío: cada caso sobrescribe solo lo que le importa.
 function analysis(patch: Partial<TurnAnalysis> = {}): TurnAnalysis {
   return {
-    patientName: null, specialtyKey: null, doctorName: null,
+    patientName: null, patientAge: null, specialtyKey: null, doctorName: null,
     preferredTime: null, preferredDate: null, preferredHour: null,
     visitType: null, paymentIntention: null, unavailableRequest: null,
     needsHumanAction: false, wantsLead: false, wantsHuman: false,
@@ -1065,6 +1065,45 @@ for (const [nombre, draft, texto, esperado] of DISPUTAS) {
 const valeOk = answerKnownLeadQuestion({ kind: "ficha", specialtyKey: "medicina-general" }, clinic, "vale, mañana a las 10");
 if (valeOk !== null) failures++;
 console.log(`  ${valeOk === null ? "✓" : "✗"} "vale, mañana a las 10" no es pregunta de precio`);
+
+// ─── Edad en pediatría (hasta los 12 años, 2026-10-03) ──────────────────────
+console.log("\nEDAD EN PEDIATRÍA\n");
+const EDADES: [string, string | null][] = [
+  ["Juan Pérez, 5 años", "5 años"],
+  ["tiene un año", "1 año"],
+  ["mi bebé de 8 meses", "8 meses"],
+  ["tiene 3 añitos", "3 años"],
+  ["tiene 13 años", "13 años"],
+  ["tiene fiebre hace 3 días", null],
+  ["desde hace 2 meses le duele", null],
+  ["viene cada 3 meses", null],
+  ["¿hasta los 12 años atienden?", null],
+  ["mañana a las 10", null],
+];
+for (const [texto, esperado] of EDADES) {
+  const got = readAge(texto);
+  if (got !== esperado) failures++;
+  console.log(`  ${got === esperado ? "✓" : "✗"} "${texto}"`.padEnd(50) + String(got));
+}
+
+const pidePediatria = missingFields({ kind: "ficha", specialtyKey: "pediatria", patientName: "Ana", preferredTime: "mañana", visitType: "nueva" });
+const pideMG = missingFields({ kind: "ficha", specialtyKey: "medicina-general", patientName: "Ana", preferredTime: "mañana", visitType: "nueva" });
+const edadOk = pidePediatria.includes("age") && !pideMG.includes("age");
+if (!edadOk) failures++;
+console.log(`  ${edadOk ? "✓" : "✗"} se pide la edad en pediatría y no en otras especialidades`);
+
+const LIMITE: [string, string, string][] = [
+  ["12 años sigue en pediatría", "12 años", "pediatria"],
+  ["8 meses sigue en pediatría", "8 meses", "pediatria"],
+  ["13 años pasa a Medicina General", "13 años", "medicina-general"],
+  ["15 años pasa a Medicina General", "15 años", "medicina-general"],
+];
+for (const [nombre, edad, esperado] of LIMITE) {
+  const { draft, note } = applyPediatricAgeLimit({ kind: "ficha", specialtyKey: "pediatria", patientAge: edad });
+  const ok = draft.specialtyKey === esperado && (esperado === "pediatria" ? note === null : Boolean(note?.includes("hasta los 12 años")));
+  if (!ok) failures++;
+  console.log(`  ${ok ? "✓" : "✗"} ${nombre}`.padEnd(50) + `${draft.specialtyKey}${note ? " + explicación" : ""}`);
+}
 
 // ─── Qué se le responde ──────────────────────────────────────────────────────
 // Dosis: se le confirma que su duda llegó a la clínica, sin "no puedo…"

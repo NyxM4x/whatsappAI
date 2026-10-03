@@ -513,6 +513,7 @@ export function buildClinicSystemPrompt(clinic: ClinicConfig): string {
     buildServicesBlock(clinic.services, now.date),
     "",
     ...(campaigns ? [campaigns, ""] : []),
+    "PEDIATRÍA: atiende a niños y niñas hasta los 12 años; desde los 13 años le corresponde Medicina General.",
     "CARNET: para la consulta el paciente debe traer su carnet de identidad; solo si no lo tiene, puede mostrar una foto del carnet en recepción. Nunca pidas el número de carnet.",
     "Si preguntan por una especialidad, un servicio o un examen que NO está en las listas de arriba: no lo niegues ni lo confirmes. Las listas están incompletas. Decile con calidez que le pasás su solicitud a un asesor para que le responda lo antes posible con el precio y la disponibilidad, y preguntale qué día y hora le acomodan. Nunca inventes especialidades ni nombres de médicos.",
     "Si preguntan por un servicio del tarifario: informá el precio y preguntale si desea hacerse el servicio; si lo quiere, que te diga el nombre del paciente y el día y la hora que le acomodan, y un asesor le confirma el horario. No confirmes vos ningún horario.",
