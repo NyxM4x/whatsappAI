@@ -22,7 +22,7 @@
 // pausa de sendAndPersist descartaría el aviso al paciente si se pausara antes.
 // ============================================================================
 
-import { verifySignature } from "@kapso/whatsapp-cloud-api/server";
+import crypto from "node:crypto";
 
 import { getKapsoClient, getRequiredEnv } from "@/lib/engine/clients";
 import { maskPhone, getErrorMessage, logSystemEvent } from "@/lib/engine/logging";
@@ -123,6 +123,15 @@ export async function GET(request: Request) {
 
 // ─── POST: mensajes entrantes ─────────────────────────────────────────────────
 
+// Kapso firma cada webhook con HMAC-SHA256 (hex) del body crudo, usando la
+// clave secreta del webhook, y la manda en X-Webhook-Signature.
+function isValidKapsoSignature(secret: string, rawBody: string, signatureHeader: string | null): boolean {
+  if (!signatureHeader) return false;
+  const expected = Buffer.from(crypto.createHmac("sha256", secret).update(rawBody).digest("hex"));
+  const actual = Buffer.from(signatureHeader.trim().toLowerCase().replace(/^sha256=/, ""));
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+
 export async function POST(request: Request) {
   let rawBody: string;
 
@@ -132,37 +141,41 @@ export async function POST(request: Request) {
     return new Response("invalid body", { status: 400 });
   }
 
-  // Verificación de firma (P1.1): Meta/Kapso firman el payload con
-  // X-Hub-Signature-256 (HMAC-SHA256 sobre el body crudo, con el App Secret de
-  // Meta). Sin esto, cualquiera en internet puede POSTear mensajes falsos.
+  // Verificación de firma (P1.1): el webhook llega desde Kapso, que lo firma
+  // con X-Webhook-Signature y la clave secreta del webhook (no con el App
+  // Secret de Meta ni X-Hub-Signature-256: ese esquema es para webhooks que
+  // llegan directo de Meta). Sin esto, cualquiera en internet puede POSTear
+  // mensajes falsos.
   //
-  // Rollout seguro: si META_APP_SECRET no está configurada, NO se bloquea (solo
-  // se avisa por log) para no tumbar el bot en producción antes de que se
-  // configure la env var. Una vez seteada, se exige siempre.
-  const appSecret = process.env.META_APP_SECRET;
-  if (appSecret) {
-    const ok = verifySignature({
-      appSecret,
-      rawBody,
-      signatureHeader: request.headers.get("x-hub-signature-256") ?? undefined,
-    });
-    if (!ok) {
-      console.error("clinica webhook: invalid X-Hub-Signature-256, rejecting");
+  // Rollout seguro: si KAPSO_WEBHOOK_SECRET no está configurada, NO se bloquea
+  // (solo se avisa por log) para no tumbar el bot en producción antes de que
+  // se configure la env var. Una vez seteada, se exige siempre.
+  const webhookSecret = process.env.KAPSO_WEBHOOK_SECRET;
+  if (webhookSecret) {
+    const signatureHeader = request.headers.get("x-webhook-signature");
+    if (!isValidKapsoSignature(webhookSecret, rawBody, signatureHeader)) {
+      console.error("clinica webhook: invalid X-Webhook-Signature, rejecting");
+      // Persistido: si la clave quedó mal copiada el bot deja de responder, y
+      // esto es lo que permite verlo sin depender de los runtime logs de Vercel.
+      await logSystemEvent({
+        level: "critical",
+        eventType: "webhook_signature_invalid",
+        errorMessage: "Firma del webhook inválida: mensaje rechazado",
+        metadata: { signature_header_present: Boolean(signatureHeader) },
+      });
       return new Response("invalid signature", { status: 401 });
     }
   } else {
-    console.warn("clinica webhook: META_APP_SECRET not set, skipping signature verification");
+    console.warn("clinica webhook: KAPSO_WEBHOOK_SECRET not set, skipping signature verification");
     // Persistido (no solo console.warn, que se pierde con los runtime logs de
     // Vercel): mientras falte esta env var, cualquiera en internet puede
     // forjar un POST a este webhook, incluyendo un evento falso de takeover
-    // humano que pause/despause el bot. Configurar META_APP_SECRET (panel de
-    // Meta for Developers → tu app → Settings → Basic) cierra esto sin tocar
-    // código — el mecanismo (X-Hub-Signature-256) ya es el correcto, según la
-    // documentación oficial del SDK de Kapso.
+    // humano que pause/despause el bot. Se cierra copiando la clave secreta
+    // del webhook desde el panel de Kapso a KAPSO_WEBHOOK_SECRET.
     await logSystemEvent({
       level: "warning",
       eventType: "webhook_signature_verification_disabled",
-      errorMessage: "META_APP_SECRET no configurada: firma del webhook sin verificar",
+      errorMessage: "KAPSO_WEBHOOK_SECRET no configurada: firma del webhook sin verificar",
     });
   }
 

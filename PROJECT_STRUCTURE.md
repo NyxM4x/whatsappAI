@@ -104,7 +104,7 @@ whatsappAI/
 
 | Archivo | Líneas | Responsabilidad |
 |---|---:|---|
-| [app/api/webhooks/clinica/route.ts](app/api/webhooks/clinica/route.ts) | 511 | **Orquestador principal.** `GET` verifica el webhook (fail-closed si no hay `KAPSO_VERIFY_TOKEN`); `POST` valida firma `X-Hub-Signature-256` con `META_APP_SECRET`, normaliza el evento, aplica debounce (`MESSAGE_DEBOUNCE_MS`, default 6000 ms), guarda inbound, toma el reply lock y decide: emergencia → comprobante → sesión activa → cancelar/reagendar → iniciar reserva → Q&A con OpenAI. `runtime = "nodejs"`, `maxDuration = 30`. |
+| [app/api/webhooks/clinica/route.ts](app/api/webhooks/clinica/route.ts) | 511 | **Orquestador principal.** `GET` verifica el webhook (fail-closed si no hay `KAPSO_VERIFY_TOKEN`); `POST` valida firma `X-Webhook-Signature` de Kapso con `KAPSO_WEBHOOK_SECRET`, normaliza el evento, aplica debounce (`MESSAGE_DEBOUNCE_MS`, default 6000 ms), guarda inbound, toma el reply lock y decide: emergencia → comprobante → sesión activa → cancelar/reagendar → iniciar reserva → Q&A con OpenAI. `runtime = "nodejs"`, `maxDuration = 30`. |
 | [app/api/cron/clinic-reminders/route.ts](app/api/cron/clinic-reminders/route.ts) | 174 | Recordatorios diarios de citas. Único cron declarado en `vercel.json` (`0 12 * * *`). Protegido por `CRON_SECRET` (o `CLINIC_REMIND_CRON_SECRET`). |
 | [app/api/cron/clinic-confirmations/route.ts](app/api/cron/clinic-confirmations/route.ts) | 227 | Reconcilia citas confirmadas sin evento en Calendar y citas canceladas cuyo evento sigue vivo. Protegido por `CRON_SECRET` / `CLINIC_CONFIRM_CRON_SECRET`. |
 | [app/api/bot-control/pause/route.ts](app/api/bot-control/pause/route.ts) | 122 | Pausa el bot (handoff humano). Requiere `BOT_CONTROL_SECRET`. |

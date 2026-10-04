@@ -17,7 +17,7 @@ de infraestructura:
 
 | Orden | Qué hace | Línea |
 |---|---|---|
-| 1 | Verifica firma `X-Hub-Signature-256` (se salta si falta `META_APP_SECRET`) | ~130 |
+| 1 | Verifica firma `X-Webhook-Signature` de Kapso (se salta si falta `KAPSO_WEBHOOK_SECRET`) | ~130 |
 | 2 | Detecta **takeover humano** (recepcionista escribió desde WhatsApp Business) y pausa el bot | ~165 |
 | 3 | Normaliza el payload de Kapso a `IncomingMessage[]` | ~205 |
 | 4 | Modo test: si `TEST_PHONE` está seteada, ignora a todos los demás números | ~195 |
