@@ -3,10 +3,13 @@
 // ============================================================================
 // Solicitudes con alarma — panel interno
 // ----------------------------------------------------------------------------
-// Consulta /api/admin/leads cada 5 s. Mientras haya solicitudes pendientes
-// suena una alarma en bucle, que sigue sonando con la ventana minimizada. Cada
-// solicitud se calla solo con su propio botón "Atender" (no hay apagado global,
-// a pedido de la clínica), que además abre el chat en WhatsApp Web.
+// Consulta /api/admin/leads cuando el servidor avisa que algo cambió (Supabase
+// Realtime) y, de respaldo, cada 30 s. Sin aviso en vivo — no configurado o
+// conexión caída — vuelve a consultar cada 5 s. Mientras haya solicitudes
+// pendientes suena una alarma en bucle, que sigue sonando con la ventana
+// minimizada. Cada solicitud se calla solo con su propio botón "Atender" (no
+// hay apagado global, a pedido de la clínica), que además abre el chat en
+// WhatsApp Web.
 //
 // Límites del navegador y cómo se cubren:
 //   - Autoplay: el sonido solo arranca después de una interacción con la
@@ -44,7 +47,13 @@ type LeadDTO = {
   botPaused: boolean;
 };
 
+type RealtimeConfig = { url: string; anonKey: string; channel: string; event: string };
+
 const POLL_MS = 5000;
+// Con el aviso en vivo conectado, el sondeo queda solo de respaldo.
+const BACKUP_POLL_MS = 30000;
+// Una consulta colgada no puede frenar a las siguientes.
+const POLL_TIMEOUT_MS = 10000;
 // Nombre fijo: cada "Atender" reutiliza la misma pestaña de WhatsApp Web.
 const WHATSAPP_WINDOW = "clinica-whatsapp";
 
@@ -235,7 +244,15 @@ function BotPauseControl({
   );
 }
 
-export default function LeadsBoard({ timezone, compact }: { timezone: string; compact: boolean }) {
+export default function LeadsBoard({
+  timezone,
+  compact,
+  realtime,
+}: {
+  timezone: string;
+  compact: boolean;
+  realtime: RealtimeConfig | null;
+}) {
   const [pending, setPending] = useState<LeadDTO[]>([]);
   const [recent, setRecent] = useState<LeadDTO[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -246,8 +263,13 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
   // Atendidas desde esta pantalla: un sondeo que salió antes del clic no las revive.
   const attendedRef = useRef<Set<string>>(new Set());
   const baseTitleRef = useRef("");
+  // Aviso en vivo conectado: mientras sea true, el sondeo corre espaciado.
+  const liveRef = useRef(false);
+  const pollingRef = useRef(false);
+  const repollRef = useRef(false);
+  const lastPollRef = useRef(0);
   // Overrides optimistas tras tocar "Pausar/Reactivar IA", por teléfono
-  // normalizado — el próximo sondeo (5 s) los reemplaza por el estado real.
+  // normalizado.
   const [pauseOverrides, setPauseOverrides] = useState<Record<string, boolean>>({});
 
   const handleBotToggled = useCallback((phone: string, paused: boolean) => {
@@ -273,9 +295,20 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
     refreshSoundState();
   }, [refreshSoundState]);
 
-  const poll = useCallback(async () => {
+  const poll = useCallback(async (): Promise<void> => {
+    // Un aviso que llega con una consulta en curso pide otra al terminar: la
+    // que está en vuelo pudo haber leído antes del cambio.
+    if (pollingRef.current) {
+      repollRef.current = true;
+      return;
+    }
+    pollingRef.current = true;
+    lastPollRef.current = Date.now();
     try {
-      const res = await fetch("/api/admin/leads", { cache: "no-store" });
+      const res = await fetch("/api/admin/leads", {
+        cache: "no-store",
+        signal: AbortSignal.timeout(POLL_TIMEOUT_MS),
+      });
       if (res.status === 401) {
         setSessionExpired(true);
         return;
@@ -295,9 +328,21 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
     } catch {
       setOffline(true);
     } finally {
+      pollingRef.current = false;
       refreshSoundState();
+      if (repollRef.current) {
+        repollRef.current = false;
+        poll();
+      }
     }
   }, [refreshSoundState]);
+
+  // Cada tic del reloj (5 s) consulta solo si ya toca: siempre sin aviso en
+  // vivo, cada 30 s con él.
+  const tick = useCallback(() => {
+    const interval = liveRef.current ? BACKUP_POLL_MS : POLL_MS;
+    if (Date.now() - lastPollRef.current >= interval - 500) poll();
+  }, [poll]);
 
   // Audio: un solo contexto; cualquier clic o tecla en la página lo desbloquea.
   useEffect(() => {
@@ -326,17 +371,56 @@ export default function LeadsBoard({ timezone, compact }: { timezone: string; co
       );
       worker = new Worker(workerUrl);
       worker.onmessage = () => {
-        poll();
+        tick();
       };
     } catch {
-      interval = window.setInterval(poll, POLL_MS);
+      interval = window.setInterval(tick, POLL_MS);
     }
     return () => {
       worker?.terminate();
       if (workerUrl) URL.revokeObjectURL(workerUrl);
       if (interval !== null) window.clearInterval(interval);
     };
-  }, [poll]);
+  }, [poll, tick]);
+
+  // Aviso en vivo: el servidor avisa cuando cambian las solicitudes y recién
+  // ahí se consulta. El aviso no trae datos; solo dispara el sondeo.
+  const { url: realtimeUrl, anonKey, channel: channelName, event: eventName } = realtime ?? {};
+  useEffect(() => {
+    if (!realtimeUrl || !anonKey || !channelName || !eventName) return;
+    let cancelled = false;
+    let disconnect: (() => void) | null = null;
+    import("@supabase/supabase-js")
+      .then(({ createClient }) => {
+        if (cancelled) return;
+        const client = createClient(realtimeUrl, anonKey, {
+          auth: { persistSession: false, autoRefreshToken: false },
+          // Latidos desde un Web Worker: la conexión no se cae con la pestaña oculta.
+          realtime: { worker: true },
+        });
+        const channel = client
+          .channel(channelName)
+          .on("broadcast", { event: eventName }, () => {
+            poll();
+          })
+          .subscribe((status) => {
+            liveRef.current = status === "SUBSCRIBED";
+            // Al (re)conectar se consulta ya: pudo cambiar algo sin aviso.
+            if (liveRef.current) poll();
+          });
+        disconnect = () => {
+          liveRef.current = false;
+          client.removeChannel(channel);
+        };
+      })
+      .catch(() => {
+        // Sin aviso en vivo: sigue el sondeo de 5 s.
+      });
+    return () => {
+      cancelled = true;
+      disconnect?.();
+    };
+  }, [realtimeUrl, anonKey, channelName, eventName, poll]);
 
   useEffect(() => {
     if (pending.length > 0) alarmRef.current?.start();

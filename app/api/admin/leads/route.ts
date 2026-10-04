@@ -1,8 +1,9 @@
 // ============================================================================
 // Solicitudes para la alarma del panel interno (/admin).
 // ----------------------------------------------------------------------------
-// LeadsBoard lo consulta cada 5 s: pendientes (hacen sonar la alarma) y las
-// últimas cerradas. Requiere sesión de staff; sin ella devuelve 401 y el panel
+// LeadsBoard lo consulta cuando recibe el aviso en vivo de un cambio (y cada
+// 30 s de respaldo; cada 5 s si no hay aviso): pendientes (hacen sonar la
+// alarma) y las últimas cerradas. Requiere sesión de staff; sin ella devuelve 401 y el panel
 // avisa que la sesión se cerró.
 // ============================================================================
 

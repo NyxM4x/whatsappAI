@@ -3,6 +3,7 @@
 // migrar a otro Postgres luego sea reescribir un solo archivo.
 
 import { getSupabaseClient } from "@/lib/engine/clients";
+import { notifyLeadsChanged } from "@/lib/clinic/leads-realtime";
 import type {
   Appointment,
   AppointmentStatus,
@@ -899,6 +900,7 @@ export async function createLead(
     console.error("createLead failed", error);
     return null;
   }
+  await notifyLeadsChanged(params.business);
   return data?.id ? String(data.id) : null;
 }
 
@@ -910,11 +912,18 @@ export async function updateLead(
   const row = { ...leadFieldsToRow(patch), updated_at: new Date().toISOString() } as Record<string, any>;
   if (patch.status !== undefined) row.status = patch.status;
 
-  const { error } = await supabase.from("clinic_leads").update(row).eq("id", id);
+  // Devuelve la clínica de la fila para avisarle a su panel.
+  const { data, error } = await supabase
+    .from("clinic_leads")
+    .update(row)
+    .eq("id", id)
+    .select("business")
+    .maybeSingle();
   if (error) {
     console.error("updateLead failed", error);
     return false;
   }
+  if (data?.business) await notifyLeadsChanged(String(data.business));
   return true;
 }
 
@@ -1006,6 +1015,7 @@ export async function attendLead(
     console.error("attendLead failed", error);
     return null;
   }
+  if (data) await notifyLeadsChanged(business);
   return data ? mapLead(data) : null;
 }
 

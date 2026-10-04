@@ -7,6 +7,7 @@ import {
   type AdminAppointmentFilter,
 } from "@/lib/clinic/data";
 import { getClinicConfig, getClinicHolidayDates } from "@/lib/clinic/config";
+import { getLeadsRealtimeConfig } from "@/lib/clinic/leads-realtime";
 import { localDateISO, upcomingHolidays } from "@/lib/clinic/pricing";
 import {
   cancelAppointmentAction,
@@ -134,7 +135,11 @@ export default async function AdminDashboardPage({
       </nav>
 
       {/* La alarma vive en todas las pestañas; fuera de Solicitudes se muestra compacta. */}
-      <LeadsBoard timezone={clinic.timezone} compact={activeTab !== "solicitudes"} />
+      <LeadsBoard
+        timezone={clinic.timezone}
+        compact={activeTab !== "solicitudes"}
+        realtime={getLeadsRealtimeConfig(staff.business)}
+      />
 
       {activeTab === "pagos" && (
         <PaymentsSection business={staff.business} timezone={clinic.timezone} page={currentPage} />
