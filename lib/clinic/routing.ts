@@ -35,8 +35,8 @@ export type Action =
   // Abrir una solicitud nueva y pedir lo que falte. Con offer, el paciente solo
   // preguntó el precio: se le da y se le ofrece el servicio, sin darlo por pedido.
   | { type: "startLead"; kind: LeadDraft["kind"]; service?: ServiceItem | null; offer?: boolean; intent: AuditIntent }
-  // Enviar la imagen del QR de pago (con este texto al pie) y avisar al asesor,
-  // sin pausar el bot.
+  // Enviar la imagen del QR de pago (con este texto al pie), sin alarma y sin
+  // pausar el bot: el comprobante es lo que le llega al asesor.
   | { type: "sendQr"; caption: string; intent: AuditIntent }
   // Un signo que puede ser grave o no: se pregunta una sola vez si es urgente.
   | { type: "askUrgency"; text: string; intent: AuditIntent }
@@ -455,7 +455,7 @@ export function decideAction(input: RoutingInput): Action {
     return { type: "escalate", kind: "consulta_cita", reply: TO_ADVISOR_REPLY, intent: "consulta_cita" };
   }
   // Pide el QR: se le envía (decisión de la clínica, 2026-10-03: solo cuando el
-  // paciente lo pide) y queda la alarma para que un asesor verifique el pago.
+  // paciente lo pide), sin alarma: el comprobante queda en el panel cuando paga.
   // Sin imagen cargada, como antes: lo manda el asesor.
   if (clinic.qrRequestIntentPatterns.test(text)) {
     return clinic.qrImageUrl

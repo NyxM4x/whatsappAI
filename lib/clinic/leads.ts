@@ -37,6 +37,7 @@ import {
   localDateISO,
   localNow,
   quoteConsultation,
+  weekdayOfDate,
 } from "@/lib/clinic/pricing";
 import { dateConflictQuestion, longDate, readDateMention, shortDayLabel } from "@/lib/clinic/dates";
 import {
@@ -633,6 +634,42 @@ export function applyPediatricAgeLimit(draft: LeadDraft): { draft: LeadDraft; no
   };
 }
 
+// ─── Avisos de horario por médico ────────────────────────────────────────────
+// El bot no ofrece ni confirma horarios: eso lo hace el asesor. Pero cuando el
+// paciente pide a un médico en un momento en que la clínica ya nos dijo que NO
+// atiende, se le avisa en el resumen, para que no espere una hora que no existe.
+// El turno igual lo confirma el asesor.
+//
+// 2026-10-03: el Dr. Daguino los domingos y feriados atiende solo desde las
+// 19:00. Vale para él, no para toda Pediatría.
+const DOCTOR_SCHEDULE_NOTES: {
+  doctor: RegExp;
+  // Días en que rige la restricción: 0=domingo … 6=sábado, y si incluye feriados.
+  weekdays: number[];
+  holidays: boolean;
+  from: string; // "HH:MM": antes de esta hora no atiende
+  note: string;
+}[] = [
+  {
+    doctor: /daguino/i,
+    weekdays: [0],
+    holidays: true,
+    from: "19:00",
+    note: "ℹ️ El Dr. Daguino los domingos y feriados atiende desde las 19:00. El asesor le confirma el horario.",
+  },
+];
+
+export function doctorScheduleNotes(draft: LeadDraft, holidays: readonly string[] = []): string[] {
+  if (!draft.doctorPreference || !draft.preferredDate) return [];
+  const date = draft.preferredDate;
+  return DOCTOR_SCHEDULE_NOTES.filter((rule) => {
+    if (!rule.doctor.test(draft.doctorPreference ?? "")) return false;
+    const restrictedDay = rule.weekdays.includes(weekdayOfDate(date)) || (rule.holidays && isHoliday(date, holidays));
+    // Sin hora pedida se avisa igual; con hora, solo si cae antes del inicio.
+    return restrictedDay && (!draft.preferredHour || draft.preferredHour < rule.from);
+  }).map((rule) => rule.note);
+}
+
 // ─── Datos de la solicitud ───────────────────────────────────────────────────
 
 type Field = "specialty" | "name" | "age" | "time" | "visit";
@@ -926,6 +963,7 @@ function buildSummary(draft: LeadDraft, clinic: ClinicConfig): { text: string; p
       : null,
     "",
     ...price.lines,
+    ...doctorScheduleNotes(draft, clinic.holidayDates),
     ...(draft.kind === "ficha"
       ? promoMentions(clinic.services, draft.specialtyKey, localDateISO(new Date(), clinic.timezone))
       : []),

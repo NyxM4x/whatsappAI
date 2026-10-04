@@ -22,7 +22,7 @@ if (existsSync(".env.local")) {
 
 const { getClinicConfig } = await import("../lib/clinic/config");
 const { decideAction, isEmergencyText } = await import("../lib/clinic/routing");
-const { analysisForLocationFollowup, answerKnownLeadQuestion, hasPriceDispute, looksLikeName, mergeAnalysis, needsVisitType, visitTypeFromText, readAge, applyPediatricAgeLimit, missingFields } = await import("../lib/clinic/leads");
+const { analysisForLocationFollowup, answerKnownLeadQuestion, hasPriceDispute, looksLikeName, mergeAnalysis, needsVisitType, visitTypeFromText, readAge, applyPediatricAgeLimit, missingFields, doctorScheduleNotes } = await import("../lib/clinic/leads");
 
 import type { TurnAnalysis } from "../lib/clinic/leads";
 import type { BookingStep, LeadDraft } from "../lib/clinic/types";
@@ -1085,6 +1085,26 @@ for (const [nombre, draft, texto, esperado] of DISPUTAS) {
 const valeOk = answerKnownLeadQuestion({ kind: "ficha", specialtyKey: "medicina-general" }, clinic, "vale, mañana a las 10");
 if (valeOk !== null) failures++;
 console.log(`  ${valeOk === null ? "✓" : "✗"} "vale, mañana a las 10" no es pregunta de precio`);
+
+// ─── Aviso de horario del Dr. Daguino (domingos y feriados desde las 19:00) ──
+// 2026-10-04 es domingo; 2026-10-05, lunes.
+console.log("\nAVISO DE HORARIO POR MÉDICO\n");
+const DAGUINO = "Dr. Miguel Edgar Daguino Delgadillo";
+const AVISOS: [string, LeadDraft, string[], boolean][] = [
+  ["domingo 10:00 con el Dr. Daguino → avisa", { kind: "ficha", doctorPreference: DAGUINO, preferredDate: "2026-10-04", preferredHour: "10:00" }, [], true],
+  ["domingo sin hora con el Dr. Daguino → avisa", { kind: "ficha", doctorPreference: DAGUINO, preferredDate: "2026-10-04" }, [], true],
+  ["domingo 19:30 con el Dr. Daguino → no hace falta", { kind: "ficha", doctorPreference: DAGUINO, preferredDate: "2026-10-04", preferredHour: "19:30" }, [], false],
+  ["lunes 10:00 con el Dr. Daguino → no aplica", { kind: "ficha", doctorPreference: DAGUINO, preferredDate: "2026-10-05", preferredHour: "10:00" }, [], false],
+  ["lunes feriado 10:00 con el Dr. Daguino → avisa", { kind: "ficha", doctorPreference: DAGUINO, preferredDate: "2026-10-05", preferredHour: "10:00" }, ["2026-10-05"], true],
+  ["domingo 10:00 con otro médico → no aplica", { kind: "ficha", doctorPreference: "Dra. Rosmery Medina", preferredDate: "2026-10-04", preferredHour: "10:00" }, [], false],
+  ["domingo 10:00 sin médico de preferencia → no aplica", { kind: "ficha", specialtyKey: "pediatria", preferredDate: "2026-10-04", preferredHour: "10:00" }, [], false],
+];
+for (const [nombre, draft, feriados, esperado] of AVISOS) {
+  const notas = doctorScheduleNotes(draft, feriados);
+  const ok = (notas.length > 0) === esperado && (!esperado || /desde las 19:00/.test(notas[0]));
+  if (!ok) failures++;
+  console.log(`  ${ok ? "✓" : "✗"} ${nombre}`);
+}
 
 // ─── Edad en pediatría (hasta los 12 años, 2026-10-03) ──────────────────────
 console.log("\nEDAD EN PEDIATRÍA\n");

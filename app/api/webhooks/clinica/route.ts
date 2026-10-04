@@ -607,10 +607,11 @@ export async function POST(request: Request) {
       return ok(action.intent);
     }
 
-    // El QR se envía y queda la alarma de pago para que un asesor verifique; el
-    // bot sigue atendiendo (sin pausa) y la sesión no se toca.
+    // El QR se envía sin alarma (decisión de la clínica, 2026-10-03): pedir el
+    // QR todavía no es un pago. Cuando llega el comprobante queda en la tabla de
+    // comprobantes del panel, que es donde el asesor lo verifica. El bot sigue
+    // atendiendo y la sesión no se toca.
     case "sendQr": {
-      await registerEscalation({ ...leadCtx, kind: "pago", lastMessage: newText, lead: session.draft.lead ?? null });
       await send(action.caption, { imageUrl: clinic.qrImageUrl ?? undefined });
       return ok(action.intent);
     }
