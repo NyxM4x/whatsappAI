@@ -59,7 +59,9 @@ const KIND_LABEL: Record<string, string> = {
   consulta_cita: "❓ Pregunta por su cita",
   pago: "💳 Quiere pagar",
   no_disponible: "🩺 Ficha (especialidad no catalogada)",
-  accion: "🔔 Pide que se le avise o confirme algo",
+  // Los avisos internos ("me confirma", "ya llegué") ya no llegan acá: lo que
+  // queda son preguntas de pacientes que un asesor tiene que responder.
+  accion: "🔔 Pregunta para un asesor",
 };
 
 const CLOSED_LABEL: Record<string, string> = {

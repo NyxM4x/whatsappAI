@@ -884,6 +884,18 @@ export async function isLatestInboundMessage(
 // al último outbound). Agrupa lo que el cliente escribió en mensajes seguidos
 // para poder responder una sola vez. Orden cronológico.
 export async function getUnansweredInboundText(conversationId: string): Promise<string> {
+  return (await getUnansweredInbound(conversationId)).text;
+}
+
+// Igual, pero además devuelve la hora del último mensaje leído y acepta un
+// "ya atendido hasta acá" (`handledUntil`). Hay mensajes que el bot atiende sin
+// responder (avisos internos como "me confirma" o "ya llegué"): sin esa marca
+// quedarían como "sin respuesta" para siempre y se pegarían al próximo mensaje
+// de esa persona, aunque llegue al día siguiente.
+export async function getUnansweredInbound(
+  conversationId: string,
+  handledUntil?: string | null,
+): Promise<{ text: string; lastAt: string | null }> {
   const supabase = getSupabaseClient();
 
   const { data: lastOut } = await supabase
@@ -902,20 +914,29 @@ export async function getUnansweredInboundText(conversationId: string): Promise<
     .eq("direction", "inbound")
     .order("created_at", { ascending: true });
 
-  if (lastOut?.created_at) {
-    query = query.gt("created_at", lastOut.created_at);
-  }
+  // Desde lo último que pasó: la última respuesta o el último aviso atendido
+  // en silencio, lo que sea más reciente.
+  const lastOutAt = lastOut?.created_at ? String(lastOut.created_at) : null;
+  const after =
+    lastOutAt && handledUntil
+      ? new Date(lastOutAt) > new Date(handledUntil) ? lastOutAt : handledUntil
+      : lastOutAt ?? handledUntil ?? null;
+  if (after) query = query.gt("created_at", after);
 
   const { data, error } = await query;
   if (error) {
-    console.error("getUnansweredInboundText failed", error);
-    return "";
+    console.error("getUnansweredInbound failed", error);
+    return { text: "", lastAt: null };
   }
 
-  return (data ?? [])
-    .map((m) => (m.content ?? "").trim())
-    .filter((t) => t.length > 0)
-    .join("\n");
+  const rows = data ?? [];
+  return {
+    text: rows
+      .map((m) => (m.content ?? "").trim())
+      .filter((t) => t.length > 0)
+      .join("\n"),
+    lastAt: rows.length ? String(rows[rows.length - 1].created_at) : null,
+  };
 }
 
 // ─── Ventana de servicio de WhatsApp (24h) ───────────────────────────────────

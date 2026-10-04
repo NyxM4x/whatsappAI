@@ -35,7 +35,7 @@ import {
   getBotPauseState,
   resumeBotIfPauseExpired,
   isLatestInboundMessage,
-  getUnansweredInboundText,
+  getUnansweredInbound,
   pauseBotForHumanHandoff,
   autoPauseBotFromBusinessApp,
 } from "@/lib/engine/data";
@@ -420,7 +420,9 @@ export async function POST(request: Request) {
   }
 
   // ── Texto consolidado: todo lo que el cliente escribió sin respuesta ──────
-  const gathered = await getUnansweredInboundText(conversationId);
+  // Lo que ya se atendió en silencio (avisos internos) no vuelve a entrar.
+  const unanswered = await getUnansweredInbound(conversationId, emergencySession.draft.handledUntil ?? null);
+  const gathered = unanswered.text;
   const newText = (
     gathered.trim()
       ? gathered
@@ -662,6 +664,29 @@ export async function POST(request: Request) {
         analysis,
       });
       await send(result.reply, { pauseAfter: result.pauseAfterReply });
+      return ok(action.intent);
+    }
+
+    // Aviso interno: ni respuesta ni alarma. Se anota hasta dónde se leyó para
+    // que este mensaje no se pegue al próximo de esa persona, y se cierra el
+    // lock para que un reintento de Kapso no lo vuelva a procesar.
+    case "silent": {
+      // Una oferta pendiente ya se descartó arriba: no se la revive al guardar.
+      const kept = pendingOffer
+        ? { step: "idle" as const, draft: { failedAttempts: tracked.session.draft.failedAttempts } }
+        : { step: tracked.session.step, draft: tracked.session.draft };
+      await saveBookingSession({
+        conversationId,
+        business: clinic.slug,
+        step: kept.step,
+        draft: { ...kept.draft, handledUntil: unanswered.lastAt ?? new Date().toISOString() },
+      });
+      await markReplyLockSent({
+        lastMessageId: lastMessage.messageId,
+        conversationId,
+        phone: contactPhone,
+        responseText: "(aviso interno: sin respuesta)",
+      });
       return ok(action.intent);
     }
 

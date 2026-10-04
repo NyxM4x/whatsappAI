@@ -51,6 +51,9 @@ export type Action =
   | { type: "cancelOffer"; intent: AuditIntent }
   // Seguir una solicitud ya empezada.
   | { type: "continueLead"; intent: AuditIntent }
+  // No responder ni levantar alarma: un aviso interno ("me confirma", "ya
+  // llegué"). Solo queda anotado en la auditoría.
+  | { type: "silent"; intent: AuditIntent }
   // Q&A libre con el prompt de la clínica.
   | { type: "qa"; intent: AuditIntent };
 
@@ -195,7 +198,7 @@ function asksForDosing(text: string): boolean {
 // gestión. "Llegando" suelto tampoco ("¿a qué hora están llegando los
 // doctores?"): solo "estoy llegando".
 const HUMAN_ACTION_PATTERN =
-  /\bme\s+(?:puede\s+)?(?:confirm\w*|avis\w*|pasar\s+(?:su\s+)?n[uú]mero)\b|\bconf[ií]rmeme\b|\bav[ií]s[ea]le\b|\bd[ií][gc]ale\b|\bd[ií]cele\b|\bme\s+lo\s+dice\s+(?:a\s+)?(?:la\s+|el\s+)?(?:licen\w*|doctora?|dra|dr|m[eé]dic[oa]|enfermer[oa])\b|\bhable\s+con\b|\bqu[eé]\s+n[uú]mero\s+(?:soy|me\s+toc[oó])\b|\bya\s+llegu[eé](?=\W|$)|\b(?:ya\s+)?estoy\s+llegando\b|\bestoy\s+(?:aqu[ií]|afuera|en\s+camino|en\s+la\s+puerta|en\s+recepci[oó]n)\b/i;
+  /\bme\s+(?:puede\s+)?(?:confirm\w*|avis\w*|pasar\s+(?:su\s+)?n[uú]mero)\b|\bconf[ií]rmeme\b|\bconfirm[oa]\s+(?:a\s+)?(?:la|el|al)\s+paciente\b|\bav[ií]s[ea]le\b|\bd[ií][gc]ale\b|\bd[ií]cele\b|\bme\s+lo\s+dice\s+(?:a\s+)?(?:la\s+|el\s+)?(?:licen\w*|doctora?|dra|dr|m[eé]dic[oa]|enfermer[oa])\b|\bhable\s+con\b|\bqu[eé]\s+n[uú]mero\s+(?:soy|me\s+toc[oó])\b|\bya\s+llegu[eé](?=\W|$)|\b(?:ya\s+)?estoy\s+llegando\b|\bestoy\s+(?:aqu[ií]|afuera|en\s+camino|en\s+la\s+puerta|en\s+recepci[oó]n)\b/i;
 const INFO_QUESTION = /\b(?:precio|cu[aá]nto|costo|cuesta|tarifa|horarios?|a\s+qu[eé]\s+hora|qu[eé]\s+d[ií]as?)\b/i;
 
 export function asksHumanAction(text: string): boolean {
@@ -385,13 +388,8 @@ export function decideAction(input: RoutingInput): Action {
     if (analysis?.wantsHuman) {
       return { type: "escalate", kind: "humano", reply: clinic.replies.humanHandoff, intent: "handoff_humano" };
     }
-    // Una gestión ("me confirma", "ya llegué") se deriva, salvo que esté
-    // confirmando el resumen o dando sus datos: ahí el "me confirma" es parte de
-    // la solicitud y la alarma ya la levanta la ficha.
-    const givesLeadData = Boolean(analysis?.confirms || analysis?.patientName || analysis?.preferredTime);
-    if (asksHumanAction(text) && !givesLeadData) {
-      return { type: "escalate", kind: "accion", reply: ACTION_REPLY, intent: "accion" };
-    }
+    // Un "me confirma" en medio de una solicitud no la interrumpe: sigue la
+    // recolección o la confirmación, y la alarma la levanta la ficha.
 
     // Una OFERTA pendiente no es una solicitud aceptada. El paciente solo
     // preguntó si teníamos algo; que el bot se haya ofrecido a averiguarlo no
@@ -538,13 +536,15 @@ export function decideAction(input: RoutingInput): Action {
     return { type: "startLead", kind: "ficha", intent: "ficha" };
   }
 
-  // ── 11. Red de seguridad: pide una gestión, no información ────────────────
+  // ── 11. Avisos internos: "me confirma", "ya llegué", "dígale a la doctora" ─
+  // Casi siempre los escribe personal de la clínica al número del bot, no un
+  // paciente. No se responden ni levantan alarma (decisión de la clínica,
+  // 2026-10-03): antes sonaban en el panel y pausaban el bot por cada uno.
   // Va después de servicio y ficha para no robarle mensajes a la recolección
-  // ("quiero una ficha, me confirma"), y antes del Q&A, que es donde el bot
-  // contestaba "Ok" sin que nadie se enterara.
+  // ("quiero una ficha, me confirma"), y antes del Q&A, que les contestaba "Ok".
   // Con el modelo caído decide el mismo detector que el análisis suma al suyo.
   if (analysis ? analysis.needsHumanAction : asksHumanAction(text)) {
-    return { type: "escalate", kind: "accion", reply: ACTION_REPLY, intent: "accion" };
+    return { type: "silent", intent: "accion" };
   }
 
   if (text && AMBIGUOUS_PELADA_PATTERN.test(text) && !CLEAR_PELADA_CONTEXT.test(text)) {
@@ -570,8 +570,9 @@ const DOSING_REPLY =
 const QR_CAPTION =
   "Este es el QR de pago de la clínica 😊 Cuando pague, envíeme el comprobante por aquí y un asesor lo verifica.";
 const PAYMENT_REPLY ="Los datos de pago se los envía un asesor de la clínica cuando confirme su ficha o servicio 🙏 Ya le aviso para que le escriba por aquí.";
-const ACTION_REPLY = "Entendido 🙏 Eso se lo tiene que confirmar una persona de la clínica: ya le aviso para que le escriba por aquí en un momento.";
-const RESULT_REPLY = "Su resultado se lo confirma un asesor de la clínica 🙏 Ya le aviso para que le escriba por aquí.";
+// "¿Ya está mi resultado?" casi siempre lo pregunta un paciente: a ese sí se le
+// responde, y la pregunta llega al panel para que un asesor conteste.
+const RESULT_REPLY = "Acabamos de enviar su pregunta a un asesor para que le responda lo antes posible 🙏";
 const NO_CAPTURE_REPLY =
   "Entiendo, no le pediré datos para una ficha 🙏 Un asesor de la clínica le confirmará si realizamos ese servicio y su precio.";
 const PRICE_REVIEW_REPLY =

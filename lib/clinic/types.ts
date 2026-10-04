@@ -115,6 +115,10 @@ export type BookingDraft = {
   // El bot preguntó "¿Es urgente?" por un signo dudoso ("muy decaído"). Vale
   // un turno: "sí" lo convierte en emergencia.
   urgencyCheck?: boolean;
+  // Hora (ISO, de la base) del último mensaje que el bot atendió SIN responder:
+  // avisos internos como "me confirma" o "ya llegué". Lo anterior a esa hora ya
+  // no cuenta como "sin respuesta" (ver getUnansweredInbound).
+  handledUntil?: string;
   // Momentos (ISO) en que el paciente dijo que no se le está ayudando. Al llegar
   // a 3 dentro de la ventana, el bot deriva a una persona.
   failedAttempts?: string[];

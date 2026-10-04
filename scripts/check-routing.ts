@@ -156,11 +156,31 @@ const CASES: Case[] = [
     analysis: null,
     expect: { type: "qa" },
   },
+  // Caso real del panel (2026-10-03): lo escribió personal de la clínica al
+  // número del bot y sonó una alarma que quedó 7 horas sin atender.
   {
-    name: "'ya estoy llegando' sí es una gestión",
+    name: "aviso interno real ('Confirmo la paciente… para las 4?') → silencio",
+    text: "Licen buenas tardes. Confirmo la paciente Jhoselin Días rodas para las 4?",
+    analysis: null,
+    expect: { type: "silent", intent: "accion" },
+  },
+  {
+    name: "lo mismo cuando el modelo lo marca como gestión",
+    text: "Licen buenas tardes. Confirmo la paciente Jhoselin Días rodas para las 4?",
+    analysis: analysis({ needsHumanAction: true, isQuestion: true }),
+    expect: { type: "silent", intent: "accion" },
+  },
+  {
+    name: "'¿ya está mi resultado?' es de un paciente → se le responde y llega a un asesor",
+    text: "¿ya está mi resultado?",
+    analysis: null,
+    expect: { type: "escalate", kind: "accion", intent: "resultado", pause: false },
+  },
+  {
+    name: "'ya estoy llegando' es un aviso interno → silencio",
     text: "ya estoy llegando",
     analysis: null,
-    expect: { type: "escalate", kind: "accion" },
+    expect: { type: "silent", intent: "accion" },
   },
   {
     name: "confirma el resumen con 'me confirma' → confirma, no deriva",
@@ -806,16 +826,16 @@ const CASES: Case[] = [
 
   // ── Red de seguridad y cajón de sastre ────────────────────────────────────
   {
-    name: "pide una gestión → alarma, no 'Ok'",
+    name: "aviso interno ('me confirma') → silencio: ni respuesta ni alarma",
     text: "Me confirma",
     analysis: analysis({ needsHumanAction: true }),
-    expect: { type: "escalate", kind: "accion", intent: "accion" },
+    expect: { type: "silent", intent: "accion" },
   },
   {
-    name: "me confirma con análisis caído → alarma",
+    name: "me confirma con análisis caído → silencio",
     text: "Me confirma por favor",
     analysis: null,
-    expect: { type: "escalate", kind: "accion", intent: "accion" },
+    expect: { type: "silent", intent: "accion" },
   },
   {
     name: "me dice el precio con análisis caído → no deriva",
@@ -824,29 +844,29 @@ const CASES: Case[] = [
     expect: { type: "qa" },
   },
   {
-    name: "ya llegué con análisis caído → alarma",
+    name: "ya llegué con análisis caído → silencio",
     text: "Ya llegué a la clínica",
     analysis: null,
-    expect: { type: "escalate", kind: "accion", intent: "accion" },
+    expect: { type: "silent", intent: "accion" },
   },
   {
-    name: "llegué durante una ficha con análisis caído → alarma",
+    name: "llegué durante una ficha con análisis caído → sigue la ficha",
     text: "Ya llegué",
     analysis: null,
     step: "collecting_lead",
-    expect: { type: "escalate", kind: "accion", intent: "accion" },
+    expect: { type: "continueLead" },
   },
   {
-    name: "me lo dice a la licenciada con análisis caído → alarma",
+    name: "me lo dice a la licenciada con análisis caído → silencio",
     text: "Me lo dice a la licenciada por favor",
     analysis: null,
-    expect: { type: "escalate", kind: "accion", intent: "accion" },
+    expect: { type: "silent", intent: "accion" },
   },
   {
-    name: "dígale a la doctora con análisis caído → alarma",
+    name: "dígale a la doctora con análisis caído → silencio",
     text: "Dígale a la doctora que ya llegué",
     analysis: null,
-    expect: { type: "escalate", kind: "accion", intent: "accion" },
+    expect: { type: "silent", intent: "accion" },
   },
   {
     name: "pregunta general → Q&A",
@@ -1122,6 +1142,10 @@ const emergencia = decide("mi bebé tuvo una convulsión");
 const emergenciaOk = emergencia.type === "escalate" && emergencia.reply === clinic.emergencyResponse && !/¿/.test(emergencia.reply);
 if (!emergenciaOk) failures++;
 console.log(`  ${emergenciaOk ? "✓" : "✗"} emergencia: texto de la clínica, sin preguntas`);
+const resultado = decide("¿ya está mi resultado?");
+const resultadoOk = resultado.type === "escalate" && /enviar su pregunta a un asesor/i.test(resultado.reply) && /lo antes posible/i.test(resultado.reply);
+if (!resultadoOk) failures++;
+console.log(`  ${resultadoOk ? "✓" : "✗"} resultado: "acabamos de enviar su pregunta a un asesor…"`);
 
 // La detección temprana del webhook (antes de esperar y de llamar al modelo).
 console.log("\n¿EMERGENCIA? (detección temprana)\n");
