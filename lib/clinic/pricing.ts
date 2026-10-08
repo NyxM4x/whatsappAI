@@ -99,7 +99,8 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
     aliases: ["ginecologo", "ginecologa", "ginecolog", "gineco", "obstetra", "obstetricia"],
   },
   // Especialidades con precio en el tarifario de la clínica: precio único.
-  { key: "cardiologia", name: "Cardiología", price: 150, aliases: ["cardiologo", "cardiologa", "cardiolog", "del corazon"] },
+  // Cardiología: 170 Bs desde el 2026-10-08 (antes 150, pedido de la clínica).
+  { key: "cardiologia", name: "Cardiología", price: 170, aliases: ["cardiologo", "cardiologa", "cardiolog", "del corazon"] },
   { key: "cirugia-general", name: "Cirugía General", price: 150, aliases: ["cirujano", "cirujano general", "cirugia"] },
   { key: "cirugia-pediatrica", name: "Cirugía Pediátrica", price: 150, aliases: ["cirujano pediatra", "cirugia de niños"] },
   { key: "cirugia-plastica", name: "Cirugía Plástica", price: 350, aliases: ["cirujano plastico", "cirugia estetica"] },

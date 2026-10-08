@@ -25,7 +25,8 @@ export type ServiceCategory =
   | "ecografia"
   | "enfermeria"
   | "certificado"
-  | "obstetricia";
+  | "obstetricia"
+  | "internacion";
 
 // Franja en que rige una promoción: 0=domingo … 6=sábado; "HH:MM", desde
 // inclusive y hasta exclusive (igual que las tarifas de consulta).
@@ -75,6 +76,7 @@ export const SERVICE_CATEGORY_LABELS: Record<ServiceCategory, string> = {
   enfermeria: "ENFERMERÍA",
   certificado: "CERTIFICADOS",
   obstetricia: "PARTOS Y CESÁREAS",
+  internacion: "INTERNACIÓN",
 };
 
 export const SERVICE_CATEGORY_ORDER: ServiceCategory[] = [
@@ -84,6 +86,7 @@ export const SERVICE_CATEGORY_ORDER: ServiceCategory[] = [
   "enfermeria",
   "certificado",
   "obstetricia",
+  "internacion",
 ];
 
 export const defaultServices: ServiceItem[] = [
@@ -93,7 +96,7 @@ export const defaultServices: ServiceItem[] = [
   { name: "Consulta de emergencia (medicina general)", price: 80, category: "emergencia", aliases: ["consulta de emergencia", "emergencia general"] },
   { name: "Consulta por accidente de tránsito", price: 150, category: "emergencia", aliases: ["transito", "accidente de transito", "certificado de transito", "examen de transito"] },
   { name: "Consulta ginecológica de emergencia a llamado", price: 200, category: "emergencia", aliases: ["ginecologia de emergencia", "emergencia ginecologica"] },
-  { name: "Consulta de emergencia de cardiología", price: 150, category: "emergencia", aliases: ["emergencia cardiologica", "emergencia de cardiologia"] },
+  { name: "Consulta de emergencia de cardiología", price: 200, category: "emergencia", aliases: ["emergencia cardiologica", "emergencia de cardiologia"] },
   { name: "Consulta de emergencia de cirugía", price: 250, category: "emergencia", aliases: ["emergencia de cirugia", "emergencia quirurgica"] },
   { name: "Consulta de emergencia de traumatología", price: 250, category: "emergencia", aliases: ["emergencia de traumatologia", "emergencia traumatologica"] },
   { name: "Consulta de emergencia de urología", price: 150, category: "emergencia", aliases: ["emergencia de urologia", "emergencia urologica"] },
@@ -209,6 +212,26 @@ export const defaultServices: ServiceItem[] = [
   { name: "Cesárea programada", price: 4000, category: "obstetricia", aliases: ["cesarea programada", "cesarea", "cesaria"] },
   { name: "Cesárea de emergencia", price: 4200, category: "obstetricia", aliases: ["cesarea de emergencia", "cesaria de emergencia"] },
   { name: "Ligadura", price: 400, category: "obstetricia", aliases: ["ligadura de trompas", "ligarme"] },
+
+  // ── Internación ─────────────────────────────────────────────────────────
+  // Precio por día, confirmado por la clínica el 2026-10-08: el primer día
+  // cuesta más y desde el segundo se cobra la tarifa diaria. Medicamentos y
+  // laboratorio van aparte. Los alias nombran la sala a propósito: "internación"
+  // a secas no elige ninguna y sigue al Q&A, que tiene las dos en el tarifario.
+  {
+    name: "Internación en sala común",
+    price: 320,
+    category: "internacion",
+    note: "el primer día; desde el segundo día, 270 Bs por día. Medicamentos y laboratorio se cobran aparte",
+    aliases: ["sala comun", "sala compartida", "sala general", "habitacion compartida", "cuarto compartido"],
+  },
+  {
+    name: "Internación en sala privada",
+    price: 750,
+    category: "internacion",
+    note: "el primer día; desde el segundo día, 700 Bs por día. Medicamentos y laboratorio se cobran aparte",
+    aliases: ["sala privada", "sala personal", "sala individual", "habitacion privada", "cuarto privado", "habitacion individual"],
+  },
 ];
 
 // La promo del servicio si rige el día dado ("YYYY-MM-DD"), o null.
@@ -247,6 +270,10 @@ export function formatServicePrice(service: ServiceItem, day: string): string {
 // corresponde; un feriado se cobra como fin de semana.
 const WEEKEND_SUFFIX = " fin de semana";
 
+export function isWeekendVariant(service: ServiceItem): boolean {
+  return service.name.endsWith(WEEKEND_SUFFIX);
+}
+
 export function serviceForDay(
   service: ServiceItem,
   services: ServiceItem[],
@@ -254,7 +281,7 @@ export function serviceForDay(
   holidays: readonly string[] = [],
 ): ServiceItem {
   const weekend = [0, 6].includes(weekdayOfDate(date)) || holidays.includes(date);
-  const baseName = service.name.endsWith(WEEKEND_SUFFIX) ? service.name.slice(0, -WEEKEND_SUFFIX.length) : service.name;
+  const baseName = isWeekendVariant(service) ? service.name.slice(0, -WEEKEND_SUFFIX.length) : service.name;
   const wanted = weekend ? `${baseName}${WEEKEND_SUFFIX}` : baseName;
   return services.find((s) => s.name === wanted) ?? service;
 }

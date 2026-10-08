@@ -44,6 +44,7 @@ import {
   activePromo,
   editDistance,
   formatServicePrice,
+  isWeekendVariant,
   matchService,
   mentionsOffCatalogRequest,
   promoIntro,
@@ -830,8 +831,10 @@ function priceLines(draft: LeadDraft, clinic: ClinicConfig): { lines: string[]; 
 
     // Si la promo venció entre la apertura y el resumen, el precio guardado ya
     // no vale: se recalcula con el regular. En feriado, la nota de la variante
-    // ("sábado y domingo") confundiría: se dice que es feriado.
-    const note = service && isHoliday(day, holidays) && draft.preferredDate
+    // ("sábado y domingo") confundiría: se dice que es feriado. Una nota que no
+    // depende del día (la de la internación: precio desde el segundo día) se
+    // conserva.
+    const note = service && (!service.note || isWeekendVariant(service)) && isHoliday(day, holidays) && draft.preferredDate
       ? " (feriado)"
       : service?.note ? ` (${service.note})` : "";
     const serviceQuote = service ? formatServicePrice(service, day) + note : draft.serviceQuote;

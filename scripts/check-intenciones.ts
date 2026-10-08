@@ -121,6 +121,10 @@ for (const [frase, esperaEmergencia] of [
   ["hacen nebulisaciones?", false],
   ["tengo la una encarnada", false],
   [`me quiero sacar la u${"n\u0303"}a del pie`, false],
+  ["cuanto cuesta la sala privada", false],
+  ["quiero internarla en sala comun", false],
+  ["tienen sala compartida", false],
+  ["emergencia de cardiologia", true],
 ] as const) {
   const s = matchService(frase, clinic.services);
   if (!s) {
