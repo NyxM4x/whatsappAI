@@ -54,7 +54,7 @@ const CASES: Expectation[] = [
   // Desde 2026-09-17 esto YA NO se rechaza ("no contamos con X"): no sabemos
   // si la clínica la ofrece o no, solo que no está cargada acá. Se recopila
   // igual (wantsLead: true en los pedidos directos) y un asesor confirma.
-  { text: "Para fisioterapia", unavailable: true, specialtyKey: null, action: "startLead" },
+  { text: "Para nutricion", unavailable: true, specialtyKey: null, action: "startLead" },
   { text: "buenas, hacen odontologia?", unavailable: true, specialtyKey: null },
   { text: "necesito un oftalmologo para mi mama", unavailable: true, specialtyKey: null, action: "startLead" },
   { text: "quiero una ficha para rehabilitacion de rodilla", unavailable: true, specialtyKey: null, action: "startLead" },
@@ -74,8 +74,8 @@ const CASES: Expectation[] = [
   // tengo registrados". Desde este caso, mentionsOffCatalogRequest() marca
   // unavailableRequest por código aunque el modelo no lo haga: no depende de
   // que el modelo tenga criterio.
-  { text: "Por favor el precio de la Radiografía", unavailable: true, specialtyKey: null },
-  { text: "radiografia de pie cuanto sale", unavailable: true, specialtyKey: null },
+  { text: "Por favor el precio de la Tomografía", unavailable: true, specialtyKey: null },
+  { text: "resonancia de rodilla cuanto sale", unavailable: true, specialtyKey: null },
   { text: "necesito una tomografia, cuanto cuesta?", unavailable: true, specialtyKey: null },
 
   // ── Gestiones que solo hace una persona (antes contestaba "Ok") ───────────

@@ -86,23 +86,23 @@ const CASES: Case[] = [
     },
   },
   {
-    name: "sí reporta correctamente un precio real (hemograma = 80 Bs)",
+    name: "sí reporta correctamente un precio real (hemograma = 72 Bs)",
     prompt: "¿Cuánto cuesta el hemograma completo?",
     check: (reply) => {
       const r = lc(reply);
       if (!/80\s*bs/.test(r)) {
-        return "no mencionó el precio real (80 Bs) para un examen que sí está en el catálogo";
+        return "no mencionó el precio real (72 Bs) para un examen que sí está en el catálogo";
       }
       return null;
     },
   },
   {
-    name: "sí reporta correctamente un precio del tarifario (ecografía abdominal = 100 Bs)",
+    name: "sí reporta correctamente un precio del tarifario (ecografía abdominal = 120 Bs)",
     prompt: "¿Cuánto cuesta una ecografía abdominal?",
     check: (reply) => {
       const r = lc(reply);
       if (!/100\s*bs/.test(r)) {
-        return "no mencionó el precio real (100 Bs) de un servicio que sí está en el tarifario";
+        return "no mencionó el precio real (120 Bs) de un servicio que sí está en el tarifario";
       }
       return null;
     },

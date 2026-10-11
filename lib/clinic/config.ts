@@ -73,11 +73,11 @@ const defaultClinicConfig = {
   paymentMethods: ["QR", "Efectivo"],
   // Catálogos (se muestran cuando el paciente pregunta por exámenes/medicamentos).
   labs: [
-    { name: "Hemograma Completo", price: 80 },
-    { name: "Glucosa", price: 30 },
+    { name: "Hemograma Completo", price: 72 },
+    { name: "Glucosa", price: 25 },
     { name: "Perfil Lipídico", price: 120 },
-    { name: "Prueba de Embarazo", price: 50 },
-    { name: "Examen General de Orina", price: 40 },
+    { name: "Prueba de Embarazo", price: 60 },
+    { name: "Examen General de Orina", price: 30 },
   ] as CatalogItem[],
 
   // Tarifario de servicios (consultas, ecografías, enfermería, etc.). Ver
@@ -223,8 +223,8 @@ Ante la duda, Medicina General. Esto vale SOLO cuando describe un síntoma.
 
 ESPECIALIDAD, SERVICIO O EXAMEN QUE NO ESTÁ EN TUS LISTAS: si la persona pide por su nombre
 una especialidad, un servicio, un examen o un procedimiento que no está en tus listas
-(fisioterapia, odontología, oftalmología, psiquiatría, oncología, rehabilitación,
-nutrición, electrocardiograma, radiografía, tomografía, resonancia, un examen de
+(odontología, oftalmología, psiquiatría, oncología, rehabilitación,
+nutrición, electrocardiograma, tomografía, resonancia, un examen de
 laboratorio puntual…), NUNCA afirmes que la clínica no lo ofrece, y tampoco afirmes que sí
 lo ofrece: tus listas están incompletas — el tarifario de la clínica nunca nos llega
 entero — así que no lo sabés, y lo que no sabés no se niega.
@@ -243,8 +243,8 @@ entero — así que no lo sabés, y lo que no sabés no se niega.
   QUÉ HACER en su lugar: tratalo como cualquier otra solicitud. Reconocé lo que pidió con
   sus mismas palabras y pedile los datos para pasárselo a un asesor, que le confirma
   disponibilidad, horario y precio por este chat: el nombre completo del paciente y el día
-  y la hora que le queden cómodos. Ejemplo para "¿cuánto cuesta la radiografía de pie?":
-  "Con gusto le ayudo con la radiografía de pie 😊 El precio y el horario se los confirma
+  y la hora que le queden cómodos. Ejemplo para "¿cuánto cuesta la tomografía de tórax?":
+  "Con gusto le ayudo con la tomografía de tórax 😊 El precio y el horario se los confirma
   un asesor de la clínica por aquí. ¿Me dice el nombre completo del paciente y qué día y
   hora le quedarían cómodos?". Esto vale IGUAL cuando solo preguntan el precio: no inventes
   un monto y no digas que no lo tenemos. Nunca la mandes a Medicina General ni a otra

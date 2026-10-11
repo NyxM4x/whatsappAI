@@ -89,18 +89,21 @@ export const SERVICE_CATEGORY_ORDER: ServiceCategory[] = [
   "internacion",
 ];
 
+// Precios del tarifario del sistema de la clínica del 2026-10-11
+// (CSMDP-RptServicio), salvo donde un comentario diga otra fuente.
 export const defaultServices: ServiceItem[] = [
   // ── Consultas de emergencia (tarifario de la clínica) ─────────────────────
   // Se informan pero no abren una solicitud: la emergencia no espera a que un
   // asesor confirme un horario.
   { name: "Consulta de emergencia (medicina general)", price: 80, category: "emergencia", aliases: ["consulta de emergencia", "emergencia general"] },
-  { name: "Consulta por accidente de tránsito", price: 150, category: "emergencia", aliases: ["transito", "accidente de transito", "certificado de transito", "examen de transito"] },
-  { name: "Consulta ginecológica de emergencia a llamado", price: 200, category: "emergencia", aliases: ["ginecologia de emergencia", "emergencia ginecologica"] },
-  { name: "Consulta de emergencia de cardiología", price: 200, category: "emergencia", aliases: ["emergencia cardiologica", "emergencia de cardiologia"] },
-  { name: "Consulta de emergencia de cirugía", price: 250, category: "emergencia", aliases: ["emergencia de cirugia", "emergencia quirurgica"] },
-  { name: "Consulta de emergencia de traumatología", price: 250, category: "emergencia", aliases: ["emergencia de traumatologia", "emergencia traumatologica"] },
-  { name: "Consulta de emergencia de urología", price: 150, category: "emergencia", aliases: ["emergencia de urologia", "emergencia urologica"] },
-
+  { name: "Consulta por accidente de tránsito", price: 170, category: "emergencia", aliases: ["transito", "accidente de transito", "certificado de transito", "examen de transito"] },
+  { name: "Consulta ginecológica de emergencia a llamado", price: 250, category: "emergencia", aliases: ["ginecologia de emergencia", "emergencia ginecologica"] },
+  // Cardiología de emergencia: 200 Bs desde el 2026-10-08 y 250 en el tarifario
+  // del 2026-10-11, que es el que rige.
+  { name: "Consulta de emergencia de cardiología", price: 250, category: "emergencia", aliases: ["emergencia cardiologica", "emergencia de cardiologia"] },
+  { name: "Consulta de emergencia de cirugía", price: 290, category: "emergencia", aliases: ["emergencia de cirugia", "emergencia quirurgica"] },
+  { name: "Consulta de emergencia de traumatología", price: 370, category: "emergencia", aliases: ["emergencia de traumatologia", "emergencia traumatologica"] },
+  { name: "Consulta de emergencia de urología", price: 330, category: "emergencia", aliases: ["emergencia de urologia", "emergencia urologica"] },
   // ── Procedimientos ──────────────────────────────────────────────────────
   // Campaña de Facebook "PAPANICOLAO 50% DESCUENTO" (datos confirmados por la
   // clínica el 2026-09-21). Los 50 Bs cubren la toma y el análisis; leer el
@@ -114,7 +117,7 @@ export const defaultServices: ServiceItem[] = [
   // "tengo cáncer de cuello uterino" y le mandaría la promo a quien no la pidió.
   {
     name: "Papanicolaou",
-    price: 100,
+    price: 120,
     category: "procedimiento",
     aliases: [
       "papanicol", "papa nicolau", "papa nicolao", "papa nicolaou", "papanikol", "papinicol", "pananicol", "pap", "pap test", "citologia",
@@ -152,58 +155,89 @@ export const defaultServices: ServiceItem[] = [
       mentionWithSpecialty: "ginecologia",
     },
   },
-  { name: "Colocación de DIU", price: 150, category: "procedimiento", aliases: ["poner diu", "colocacion diu", "diu"] },
-  { name: "Retiro de DIU", price: 100, category: "procedimiento", aliases: ["sacar diu", "sacar el diu", "quitar diu", "quitar el diu", "retirar el diu"] },
+  { name: "Colocación de DIU", price: 170, category: "procedimiento", aliases: ["poner diu", "colocacion diu", "diu"] },
+  { name: "Retiro de DIU", price: 120, category: "procedimiento", aliases: ["sacar diu", "sacar el diu", "quitar diu", "quitar el diu", "retirar el diu"] },
   // 480 Bs confirmado por el cliente el 2026-09-15 (terminó la campaña de 400).
   // Los alias NO incluyen genéricos ("anticonceptivo", "planificación
   // familiar"): engancharían preguntas sobre pastillas o inyectables, que la
   // clínica no ofrece, y abrirían una solicitud por nada.
   { name: "Colocación de implante subdérmico", price: 480, category: "procedimiento", aliases: ["poner implante", "implante anticonceptivo", "implante subdermico", "implante hormonal", "subdermico", "implante"] },
-  { name: "Retiro de implante subdérmico", price: 100, category: "procedimiento", aliases: ["sacar implante", "sacar el implante", "quitar implante", "quitar el implante", "retirar el implante"] },
+  { name: "Retiro de implante subdérmico", price: 120, category: "procedimiento", aliases: ["sacar implante", "sacar el implante", "quitar implante", "quitar el implante", "retirar el implante"] },
   { name: "Cirugía menor", price: 300, category: "procedimiento", aliases: ["cirugia pequeña", "operacion menor"] },
   { name: "Cirugía mediana", price: 600, category: "procedimiento", aliases: ["operacion mediana"] },
   { name: "Cirugía mayor", price: 800, category: "procedimiento", aliases: ["operacion mayor", "cirugia grande"] },
+  // Hasta el 2026-10-11 no tenían precio y se derivaban al asesor (por eso
+  // siguen en OFF_CATALOG_TERMS: acá ganan porque matchService va primero).
+  // "rx" entra como palabra completa: containsTerm lo exige en los alias cortos.
+  { name: "Rayos X con placa", price: 230, category: "procedimiento", note: "lunes a viernes", aliases: ["rayos x", "rayosx", "radiografia", "radiografias", "placa radiografica", "placas radiograficas", "placa de rayos", "rx"] },
+  { name: "Rayos X con placa fin de semana", price: 280, category: "procedimiento", note: "sábado, domingo, feriado o de emergencia", aliases: ["rayos x de emergencia", "radiografia de emergencia"] },
+  { name: "Sesión de fisioterapia", price: 170, category: "procedimiento", aliases: ["sesion de fisioterapia", "fisioterapia", "fisioterapeuta"] },
 
   // ── Ecografías ──────────────────────────────────────────────────────────
-  { name: "Ecografía abdominal", price: 100, category: "ecografia", aliases: ["eco abdominal", "ecografia de abdomen", "eco de abdomen"] },
-  { name: "Ecografía renal", price: 120, category: "ecografia", aliases: ["eco renal", "ecografia de riñon", "ecografia de riñones"] },
+  { name: "Ecografía abdominal", price: 120, category: "ecografia", aliases: ["eco abdominal", "ecografia de abdomen", "eco de abdomen"] },
+  { name: "Ecografía renal", price: 140, category: "ecografia", aliases: ["eco renal", "ecografia de riñon", "ecografia de riñones"] },
   { name: "Ecografía mamaria", price: 150, category: "ecografia", aliases: ["eco mamaria", "ecografia de mama", "ecografia de mamas", "ecografia de senos"] },
-  { name: "Ecografía de partes blandas", price: 150, category: "ecografia", aliases: ["eco partes blandas"] },
-  { name: "Ecografía prostática", price: 150, category: "ecografia", aliases: ["eco prostatica", "ecografia de prostata"] },
-  { name: "Ecografía abdominal de emergencia", price: 200, category: "ecografia", aliases: ["eco abdominal de emergencia"] },
-  { name: "Ecografía obstétrica", price: 100, category: "ecografia", aliases: ["eco obstetrica", "ecografia de embarazo", "eco de embarazo", "eco del bebe"] },
-  { name: "Ecografía ginecológica", price: 100, category: "ecografia", aliases: ["eco ginecologica"] },
-  { name: "Ecografía transvaginal", price: 150, category: "ecografia", aliases: ["eco transvaginal", "transvaginal"] },
-  { name: "Ecografía transvaginal, ginecológica u obstétrica de emergencia", price: 200, category: "ecografia", aliases: ["eco de emergencia", "ecografia de emergencia"] },
+  { name: "Ecografía de partes blandas", price: 170, category: "ecografia", aliases: ["eco partes blandas"] },
+  { name: "Ecografía axilar", price: 150, category: "ecografia", aliases: ["eco axilar", "ecografia de axila", "ecografia de axilas", "eco de axila"] },
+  { name: "Ecografía de tiroides", price: 150, category: "ecografia", aliases: ["eco de tiroides", "ecografia tiroidea", "eco tiroidea", "ecografia de la tiroides"] },
+  { name: "Ecografía prostática", price: 170, category: "ecografia", aliases: ["eco prostatica", "ecografia de prostata"] },
+  { name: "Ecografía abdominal de emergencia", price: 250, category: "ecografia", aliases: ["eco abdominal de emergencia"] },
+  { name: "Ecografía obstétrica", price: 120, category: "ecografia", aliases: ["eco obstetrica", "ecografia de embarazo", "eco de embarazo", "eco del bebe"] },
+  { name: "Ecografía ginecológica", price: 120, category: "ecografia", aliases: ["eco ginecologica"] },
+  { name: "Ecografía transvaginal", price: 170, category: "ecografia", aliases: ["eco transvaginal", "transvaginal"] },
+  { name: "Ecografía transvaginal, ginecológica u obstétrica de emergencia", price: 250, category: "ecografia", aliases: ["eco de emergencia", "ecografia de emergencia"] },
 
   // ── Enfermería ──────────────────────────────────────────────────────────
-  { name: "Absceso pequeño", price: 80, category: "enfermeria", aliases: ["drenaje de absceso pequeño", "abceso pequeño"] },
-  { name: "Absceso mediano", price: 100, category: "enfermeria", aliases: ["abceso mediano"] },
-  { name: "Absceso grande", price: 120, category: "enfermeria", aliases: ["abceso grande"] },
+  // Abscesos y curaciones: el tarifario los cobra distinto según quién atiende,
+  // así que van como dos ítems, igual que las suturas. Quien no aclara cae en
+  // el de médico (el más alto, para no cotizar de menos) y la nota le cuenta el
+  // de enfermería.
+  { name: "Absceso pequeño (enfermería)", price: 25, category: "enfermeria", aliases: ["absceso pequeño enfermeria", "abceso pequeño enfermeria", "absceso pequeño con enfermera", "abceso pequeño con enfermera"] },
+  { name: "Absceso pequeño (médico)", price: 50, category: "enfermeria", note: "con enfermería, 25 Bs", aliases: ["absceso pequeño", "abceso pequeño", "drenaje de absceso pequeño"] },
+  { name: "Absceso mediano (enfermería)", price: 40, category: "enfermeria", aliases: ["absceso mediano enfermeria", "abceso mediano enfermeria", "absceso mediano con enfermera", "abceso mediano con enfermera"] },
+  { name: "Absceso mediano (médico)", price: 70, category: "enfermeria", note: "con enfermería, 40 Bs", aliases: ["absceso mediano", "abceso mediano"] },
+  { name: "Absceso grande (enfermería)", price: 70, category: "enfermeria", aliases: ["absceso grande enfermeria", "abceso grande enfermeria", "absceso grande con enfermera", "abceso grande con enfermera"] },
+  { name: "Absceso grande (médico)", price: 140, category: "enfermeria", note: "con enfermería, 70 Bs", aliases: ["absceso grande", "abceso grande"] },
   // "encarnad" y "uñero" no se confunden con nada; "uña" sin la ñ es "una", que
   // aparece en cualquier frase, así que esa forma NO se acepta (ver needleForms).
-  { name: "Retiro de uña", price: 80, category: "enfermeria", note: "lunes a viernes", aliases: ["sacar uña", "sacar la uña", "sacar las uñas", "quitar la uña", "uña encarnada", "retiro de uña encarnada", "encarnad", "uñero"] },
-  { name: "Retiro de uña fin de semana", price: 100, category: "enfermeria", note: "sábado y domingo", aliases: ["retiro de uña sabado", "retiro de uña domingo"] },
-  { name: "Extracción de cuerpo extraño pequeño", price: 80, category: "enfermeria", aliases: ["cuerpo extraño pequeño", "sacar cuerpo extraño"] },
-  { name: "Extracción de cuerpo extraño grande", price: 150, category: "enfermeria", aliases: ["cuerpo extraño grande"] },
-  { name: "Curación pequeña", price: 60, category: "enfermeria", aliases: ["curacion pequeña", "curacion chica"] },
-  { name: "Curación mediana", price: 80, category: "enfermeria", aliases: ["curacion mediana"] },
-  { name: "Curación grande", price: 100, category: "enfermeria", aliases: ["curacion grande"] },
+  { name: "Retiro de uña", price: 80, category: "enfermeria", note: "lunes a viernes; con médico, 90 Bs", aliases: ["sacar uña", "sacar la uña", "sacar las uñas", "quitar la uña", "uña encarnada", "retiro de uña encarnada", "encarnad", "uñero"] },
+  { name: "Retiro de uña fin de semana", price: 120, category: "enfermeria", note: "sábado y domingo", aliases: ["retiro de uña sabado", "retiro de uña domingo"] },
+  { name: "Extracción de cuerpo extraño pequeño", price: 90, category: "enfermeria", aliases: ["cuerpo extraño pequeño", "sacar cuerpo extraño"] },
+  { name: "Extracción de cuerpo extraño grande", price: 120, category: "enfermeria", aliases: ["cuerpo extraño grande"] },
+  { name: "Curación pequeña (enfermería)", price: 35, category: "enfermeria", aliases: ["curacion pequeña enfermeria", "curacion chica enfermeria", "curacion pequeña con enfermera"] },
+  { name: "Curación pequeña (médico)", price: 70, category: "enfermeria", note: "con enfermería, 35 Bs", aliases: ["curacion pequeña", "curacion chica"] },
+  { name: "Curación mediana (enfermería)", price: 50, category: "enfermeria", aliases: ["curacion mediana enfermeria", "curacion mediana con enfermera"] },
+  { name: "Curación mediana (médico)", price: 120, category: "enfermeria", note: "con enfermería, 50 Bs", aliases: ["curacion mediana"] },
+  { name: "Curación grande (enfermería)", price: 70, category: "enfermeria", aliases: ["curacion grande enfermeria", "curacion grande con enfermera"] },
+  { name: "Curación grande (médico)", price: 170, category: "enfermeria", note: "con enfermería, 70 Bs", aliases: ["curacion grande"] },
   { name: "Sutura por punto (enfermería)", price: 15, category: "enfermeria", aliases: ["punto de sutura enfermeria", "sutura enfermeria"] },
-  { name: "Sutura por punto (médico)", price: 20, category: "enfermeria", aliases: ["punto de sutura medico", "sutura medico", "sutura", "suturar"] },
-  { name: "Lavado de oído", price: 80, category: "enfermeria", note: "lunes a viernes", aliases: ["lavado de oido", "limpieza de oido", "destapar oido", "destapar el oido", "lavar el oido", "lavar oido"] },
-  { name: "Lavado de oído fin de semana", price: 100, category: "enfermeria", note: "sábado y domingo", aliases: ["lavado de oido sabado", "lavado de oido domingo"] },
+  { name: "Sutura por punto (médico)", price: 25, category: "enfermeria", aliases: ["punto de sutura medico", "sutura medico", "sutura", "suturar"] },
+  { name: "Lavado de oído", price: 100, category: "enfermeria", note: "lunes a viernes", aliases: ["lavado de oido", "limpieza de oido", "destapar oido", "destapar el oido", "lavar el oido", "lavar oido"] },
+  { name: "Lavado de oído fin de semana", price: 120, category: "enfermeria", note: "sábado y domingo", aliases: ["lavado de oido sabado", "lavado de oido domingo"] },
   // Precio que dio la clínica por WhatsApp el 2026-10-03: 2 Bs por minuto. El
   // precio del ítem es el de una sesión de 10 minutos. "nebuliz"/"nebulis"
   // atrapan nebulización, nebulizar, nebulizaciones y la forma con s.
   { name: "Nebulización", price: 20, category: "enfermeria", note: "10 minutos; 2 Bs por minuto", aliases: ["nebuliz", "nebulis"] },
   // Los alias con artículo ("sacar los puntos") están a propósito: normalize()
   // unifica el verbo pero no borra artículos.
-  { name: "Retiro de puntos (1 a 10 puntos)", price: 25, category: "enfermeria", aliases: ["sacar puntos", "sacar los puntos", "retiro de puntos", "quitar puntos", "quitar los puntos"] },
-  { name: "Retiro de puntos (10 a 30 puntos)", price: 40, category: "enfermeria", aliases: ["retiro de muchos puntos"] },
+  { name: "Retiro de puntos (1 a 10 puntos)", price: 30, category: "enfermeria", aliases: ["sacar puntos", "sacar los puntos", "retiro de puntos", "quitar puntos", "quitar los puntos"] },
+  { name: "Retiro de puntos (10 a 30 puntos)", price: 50, category: "enfermeria", aliases: ["retiro de muchos puntos"] },
+  { name: "Retiro de puntos (más de 30 puntos)", price: 60, category: "enfermeria", aliases: ["retiro de mas de 30 puntos", "sacar mas de 30 puntos"] },
+  // Inyectables: se cobra la APLICACIÓN, y el tarifario la cobra por horario
+  // (va en la nota). Los alias son solo de aplicar: "inyectable" o "inyección"
+  // sueltos engancharían "¿tienen inyectable anticonceptivo?", que la clínica
+  // no ofrece, o una pregunta de farmacia.
+  { name: "Inyectable intramuscular", price: 15, category: "enfermeria", note: "aplicación, de 7:00 a 18:00; de 18:00 a 23:00, 10 Bs; noche, domingo y feriado, 20 Bs", aliases: ["inyeccion intramuscular", "intramuscular", "poner inyeccion", "poner una inyeccion", "poner inyectable", "poner un inyectable", "colocar inyeccion", "colocar una inyeccion", "colocar inyectable", "colocar un inyectable", "aplicar inyeccion", "aplicar una inyeccion", "aplicar inyectable", "aplicar un inyectable", "aplicacion de inyeccion", "aplicacion de inyectable"] },
+  { name: "Inyectable endovenoso", price: 12, category: "enfermeria", note: "aplicación, de 7:00 a 18:00; de 18:00 a 23:00, 15 Bs; noche, domingo y feriado, 25 Bs", aliases: ["inyeccion endovenosa", "endovenoso", "endovenosa", "inyeccion intravenosa", "inyectable intravenoso", "intravenosa", "intravenoso"] },
+  { name: "Inyectable subcutáneo", price: 15, category: "enfermeria", note: "aplicación; de noche (19:00 a 7:00), 20 Bs", aliases: ["inyeccion subcutanea", "subcutaneo", "subcutanea"] },
+  { name: "Control de presión", price: 10, category: "enfermeria", aliases: ["control de presion", "control de la presion", "controlar la presion", "controlen la presion", "tomar la presion", "tomarme la presion", "tomen la presion", "tome la presion", "medir la presion", "medirme la presion", "midan la presion", "mida la presion", "toma de presion"] },
+  // "suero" suelto no va: "¿tienen suero oral?" es de farmacia.
+  { name: "Venoclisis", price: 50, priceMax: 70, category: "enfermeria", note: "ambulatoria 50 Bs, simple 70 Bs", aliases: ["venoclisis", "poner suero", "poner un suero", "poner el suero", "colocar suero", "colocar un suero", "colocar el suero"] },
+  { name: "Retiro de sonda vesical", price: 90, category: "enfermeria", aliases: ["retiro de sonda", "sacar sonda", "sacar la sonda", "quitar sonda", "quitar la sonda", "retirar sonda", "retirar la sonda"] },
+  { name: "Retiro de yeso", price: 250, category: "enfermeria", aliases: ["sacar yeso", "sacar el yeso", "quitar yeso", "quitar el yeso", "retirar yeso", "retirar el yeso"] },
 
   // ── Certificados ────────────────────────────────────────────────────────
-  { name: "Certificado médico", price: 150, category: "certificado", aliases: ["certificado medico", "certificado"] },
+  { name: "Certificado médico", price: 170, category: "certificado", aliases: ["certificado medico", "certificado"] },
   { name: "Certificado de seguro médico", price: 50, priceMax: 120, category: "certificado", aliases: ["seguro medico", "certificado de seguro"] },
 
   // ── Partos y cesáreas ───────────────────────────────────────────────────
@@ -392,7 +426,7 @@ const FORMAS_VERBALES: [RegExp, string][] = [
   [/\bquit\w+/g, "quitar"],
   [/\bretir\w+/g, "retirar"],
   [/\bpong\w+|\bponer\w*|\bponme\b/g, "poner"],
-  [/\bcoloc\w+/g, "colocar"],
+  [/\bcoloc\w+|\bcoloqu\w+/g, "colocar"],
   [/\bhag\w+|\bhacer\w*|\bhaganme\b/g, "hacer"],
   [/\bdestap\w+/g, "destapar"],
   [/\blav\w+/g, "lavar"],

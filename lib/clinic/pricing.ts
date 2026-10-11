@@ -6,8 +6,9 @@
 // eso el precio es por ESPECIALIDAD y no por médico (clinic_doctor_price_rules
 // queda solo para el flujo de agenda anterior).
 //
-// Fuente: tarifario del sistema de la clínica (CSMDP-RptServicio.xls) aplicado
-// sobre las franjas que confirmó el cliente el 2026-09-15:
+// Fuente: tarifario del sistema de la clínica (CSMDP-RptServicio.xls, versión
+// del 2026-10-11) aplicado sobre las franjas que confirmó el cliente el
+// 2026-09-15:
 //   - En la hora de corte rige la tarifa de DESPUÉS (a las 19:00 ya es noche).
 //   - La noche va de 19:00 a 07:00: de 00:00 a 07:00 se cobra la tarifa
 //     nocturna del día anterior.
@@ -83,39 +84,41 @@ export const CONSULTATION_SPECIALTIES: ConsultationSpecialty[] = [
     aliases: ["pediatra", "pediatr", "medico de niños", "doctor de niños", "para mi bebe", "para mi niño", "para mi niña"],
   },
   // Desde las 18:00, el fin de semana y en feriado el ginecólogo no está de
-  // turno: se lo llama como emergencia, 200 Bs (confirmado por la clínica el
-  // 2026-09-21; antes el bot cobraba 120 el fin de semana y 80 de noche).
+  // turno: se lo llama como emergencia (confirmado por la clínica el 2026-09-21;
+  // antes el bot cobraba 120 el fin de semana y 80 de noche). Es el monto de la
+  // consulta ginecológica de emergencia: 250 Bs desde el tarifario del
+  // 2026-10-11 (antes 200).
   {
     key: "ginecologia",
     name: "Ginecología",
     price: 80,
     rules: [
       { weekdays: MON_FRI, from: "07:00", to: "18:00", price: 80 },
-      { weekdays: MON_FRI, from: "18:00", to: "24:00", price: 200 },
-      { weekdays: [0, 6], from: "07:00", to: "24:00", price: 200 },
+      { weekdays: MON_FRI, from: "18:00", to: "24:00", price: 250 },
+      { weekdays: [0, 6], from: "07:00", to: "24:00", price: 250 },
     ],
-    scheduleNote: "80 Bs de lunes a viernes de 7:00 a 18:00; desde las 18:00, sábado, domingo y feriados 200 Bs (a llamado, como emergencia)",
+    scheduleNote: "80 Bs de lunes a viernes de 7:00 a 18:00; desde las 18:00, sábado, domingo y feriados 250 Bs (a llamado, como emergencia)",
     reconsultaDays: 7,
     aliases: ["ginecologo", "ginecologa", "ginecolog", "gineco", "obstetra", "obstetricia"],
   },
   // Especialidades con precio en el tarifario de la clínica: precio único.
   // Cardiología: 170 Bs desde el 2026-10-08 (antes 150, pedido de la clínica).
   { key: "cardiologia", name: "Cardiología", price: 170, aliases: ["cardiologo", "cardiologa", "cardiolog", "del corazon"] },
-  { key: "cirugia-general", name: "Cirugía General", price: 150, aliases: ["cirujano", "cirujano general", "cirugia"] },
+  { key: "cirugia-general", name: "Cirugía General", price: 170, aliases: ["cirujano", "cirujano general", "cirugia"] },
   { key: "cirugia-pediatrica", name: "Cirugía Pediátrica", price: 150, aliases: ["cirujano pediatra", "cirugia de niños"] },
-  { key: "cirugia-plastica", name: "Cirugía Plástica", price: 350, aliases: ["cirujano plastico", "cirugia estetica"] },
-  { key: "coloproctologia", name: "Coloproctología", price: 150, aliases: ["coloproctologo", "proctologo", "proctologia"] },
-  { key: "diabetologia", name: "Diabetología", price: 200, aliases: ["diabetologo", "diabetes", "para la diabetes"] },
-  { key: "endocrinologia", name: "Endocrinología", price: 250, aliases: ["endocrinologo", "endocrinologa", "endocrinolog", "tiroides"] },
-  { key: "gastroenterologia", name: "Gastroenterología", price: 170, aliases: ["gastroenterologo", "gastro", "gastroenterolog"] },
-  { key: "medicina-interna", name: "Medicina Interna", price: 370, aliases: ["internista", "medico internista"] },
-  { key: "nefrologia", name: "Nefrología", price: 350, aliases: ["nefrologo", "nefrolog", "del riñon", "de los riñones"] },
-  { key: "neumologia", name: "Neumología", price: 350, aliases: ["neumologo", "neumolog", "del pulmon", "de los pulmones"] },
-  { key: "neurologia", name: "Neurología", price: 320, aliases: ["neurologo", "neurologa", "neurolog"] },
-  { key: "psicologia", name: "Psicología", price: 250, aliases: ["psicologo", "psicologa", "psicolog", "terapia psicologica"] },
-  { key: "reumatologia", name: "Reumatología", price: 200, aliases: ["reumatologo", "reumatolog", "reuma"] },
-  { key: "traumatologia", name: "Traumatología", price: 250, aliases: ["traumatologo", "traumatolog", "traumato", "ortopedia", "ortopedista", "de huesos"] },
-  { key: "urologia", name: "Urología", price: 150, aliases: ["urologo", "urolog", "urologa"] },
+  { key: "cirugia-plastica", name: "Cirugía Plástica", price: 400, aliases: ["cirujano plastico", "cirugia estetica"] },
+  { key: "coloproctologia", name: "Coloproctología", price: 170, aliases: ["coloproctologo", "proctologo", "proctologia"] },
+  { key: "diabetologia", name: "Diabetología", price: 290, aliases: ["diabetologo", "diabetes", "para la diabetes"] },
+  { key: "endocrinologia", name: "Endocrinología", price: 290, aliases: ["endocrinologo", "endocrinologa", "endocrinolog", "tiroides"] },
+  { key: "gastroenterologia", name: "Gastroenterología", price: 190, aliases: ["gastroenterologo", "gastro", "gastroenterolog"] },
+  { key: "medicina-interna", name: "Medicina Interna", price: 400, aliases: ["internista", "medico internista"] },
+  { key: "nefrologia", name: "Nefrología", price: 400, aliases: ["nefrologo", "nefrolog", "del riñon", "de los riñones"] },
+  { key: "neumologia", name: "Neumología", price: 400, aliases: ["neumologo", "neumolog", "del pulmon", "de los pulmones"] },
+  { key: "neurologia", name: "Neurología", price: 370, aliases: ["neurologo", "neurologa", "neurolog"] },
+  { key: "psicologia", name: "Psicología", price: 290, aliases: ["psicologo", "psicologa", "psicolog", "terapia psicologica"] },
+  { key: "reumatologia", name: "Reumatología", price: 230, aliases: ["reumatologo", "reumatolog", "reuma"] },
+  { key: "traumatologia", name: "Traumatología", price: 270, aliases: ["traumatologo", "traumatolog", "traumato", "ortopedia", "ortopedista", "de huesos"] },
+  { key: "urologia", name: "Urología", price: 180, aliases: ["urologo", "urolog", "urologa"] },
 ];
 
 const DAY_NAMES = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];

@@ -119,6 +119,20 @@ for (const [frase, esperaEmergencia] of [
   ["La nebulización cuánto está???", false],
   ["cuanto cuesta nebulizar a mi bebe", false],
   ["hacen nebulisaciones?", false],
+  // Tarifario del 2026-10-11: abscesos y curaciones por quién atiende, y los
+  // servicios que hasta entonces no tenían precio.
+  ["tengo un abceso grande", false],
+  ["curacion pequeña con enfermera cuanto es", false],
+  ["radiografia de pie cuanto sale", false],
+  ["necesitan orden para los rayos x?", false],
+  ["rx de torax", false],
+  ["cuanto cuesta la fisioterapia", false],
+  ["eco de tiroides", false],
+  ["me pueden poner una inyeccion", false],
+  ["quiero que me coloquen un inyectable", false],
+  ["quiero que me tomen la presion", false],
+  ["me pueden poner un suero", false],
+  ["quiero sacarme el yeso", false],
   ["tengo la una encarnada", false],
   [`me quiero sacar la u${"n\u0303"}a del pie`, false],
   ["cuanto cuesta la sala privada", false],
@@ -147,6 +161,13 @@ for (const frase of [
   "me puede sacar una cita para mañana",
   "quiero retirar de una vez mis resultados",
   "le comparto la dirección",
+  // Los alias de inyectables, presión, suero y yeso son solo de APLICAR o
+  // RETIRAR: lo demás es farmacia, un síntoma o un comentario.
+  "tienen inyectable anticonceptivo?",
+  "tengo la presion alta",
+  "tienen suero oral?",
+  "me pusieron yeso ayer",
+  "tengo problemas de tiroides",
   "vivo en un departamento",
 ]) {
   const s = matchService(frase, clinic.services);
@@ -217,12 +238,12 @@ for (const [etiqueta, spec, dia, hora, esperado] of [
   // emergencia (2026-09-21).
   ["Ginecología viernes 10:00", gin, 5, "10:00", 80],
   ["Ginecología viernes 17:59", gin, 5, "17:59", 80],
-  ["Ginecología viernes 18:00", gin, 5, "18:00", 200],
-  ["Ginecología jueves 21:00", gin, 4, "21:00", 200],
-  ["Ginecología martes 03:00", gin, 2, "03:00", 200],
-  ["Ginecología sábado 09:00", gin, 6, "09:00", 200],
-  ["Ginecología domingo 15:00", gin, 0, "15:00", 200],
-  ["Ginecología lunes 03:00", gin, 1, "03:00", 200],
+  ["Ginecología viernes 18:00", gin, 5, "18:00", 250],
+  ["Ginecología jueves 21:00", gin, 4, "21:00", 250],
+  ["Ginecología martes 03:00", gin, 2, "03:00", 250],
+  ["Ginecología sábado 09:00", gin, 6, "09:00", 250],
+  ["Ginecología domingo 15:00", gin, 0, "15:00", 250],
+  ["Ginecología lunes 03:00", gin, 1, "03:00", 250],
 ] as const) {
   const precio = priceAt(spec, dia, hora);
   chequear(etiqueta, precio === esperado, `${precio} Bs (esperado ${esperado})`);

@@ -9,7 +9,7 @@
 //   3. el mensaje de apertura dice lo que la clínica pidió y no se veta;
 //   4. el PAP se reconoce como lo escribe la gente, y lo que NO es el PAP
 //      (VPH, colposcopía, "cáncer de cuello uterino") no se le parece;
-//   5. ginecología cobra 200 en fin de semana y en feriado;
+//   5. ginecología cobra 250 en fin de semana y en feriado;
 //   6. un feriado se cobra con la tarifa de domingo (consultas y servicios).
 //
 //   npx tsx scripts/check-campanas.ts
@@ -43,7 +43,7 @@ const HOY = "2026-09-21"; // lunes, primer día de la campaña en Facebook
 // ─── 1. Precio según el día y la hora ────────────────────────────────────────
 console.log("\nPRECIO DEL PAP SEGÚN DÍA Y HORA\n");
 
-const PROMO = "50 Bs (promoción 50% de descuento, regular 100 Bs)";
+const PROMO = "50 Bs (promoción 50% de descuento, regular 120 Bs)";
 const CASOS: [string, Parameters<typeof quoteService>[1], (q: string) => boolean][] = [
   ["martes 09:00 → promo", { today: HOY, date: "2026-09-22", hour: "09:00" }, (q) => q === PROMO],
   ["martes 08:00 (abre) → promo", { today: HOY, date: "2026-09-22", hour: "08:00" }, (q) => q === PROMO],
@@ -64,7 +64,7 @@ const CASOS: [string, Parameters<typeof quoteService>[1], (q: string) => boolean
   ["a llamado incluye toma y análisis", { today: HOY, date: "2026-09-26", hour: "10:00" }, (q) => q.includes("incluye la toma y el análisis")],
   ["pide al Dr. Irusta → promo", { today: HOY, date: "2026-09-22", hour: "09:00", doctorPreference: "Dr. Eric Irusta" }, (q) => q === PROMO],
   ["30/09 09:00 (último día) → promo", { today: HOY, date: "2026-09-30", hour: "09:00" }, (q) => q === PROMO],
-  ["1/10 09:00 (la pidió en septiembre) → regular", { today: HOY, date: "2026-10-01", hour: "09:00" }, (q) => q === "100 Bs"],
+  ["1/10 09:00 (la pidió en septiembre) → regular", { today: HOY, date: "2026-10-01", hour: "09:00" }, (q) => q === "120 Bs"],
 ];
 
 for (const [nombre, input, ok] of CASOS) {
@@ -78,8 +78,8 @@ console.log("\nLA PROMO VENCE SOLA\n");
 check("rige el 30/09", activePromo(pap, "2026-09-30") !== null);
 check("no rige el 1/10", activePromo(pap, "2026-10-01") === null);
 check("tarifario del 30/09 cotiza 50", formatServicePrice(pap, "2026-09-30") === PROMO, formatServicePrice(pap, "2026-09-30"));
-check("tarifario del 1/10 vuelve a 100", formatServicePrice(pap, "2026-10-01") === "100 Bs", formatServicePrice(pap, "2026-10-01"));
-check("hoy (1/10) sin día pedido → regular", quoteService(pap, { today: "2026-10-01" }) === "100 Bs");
+check("tarifario del 1/10 vuelve a 120", formatServicePrice(pap, "2026-10-01") === "120 Bs", formatServicePrice(pap, "2026-10-01"));
+check("hoy (1/10) sin día pedido → regular", quoteService(pap, { today: "2026-10-01" }) === "120 Bs");
 check("bloque de campañas presente en septiembre", buildCampaignsBlock(defaultServices, HOY).includes("Papanicolaou"));
 check("bloque de campañas vacío en octubre", buildCampaignsBlock(defaultServices, "2026-10-01") === "");
 check("mención en la ficha de ginecología", promoMentions(defaultServices, "ginecologia", HOY).length === 1);
@@ -91,7 +91,7 @@ console.log("\nMENSAJE DE APERTURA\n");
 
 const intro = promoIntro(pap, pap.promo!);
 for (const [nombre, patron] of [
-  ["precio de promo y regular", /50 Bs\*? \(precio regular 100 Bs\)/],
+  ["precio de promo y regular", /50 Bs\*? \(precio regular 120 Bs\)/],
   ["fecha de fin", /hasta el 30\/09/],
   ["franja", /8:00 a 12:00 y de 14:00 a 18:00/],
   ["solo lunes a viernes, sin feriados", /no aplica s[aá]bados, domingos ni feriados/],
@@ -191,13 +191,13 @@ console.log("\nCONSULTA DE GINECOLOGÍA\n");
 
 const gin = findSpecialty("ginecologia")!;
 const feriado = quoteConsultation({ spec: gin, date: HOY, hour: "10:00", holidays: [HOY] });
-check("feriado marcado → 200 a llamado", feriado.kind === "exact" && feriado.price === 200, feriado.text);
+check("feriado marcado → 250 a llamado", feriado.kind === "exact" && feriado.price === 250, feriado.text);
 const sabado = quoteConsultation({ spec: gin, date: "2026-09-26", hour: "10:00" });
-check("sábado 10:00 → 200", sabado.price === 200, sabado.text);
+check("sábado 10:00 → 250", sabado.price === 250, sabado.text);
 const martes = quoteConsultation({ spec: gin, date: "2026-09-22", hour: "10:00" });
 check("martes 10:00 → 80", martes.price === 80, martes.text);
 const martesNoche = quoteConsultation({ spec: gin, date: "2026-09-22", hour: "18:30" });
-check("martes 18:30 → 200 (a llamado)", martesNoche.price === 200, martesNoche.text);
+check("martes 18:30 → 250 (a llamado)", martesNoche.price === 250, martesNoche.text);
 
 // ─── 7. Feriado = tarifa de domingo ──────────────────────────────────────────
 console.log("\nFERIADO CON TARIFA DE DOMINGO\n");
@@ -216,8 +216,8 @@ const diaFeriado = quoteConsultation({ spec: ped, date: HOY, holidays: [HOY] });
 check("solo el día, feriado → tramos de domingo", diaFeriado.kind === "day" && diaFeriado.text.includes("120 Bs") && diaFeriado.text.includes("feriado"), diaFeriado.text);
 
 const unaLv = defaultServices.find((s) => s.name === "Retiro de uña")!;
-check("retiro de uña un sábado → fin de semana", serviceForDay(unaLv, defaultServices, "2026-09-26").price === 100);
-check("retiro de uña un lunes feriado → fin de semana", serviceForDay(unaLv, defaultServices, HOY, [HOY]).price === 100);
+check("retiro de uña un sábado → fin de semana", serviceForDay(unaLv, defaultServices, "2026-09-26").price === 120);
+check("retiro de uña un lunes feriado → fin de semana", serviceForDay(unaLv, defaultServices, HOY, [HOY]).price === 120);
 check("retiro de uña un lunes normal → lunes a viernes", serviceForDay(unaLv, defaultServices, HOY).price === 80);
 const unaFinde = defaultServices.find((s) => s.name === "Retiro de uña fin de semana")!;
 check("pidió la de fin de semana para un martes → lunes a viernes", serviceForDay(unaFinde, defaultServices, "2026-09-22").price === 80);

@@ -313,8 +313,16 @@ const CASES: Case[] = [
     expect: { type: "qa" },
   },
   {
-    name: "precio de una inyección → no se confunde con dosis",
+    // Desde el tarifario del 2026-10-11 la aplicación de inyectables tiene
+    // precio: se cotiza como servicio (y sigue sin confundirse con una dosis).
+    name: "precio de una inyección → no se confunde con dosis, se cotiza",
     text: "¿Cuánto cuesta poner una inyección?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "startLead", kind: "servicio" },
+  },
+  {
+    name: "inyectable anticonceptivo → no se cotiza como aplicación",
+    text: "tienen inyectable anticonceptivo?",
     analysis: analysis({ isQuestion: true }),
     expect: { type: "qa" },
   },
@@ -396,26 +404,46 @@ const CASES: Case[] = [
   },
   {
     name: "pide no catalogado sin wantsLead del modelo, pero no pregunta → recopila",
-    text: "para fisioterapia",
-    analysis: analysis({ unavailableRequest: "fisioterapia", isQuestion: false, wantsLead: false }),
+    text: "para odontologia",
+    analysis: analysis({ unavailableRequest: "odontologia", isQuestion: false, wantsLead: false }),
     expect: { type: "startLead", kind: "no_disponible" },
   },
 
   // ── Caso real 2026-09-18: el analisis se cae y el mensaje no puede llegar
   // al Q&A libre, que es donde el bot se pone a opinar sobre disponibilidad.
-  // Sin analysis no hay criterio del modelo, pero "radiografia" no esta en
-  // ningun catalogo y eso se sabe comparando strings.
+  // Sin analysis no hay criterio del modelo, pero "tomografia" no esta en
+  // ningun catalogo y eso se sabe comparando strings. (El caso original fue
+  // con la radiografia, que desde el tarifario del 2026-10-11 tiene precio.)
   {
     name: "sin análisis (timeout) + examen no catalogado → toma el pedido, no Q&A",
-    text: "Por favor el precio de la Radiografía",
+    text: "Por favor el precio de la Tomografía",
     analysis: null,
     expect: { type: "offerLead", intent: "no_disponible" },
   },
   {
-    name: "sin análisis + rayos x → toma el pedido",
-    text: "necesitan orden para los rayos x?",
+    name: "sin análisis + electrocardiograma → toma el pedido",
+    text: "necesitan orden para el electrocardiograma?",
     analysis: null,
     expect: { type: "offerLead", intent: "no_disponible" },
+  },
+  // Rayos X y fisioterapia ya están en el tarifario: se cotizan.
+  {
+    name: "sin análisis + radiografía → ahora tiene precio, se cotiza",
+    text: "Por favor el precio de la Radiografía",
+    analysis: null,
+    expect: { type: "startLead", kind: "servicio" },
+  },
+  {
+    name: "rayos x → se cotiza",
+    text: "cuanto cuestan los rayos x?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "startLead", kind: "servicio" },
+  },
+  {
+    name: "fisioterapia → se cotiza",
+    text: "cuanto cuesta la fisioterapia?",
+    analysis: analysis({ isQuestion: true }),
+    expect: { type: "startLead", kind: "servicio" },
   },
   {
     name: "sin análisis + servicio DEL tarifario → gana el tarifario, se cotiza",
@@ -431,8 +459,8 @@ const CASES: Case[] = [
   },
   {
     name: "CON análisis manda el modelo: pregunta por no catalogado sigue siendo oferta",
-    text: "Por favor el precio de la Radiografía",
-    analysis: analysis({ unavailableRequest: "Radiografía", isQuestion: true }),
+    text: "Por favor el precio de la Tomografía",
+    analysis: analysis({ unavailableRequest: "Tomografía", isQuestion: true }),
     expect: { type: "offerLead", intent: "no_disponible" },
   },
 
@@ -1000,15 +1028,15 @@ for (const c of CASES) {
 
 console.log("\nPREGUNTAS DURANTE UNA SOLICITUD (respuesta determinista, sin repetir el formulario)\n");
 const knownPrice = answerKnownLeadQuestion(
-  { kind: "servicio", serviceName: "Ecografía transvaginal", serviceQuote: "150 Bs" },
+  { kind: "servicio", serviceName: "Ecografía transvaginal", serviceQuote: "170 Bs" },
   clinic,
   "Cuánto está su costo",
 );
-if (!knownPrice?.includes("150 Bs")) {
+if (!knownPrice?.includes("170 Bs")) {
   failures++;
   console.log(`  ✗ precio del catálogo: ${knownPrice ?? "sin respuesta"}`);
 } else {
-  console.log("  ✓ precio del catálogo: Ecografía transvaginal — 150 Bs");
+  console.log("  ✓ precio del catálogo: Ecografía transvaginal — 170 Bs");
 }
 
 const locationFollowup = analysisForLocationFollowup(analysis({
@@ -1230,9 +1258,9 @@ console.log("\n¿PREGUNTA NUEVA/RECONSULTA?\n");
 
 const VISIT: [string, LeadDraft, boolean][] = [
   ["electrocardiograma (no catalogado)", { kind: "no_disponible", unmatchedRequestText: "electrocardiograma" }, false],
-  ["radiografía (no catalogado)", { kind: "no_disponible", unmatchedRequestText: "radiografia de torax" }, false],
+  ["tomografía (no catalogado)", { kind: "no_disponible", unmatchedRequestText: "tomografia de torax" }, false],
   ["análisis de laboratorio suelto", { kind: "no_disponible", unmatchedRequestText: "analisis de sangre" }, false],
-  ["fisioterapia (no catalogado)", { kind: "no_disponible", unmatchedRequestText: "fisioterapia" }, false],
+  ["odontología (no catalogado)", { kind: "no_disponible", unmatchedRequestText: "odontologia" }, false],
   ["ficha sin especialidad todavía", { kind: "ficha" }, false],
   ["servicio del tarifario", { kind: "servicio", serviceName: "Ecografía abdominal" }, false],
   ["medicina general (reconsulta 7d)", { kind: "ficha", specialtyKey: "medicina-general" }, true],
